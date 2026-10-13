@@ -29,6 +29,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: retp
+      # `cargo fmt` loads the workspace, which names ../energyml-rust by path.
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -118,7 +124,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install fastavro
+      # Pinned: the fixtures are compared byte for byte with what this version writes.
+      - run: pip install fastavro==1.13.1
       - name: Regenerate the fixtures
         working-directory: retp/crates/retp-tests/tests/fixtures
         run: |

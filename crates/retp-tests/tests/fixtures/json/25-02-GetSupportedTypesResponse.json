@@ -1,1 +1,1 @@
-{"supportedTypes": [{"dataObjectType": "value-84855", "objectCount": {"int": 70829}, "relationshipKind": "Both"}]}
+{"supportedTypes": [{"dataObjectType": "value-70176", "objectCount": {"int": 76862}, "relationshipKind": "Secondary"}, {"dataObjectType": "value-84844", "objectCount": {"int": -25590}, "relationshipKind": "Secondary"}, {"dataObjectType": "value-28984", "objectCount": {"int": 77270}, "relationshipKind": "Both"}]}

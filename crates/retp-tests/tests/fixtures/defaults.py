@@ -18,7 +18,7 @@ the first symbol of an enumeration, zero bytes for a fixed, and a nested record
 at its own default. Only the second half -- the schema's declared values -- is
 the specification's.
 
-    pip install fastavro
+    pip install fastavro==1.13.1
     python crates/retp-tests/tests/fixtures/defaults.py
 """
 
@@ -29,16 +29,12 @@ import pathlib
 
 import fastavro
 
+import avsc
+from avsc import full_name
+
 HERE = pathlib.Path(__file__).parent / "defaults"
 # The schema root: $ETP_SCHEMAS if set, else where it lives today.
 SCHEMAS = pathlib.Path(os.environ.get("ETP_SCHEMAS") or pathlib.Path(__file__).parents[4] / "rc" / "etp-1.2")
-
-
-def full_name(schema: dict) -> str:
-    if "fullName" in schema:
-        return schema["fullName"]
-    namespace = schema.get("namespace")
-    return f"{namespace}.{schema['name']}" if namespace else schema["name"]
 
 
 class Defaults:
@@ -160,11 +156,13 @@ def main() -> None:
     for stale in HERE.glob("*.avro"):
         stale.unlink()
 
+    table = avsc.load(SCHEMAS)
     index = []
     for path in files:
         schema = json.loads(path.read_text(encoding="utf-8"))
         if schema.get("type") != "record":
             continue
+        schema = avsc.expand(schema, table)
         defaults = Defaults()
         defaults.scan(schema)
         value = defaults.record(schema)

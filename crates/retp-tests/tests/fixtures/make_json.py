@@ -8,7 +8,7 @@ which follows the Avro specification's "JSON Encoding": a union is `null` or
 `{"<branch>": value}` with the branch named by its type name or full name, and
 `bytes` / `fixed` are strings of code points 0-255.
 
-    pip install fastavro
+    pip install fastavro==1.13.1
     python crates/retp-tests/tests/fixtures/make_json.py
 
 The files are committed because the point of a fixture is that someone else's
@@ -21,6 +21,7 @@ import pathlib
 
 import fastavro
 
+import avsc
 import make
 
 HERE = pathlib.Path(__file__).parent / "json"
@@ -32,19 +33,21 @@ def main() -> None:
     if not files:
         raise SystemExit(f"no .avsc under {make.SCHEMAS}")
 
+    table = avsc.load(make.SCHEMAS)
     count = 0
     skipped = []
     for seed, path in enumerate(files, start=1):
         schema = json.loads(path.read_text(encoding="utf-8"))
         if "protocol" not in schema:
             continue
+        schema = avsc.expand(schema, table)
 
         if not schema["fields"]:
             # fastavro 1.12's json_writer raises "Internal Parser Exception" on a
             # record with no field. The Avro JSON of one is `{}`, and the Rust
             # test states that itself instead of reading a witness that does
             # not exist.
-            skipped.append(schema["fullName"])
+            skipped.append(avsc.full_name(schema))
             continue
 
         filler = make.Filler(seed * 7919)
@@ -63,7 +66,7 @@ def main() -> None:
         # matters.
         json.loads(text)
 
-        name = schema["fullName"].rsplit(".", 1)[1]
+        name = avsc.full_name(schema).rsplit(".", 1)[1]
         protocol = int(schema["protocol"])
         message_type = int(schema["messageType"])
         (HERE / f"{protocol:02d}-{message_type:02d}-{name}.json").write_text(

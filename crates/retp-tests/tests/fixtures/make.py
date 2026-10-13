@@ -8,7 +8,7 @@ The values are produced by walking the real `.avsc`, so every union branch, enum
 ordinal, array and map in the schema is exercised. They are deterministic: a
 counter drives every choice, so rerunning this produces the same bytes.
 
-    pip install fastavro
+    pip install fastavro==1.13.1
     python crates/retp-tests/tests/fixtures/make.py
 
 The `.avro` files are committed because the point of a fixture is that someone
@@ -23,6 +23,8 @@ import os
 import pathlib
 
 import fastavro
+
+import avsc
 
 HERE = pathlib.Path(__file__).parent
 # The schema root: $ETP_SCHEMAS if set, else where it lives today.
@@ -197,11 +199,13 @@ def main() -> None:
     if not files:
         raise SystemExit(f"no .avsc under {SCHEMAS}")
 
+    table = avsc.load(SCHEMAS)
     index = []
     for seed, path in enumerate(files, start=1):
         schema = json.loads(path.read_text(encoding="utf-8"))
         if "protocol" not in schema:
             continue
+        schema = avsc.expand(schema, table)
 
         filler = Filler(seed * 7919)
         filler.scan(schema)
@@ -219,7 +223,7 @@ def main() -> None:
             return_record_name=True,
             return_record_name_override=True,
         )
-        assert back is not None, f"{schema['fullName']}: fastavro read back nothing"
+        assert back is not None, f"{avsc.full_name(schema)}: fastavro read back nothing"
         # Every branch fastavro wrote must be one we asked for. Not the other
         # way round: fastavro only names a branch when its union holds more
         # than one record type, so `IndexValue.item` -- [null, long, double,
@@ -229,12 +233,12 @@ def main() -> None:
         wanted = collections.Counter(branches_of(value))
         for got in branches_of(back):
             assert wanted[got] > 0, (
-                f"{schema['fullName']}: fastavro wrote branch {got}, "
+                f"{avsc.full_name(schema)}: fastavro wrote branch {got}, "
                 f"which we never asked for (asked: {sorted(wanted)})"
             )
             wanted[got] -= 1
 
-        name = schema["fullName"].rsplit(".", 1)[1]
+        name = avsc.full_name(schema).rsplit(".", 1)[1]
         protocol = int(schema["protocol"])
         message_type = int(schema["messageType"])
         (HERE / f"{protocol:02d}-{message_type:02d}-{name}.avro").write_bytes(payload)
@@ -243,7 +247,7 @@ def main() -> None:
                 "protocol": protocol,
                 "messageType": message_type,
                 "name": name,
-                "fullName": schema["fullName"],
+                "fullName": avsc.full_name(schema),
                 "bytes": len(payload),
             }
         )

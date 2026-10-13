@@ -13,7 +13,7 @@ out as an `ArrayOfFloat` - same shape, half the precision, no warning. The
 `-type` tag is what pins the branch, and the check below is what proves the tag
 worked rather than assuming it.
 
-    pip install fastavro
+    pip install fastavro==1.13.1
     python crates/retp-tests/tests/fixtures/unions.py
 """
 
@@ -23,6 +23,8 @@ import os
 import pathlib
 
 import fastavro
+
+import avsc
 
 HERE = pathlib.Path(__file__).parent / "unions"
 # The schema root: $ETP_SCHEMAS if set, else where it lives today.
@@ -114,13 +116,14 @@ def tag(branch: str, value):
 
 def main() -> None:
     HERE.mkdir(parents=True, exist_ok=True)
+    table = avsc.load(SCHEMAS)
     index = []
     for union_name, schema_path, field, branches in CASES:
         # Found by name under the root, so the directory layout is not hard-coded.
         found = sorted(SCHEMAS.rglob(pathlib.PurePosixPath(schema_path).name))
         if len(found) != 1:
             raise SystemExit(f"{schema_path}: expected one match under {SCHEMAS}, found {len(found)}")
-        schema = json.loads(found[0].read_text("utf-8"))
+        schema = avsc.expand(json.loads(found[0].read_text("utf-8")), table)
         parsed = fastavro.parse_schema(schema)
 
         for want_index, (branch, value) in enumerate(branches):

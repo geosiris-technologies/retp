@@ -4,7 +4,12 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # proc-macro-error2 is unmaintained (no vulnerability). It is a build-time proc-macro dependency of
+    # hdf5-metno-derive (HDF5 bindings, behind the optional `hdf5` feature), which has no maintained
+    # alternative today. Review when hdf5-metno moves off it.
+    { id = "RUSTSEC-2026-0173", reason = "transitive, build-time only, via hdf5-metno-derive; no vulnerability" },
+]
 
 [licenses]
 version = 2

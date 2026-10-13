@@ -7,9 +7,11 @@ name: Release-plz
 # token is stored. The first publication of each crate is done by hand, then
 # trusted publishing is configured per crate (docs/releasing.md).
 #
-# The `release` job runs only once the repository variable RELEASE_PLZ_PUBLISH is
-# 'true' (leave it unset until every dependency is on crates.io: while the
-# workspace depends on ../energyml-rust by path, `cargo publish` cannot succeed).
+# Both jobs run only once the repository variable RELEASE_PLZ_PUBLISH is 'true'.
+# Leave it unset until every dependency is on crates.io: release-plz works on a
+# copy of this repository alone, where the sibling ../energyml-rust the workspace
+# depends on by path does not exist, so neither the release pull request nor
+# `cargo publish` can succeed before.
 
 on:
   push:
@@ -20,6 +22,7 @@ on:
 jobs:
   release-plz-pr:
     name: Release PR
+    if: vars.RELEASE_PLZ_PUBLISH == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

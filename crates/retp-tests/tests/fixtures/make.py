@@ -195,7 +195,7 @@ def branches_of(value, out=None):
 
 
 def main() -> None:
-    files = sorted(SCHEMAS.rglob("*.avsc"))
+    files = avsc.files(SCHEMAS)
     if not files:
         raise SystemExit(f"no .avsc under {SCHEMAS}")
 

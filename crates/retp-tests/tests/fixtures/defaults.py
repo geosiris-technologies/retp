@@ -149,7 +149,7 @@ class Defaults:
 
 
 def main() -> None:
-    files = sorted(SCHEMAS.rglob("*.avsc"))
+    files = avsc.files(SCHEMAS)
     if not files:
         raise SystemExit(f"no .avsc under {SCHEMAS}")
     HERE.mkdir(exist_ok=True)

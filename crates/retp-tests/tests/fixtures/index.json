@@ -424,14 +424,14 @@
     "messageType": 2,
     "name": "PartsChanged",
     "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsChanged",
-    "bytes": 94
+    "bytes": 98
   },
   {
     "protocol": 7,
     "messageType": 3,
     "name": "PartsDeleted",
     "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsDeleted",
-    "bytes": 47
+    "bytes": 59
   },
   {
     "protocol": 7,
@@ -445,7 +445,7 @@
     "messageType": 6,
     "name": "PartsReplacedByRange",
     "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsReplacedByRange",
-    "bytes": 124
+    "bytes": 117
   },
   {
     "protocol": 7,

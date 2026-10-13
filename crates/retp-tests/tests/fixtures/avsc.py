@@ -28,10 +28,18 @@ def full_name(schema: dict, namespace: str | None = None) -> str:
     return f"{namespace}.{name}" if namespace else name
 
 
+def files(root: pathlib.Path) -> list[pathlib.Path]:
+    """Every `.avsc` under `root`, sorted by relative path, bytewise. A seed is a
+    file's rank in this list, so the order must not depend on the platform:
+    `sorted` on paths ignores case on Windows and not on Linux, which swaps
+    `PartSubscriptionEnded` and `PartsChanged`."""
+    return sorted(root.rglob("*.avsc"), key=lambda p: p.relative_to(root).as_posix().encode())
+
+
 def load(root: pathlib.Path) -> dict[str, dict]:
     """Every named type under `root`, by full name, as its file writes it."""
     table = {}
-    for path in sorted(root.rglob("*.avsc")):
+    for path in files(root):
         schema = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(schema, dict) and schema.get("type") in NAMED:
             table[full_name(schema)] = schema

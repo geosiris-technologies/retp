@@ -29,7 +29,7 @@ HERE = pathlib.Path(__file__).parent / "json"
 
 def main() -> None:
     HERE.mkdir(exist_ok=True)
-    files = sorted(make.SCHEMAS.rglob("*.avsc"))
+    files = avsc.files(make.SCHEMAS)
     if not files:
         raise SystemExit(f"no .avsc under {make.SCHEMAS}")
 

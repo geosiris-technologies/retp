@@ -1,0 +1,84 @@
+name: Release CLI
+
+# Builds the `retp` command for the targets of the distribution plan and
+# attaches the archives to the GitHub release of a version tag.
+#
+# A tag is only created on request.
+
+on:
+  push:
+    tags:
+      - "retp-cli-v*"
+  # Started by release-plz.yml on the new tag (a tag pushed with GITHUB_TOKEN
+  # starts no workflow). Must be run with `--ref <tag>`.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Pre-publication layout: sibling checkout by path, see ci.yml.
+defaults:
+  run:
+    working-directory: retp
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the release if it does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        if: startsWith(github.ref, 'refs/tags/')
+
+  build:
+    name: ${{ matrix.target }}
+    needs: create-release
+    # A manual run on a branch would build archives named after the branch.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-latest }
+          # TODO(verify): the ARM runner label (ubuntu-24.04-arm) is available
+          # to this repository.
+          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-24.04-arm }
+          - { target: x86_64-unknown-linux-musl,   os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin,        os: macos-latest }
+          - { target: x86_64-apple-darwin,         os: macos-latest }
+          - { target: x86_64-pc-windows-msvc,      os: windows-latest }
+          # TODO(verify): ring and the HDF5 backend on Windows arm64.
+          - { target: aarch64-pc-windows-msvc,     os: windows-latest }
+          # FreeBSD x86_64 is best-effort in the plan (via `cross`) and is not
+          # built here.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: main
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          # Run from the repository checked out under retp/.
+          manifest-path: retp/Cargo.toml
+          bin: retp
+          target: ${{ matrix.target }}
+          # $tag is `retp-cli-vX.Y.Z`: the archive is retp-cli-vX.Y.Z-<target>.
+          archive: $tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

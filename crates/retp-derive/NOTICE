@@ -1,0 +1,33 @@
+retp
+Copyright Geosiris
+
+This product includes software developed by Geosiris
+(https://www.geosiris.com).
+
+Energistics Transfer Protocol (ETP) v1.2 schemas
+------------------------------------------------
+The Avro schemas under rc/etp-1.2/ and the Rust types generated from them
+(crates/generated/) derive from the Energistics Transfer Protocol (ETP) v1.2
+Avro schemas published by Energistics:
+
+    https://bitbucket.org/energistics/etpv1
+
+Those schemas are licensed under the Apache License, Version 2.0.
+Copyright Energistics Consortium, Inc.
+
+They are the 212 .avsc files of etpv1@f94c3f9e96df005eb90600eec0ac7a3541597b3b
+(tag v1.2), byte for byte; rc/etp-1.2/PROVENANCE.md records the archive, its
+SHA-256 and a digest of the tree.
+
+Energistics products
+--------------------
+The following Energistics(R) products were used in the creation of this work:
+Energistics Transfer Protocol (ETP) v1.2. Energistics(R), WITSML(TM),
+PRODML(TM) and RESQML(TM) are trademarks or registered trademarks of
+Energistics Consortium, Inc. All rights in the Energistics standards, or any
+portion thereof, which remain in this work remain with Energistics and are
+subject to the Energistics Product License Agreement
+(https://www.energistics.org/product-license-agreement).
+
+This project is not affiliated with or endorsed by Energistics or
+The Open Group.

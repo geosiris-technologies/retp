@@ -1,0 +1,242 @@
+[
+  {
+    "union": "AnyArray",
+    "index": 0,
+    "branch": "ArrayOfBoolean",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfBoolean",
+    "reachable": true,
+    "bytes": 6
+  },
+  {
+    "union": "AnyArray",
+    "index": 1,
+    "branch": "ArrayOfInt",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfInt",
+    "reachable": true,
+    "bytes": 14
+  },
+  {
+    "union": "AnyArray",
+    "index": 2,
+    "branch": "ArrayOfLong",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfLong",
+    "reachable": true,
+    "bytes": 23
+  },
+  {
+    "union": "AnyArray",
+    "index": 3,
+    "branch": "ArrayOfFloat",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfFloat",
+    "reachable": true,
+    "bytes": 11
+  },
+  {
+    "union": "AnyArray",
+    "index": 4,
+    "branch": "ArrayOfDouble",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfDouble",
+    "reachable": true,
+    "bytes": 27
+  },
+  {
+    "union": "AnyArray",
+    "index": 5,
+    "branch": "ArrayOfString",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfString",
+    "reachable": true,
+    "bytes": 12
+  },
+  {
+    "union": "AnyArray",
+    "index": 6,
+    "branch": "bytes",
+    "fullBranch": "bytes",
+    "reachable": true,
+    "bytes": 6
+  },
+  {
+    "union": "IndexValue",
+    "index": 0,
+    "branch": "null",
+    "fullBranch": "null",
+    "reachable": true,
+    "bytes": 1
+  },
+  {
+    "union": "IndexValue",
+    "index": 1,
+    "branch": "long",
+    "fullBranch": "long",
+    "reachable": true,
+    "bytes": 7
+  },
+  {
+    "union": "IndexValue",
+    "index": 2,
+    "branch": "double",
+    "fullBranch": "double",
+    "reachable": true,
+    "bytes": 9
+  },
+  {
+    "union": "IndexValue",
+    "index": 3,
+    "branch": "PassIndexedDepth",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ChannelData.PassIndexedDepth",
+    "reachable": true,
+    "bytes": 11
+  },
+  {
+    "union": "DataValue",
+    "index": 0,
+    "branch": "null",
+    "fullBranch": "null",
+    "reachable": true,
+    "bytes": 1
+  },
+  {
+    "union": "DataValue",
+    "index": 1,
+    "branch": "boolean",
+    "fullBranch": "boolean",
+    "reachable": true,
+    "bytes": 2
+  },
+  {
+    "union": "DataValue",
+    "index": 2,
+    "branch": "int",
+    "fullBranch": "int",
+    "reachable": true,
+    "bytes": 2
+  },
+  {
+    "union": "DataValue",
+    "index": 3,
+    "branch": "long",
+    "fullBranch": "long",
+    "reachable": true,
+    "bytes": 11
+  },
+  {
+    "union": "DataValue",
+    "index": 4,
+    "branch": "float",
+    "fullBranch": "float",
+    "reachable": false,
+    "collapsedTo": 5
+  },
+  {
+    "union": "DataValue",
+    "index": 5,
+    "branch": "double",
+    "fullBranch": "double",
+    "reachable": true,
+    "bytes": 9
+  },
+  {
+    "union": "DataValue",
+    "index": 6,
+    "branch": "string",
+    "fullBranch": "string",
+    "reachable": true,
+    "bytes": 9
+  },
+  {
+    "union": "DataValue",
+    "index": 7,
+    "branch": "ArrayOfBoolean",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfBoolean",
+    "reachable": true,
+    "bytes": 4
+  },
+  {
+    "union": "DataValue",
+    "index": 8,
+    "branch": "ArrayOfNullableBoolean",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfNullableBoolean",
+    "reachable": true,
+    "bytes": 6
+  },
+  {
+    "union": "DataValue",
+    "index": 9,
+    "branch": "ArrayOfInt",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfInt",
+    "reachable": true,
+    "bytes": 4
+  },
+  {
+    "union": "DataValue",
+    "index": 10,
+    "branch": "ArrayOfNullableInt",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfNullableInt",
+    "reachable": true,
+    "bytes": 6
+  },
+  {
+    "union": "DataValue",
+    "index": 11,
+    "branch": "ArrayOfLong",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfLong",
+    "reachable": true,
+    "bytes": 4
+  },
+  {
+    "union": "DataValue",
+    "index": 12,
+    "branch": "ArrayOfNullableLong",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfNullableLong",
+    "reachable": true,
+    "bytes": 6
+  },
+  {
+    "union": "DataValue",
+    "index": 13,
+    "branch": "ArrayOfFloat",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfFloat",
+    "reachable": true,
+    "bytes": 7
+  },
+  {
+    "union": "DataValue",
+    "index": 14,
+    "branch": "ArrayOfDouble",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfDouble",
+    "reachable": true,
+    "bytes": 11
+  },
+  {
+    "union": "DataValue",
+    "index": 15,
+    "branch": "ArrayOfString",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfString",
+    "reachable": true,
+    "bytes": 12
+  },
+  {
+    "union": "DataValue",
+    "index": 16,
+    "branch": "ArrayOfBytes",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.ArrayOfBytes",
+    "reachable": true,
+    "bytes": 5
+  },
+  {
+    "union": "DataValue",
+    "index": 17,
+    "branch": "bytes",
+    "fullBranch": "bytes",
+    "reachable": true,
+    "bytes": 3
+  },
+  {
+    "union": "DataValue",
+    "index": 18,
+    "branch": "AnySparseArray",
+    "fullBranch": "Energistics.Etp.v12.Datatypes.AnySparseArray",
+    "reachable": true,
+    "bytes": 15
+  }
+]

@@ -1,0 +1,15 @@
+{
+	"type": "record",
+	"namespace": "Energistics.Etp.v12.Protocol.GrowingObject",
+	"name": "ReplacePartsByRangeResponse",
+	"protocol": "6",
+	"messageType": "18",
+	"senderRole": "store",
+	"protocolRoles": "store,customer",
+	"multipartFlag": false,
+  
+	"fields":
+	[
+	
+	]
+}

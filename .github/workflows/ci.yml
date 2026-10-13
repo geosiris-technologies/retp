@@ -1,0 +1,232 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+
+# Pre-publication layout: this workspace depends on the sibling checkout
+# ../energyml-rust by path. Every job therefore checks out two repositories side
+# by side and works inside `retp/`. This disappears once the energyml crates are
+# on crates.io.
+defaults:
+  run:
+    working-directory: retp
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Never `cargo fmt --all`: it would rewrite crates/generated/.
+      - name: rustfmt, every hand-written crate (scripts/fmt.sh --check)
+        working-directory: retp
+        run: bash scripts/fmt.sh --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: cargo test --workspace -j 4 -- --test-threads=4
+
+  # The ETP crates that the page uses must keep compiling for wasm.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: >
+          cargo check --target wasm32-unknown-unknown
+          -p retp-avro -p retp-types -p retp-proto -p retp-client
+
+  # Cross-audit: the committed fixtures were written by fastavro from the same
+  # Avro schemas. Regenerate them here and require no difference, then decode
+  # them with the Rust codec. The expected bytes come from a second, independent
+  # implementation.
+  fastavro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install fastavro
+      - name: Regenerate the fixtures
+        working-directory: retp/crates/retp-tests/tests/fixtures
+        run: |
+          python make.py
+          python make_json.py
+          python defaults.py
+          python unions.py
+      - name: The committed fixtures must be what fastavro writes today
+        run: git diff --exit-code -- crates/retp-tests/tests/fixtures
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: cargo test --workspace --test crossaudit --test unions --test json
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      # Each crate against its own rust-version (from the workspace's Cargo.toml).
+      - run: cargo hack check --workspace --rust-version
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: retp/Cargo.toml
+          command: check
+
+  doc:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: cargo doc --workspace --no-deps
+      - uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: latest
+      - run: mdbook build docs
+
+  # Relative links and anchors of README.md, docs/ (the ADRs included) and the
+  # crates' documents. Offline: absolute URLs are not followed.
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python scripts/check-links.py
+
+  # Secrets and personal data never enter this repository. Built from source rather than
+  # gitleaks/gitleaks-action (licence key on organisation repos). TODO(verify): the
+  # action's current major is v3.0.0 (Node 24).
+  gitleaks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # gitleaks pinned to a release and checked against its published SHA-256 (`go install
+      # ...@latest` broke on a module-path conflict of the upstream repository).
+      - name: Install gitleaks 8.30.1
+        run: |
+          curl -sSL -o gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks && rm gitleaks.tgz
+      - name: Scan the working tree and the history
+        run: |
+          ./gitleaks dir . --redact --exit-code 1
+          ./gitleaks git . --redact --exit-code 1

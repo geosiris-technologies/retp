@@ -1,0 +1,34 @@
+name: Bug report
+description: Something does not behave as documented, or a server is mishandled.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The command or code, with `wss://etp.example.com` and `TOKEN` in place of real hosts and secrets.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `retp --version`, or the crate version.
+  - type: input
+    id: server
+    attributes:
+      label: Server
+      description: The kind and version of the ETP server, if you may say. Never paste credentials or private hostnames.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output with `--verbose`
+      description: Remove tokens and private hostnames first.
+      render: text

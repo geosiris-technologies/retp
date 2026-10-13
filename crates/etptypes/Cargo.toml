@@ -1,0 +1,14 @@
+[package]
+name = "etptypes"
+version = "2.0.0"
+description = "Moved to retp-types - this crate re-exports it"
+readme = "README.md"
+keywords = ["etp", "energistics", "osdu", "avro"]
+categories = ["encoding"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+retp-types = { workspace = true }

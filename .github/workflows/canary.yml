@@ -1,0 +1,51 @@
+name: Canary
+
+# Weekly: build and test against the tip of energyml-rust, to learn early that a
+# change over there breaks the bridge here.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Pre-publication layout: sibling checkout by path, see ci.yml. Once the
+# energyml crates are on crates.io this job swaps the checkout for a [patch]
+# pointing at the git main branch of energyml-rust.
+defaults:
+  run:
+    working-directory: retp
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: main
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+      - run: cargo test --workspace -j 4 -- --test-threads=4
+
+      - name: Open an issue when the canary fails
+        if: failure()
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Canary against energyml-rust main failed" \
+            --body "The weekly canary failed: $RUN_URL"

@@ -1,0 +1,31 @@
+[package]
+name = "retp-derive"
+description = "The derives behind the generated ETP types: an Avro codec, a Default faithful to the schema, and the message metadata."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Spelled out rather than inherited, for the reason `energyml-derive` gives:
+# wasm-pack reads the manifests of path dependencies without resolving
+# workspace inheritance, and the front end will depend on the ETP crates.
+license = "Apache-2.0"
+repository.workspace = true
+keywords = ["etp", "avro", "derive", "energyml", "codec"]
+categories = ["development-tools::procedural-macro-helpers", "encoding"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-derive"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+heck = "0.5"
+
+# docs.rs builds on Linux with no native HDF5: every feature builds there.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true

@@ -1,0 +1,139 @@
+# The public image ghcr.io/geosiris-technologies/retp (commands `retp` and
+# `retp-conformance`), built and pushed by this repository's CI only.
+#
+# - pull request: build for linux/amd64, smoke-test, push nothing;
+# - push to main: push `edge`;
+# - tag retp-cli-vX.Y.Z: push `X.Y.Z`, `X.Y` and `latest`.
+#
+# Nothing is pushed until the repository variable IMAGE_PUBLISH is 'true': until
+# then main, tags and manual runs only build and smoke-test, as a pull request does.
+#
+# While the workspace depends on energyml crates by path, the sibling
+# repository is checked out next to this one and the build context is their
+# common parent (see docker/Dockerfile).
+name: docker
+
+on:
+  pull_request:
+    paths: ["crates/**", "Cargo.*", "docker/**", ".github/workflows/docker.yml"]
+  push:
+    branches: [main]
+    tags: ["retp-cli-v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/geosiris-technologies/retp
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            lto: fat
+          # A fat-LTO release build outgrows the free arm64 runner (seen on energyml-rust, 13/10/2026).
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            lto: thin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          path: energyml-rust
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version
+        id: v
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/retp-cli-v*) echo "version=${GITHUB_REF#refs/tags/retp-cli-v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "version=edge" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Build (and push by digest outside pull requests)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: retp/docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            REVISION=${{ github.sha }}
+            RELEASE_LTO=${{ matrix.lto }}
+            VERSION=${{ steps.v.outputs.version }}
+          load: ${{ !(github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true') }}
+          tags: ${{ !(github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true') && 'retp:test' || '' }}
+          outputs: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true') && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || '' }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Smoke test
+        if: ${{ !(github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true') }}
+        run: docker run --rm retp:test --version
+      - name: Export digest
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true'
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true'
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  manifest:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=edge,branch=main
+            type=match,pattern=retp-cli-v(\d+\.\d+\.\d+),group=1
+            type=match,pattern=retp-cli-v(\d+\.\d+)\.\d+,group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/retp-cli-v') }}
+      - name: Join the digests into one manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+      - name: Smoke test the published image
+        run: docker run --rm ${{ env.IMAGE }}:${{ steps.meta.outputs.version }} --version

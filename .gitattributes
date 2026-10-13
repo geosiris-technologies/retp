@@ -1,0 +1,52 @@
+# Replaces the monorepo's .gitattributes (the manifest copies that one, then the
+# overlay is laid on top): same rules, plus the ones this repository needs.
+#
+# The ETP v1.2 Avro schemas (rc/etp-1.2/**/*.avsc) are the source of the generated
+# crate and are compared against the upstream archive byte for byte. In a Windows
+# working tree 29 of the 212 files came out CRLF while the index held LF, so
+# "byte for byte" only held for the archive. `eol=lf` makes every checkout equal
+# to the index, on every platform. The same goes for the generated crate itself.
+* text=auto eol=lf
+
+*.avsc    text eol=lf
+*.json    text eol=lf
+rc/etp-1.2/** text eol=lf
+
+# ---- Source and config ----
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.py      text eol=lf
+*.txt     text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# ---- Scripts ----
+*.sh      text eol=lf
+ci/hooks/*  text eol=lf
+*.ps1     text eol=crlf
+
+# ---- Binary: never convert, never diff as text ----
+# The Avro fixtures the ETP tests are cross-audited against are byte strings
+# written by another implementation (rc/etp-1.2/**/*.avro included).
+*.avro    binary
+*.pdf     binary
+*.tgz     binary
+*.gz      binary
+*.zip     binary
+*.7z      binary
+*.wasm    binary
+*.h5      binary
+*.hdf5    binary
+*.epc     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.ttf     binary
+*.woff    binary
+*.woff2   binary
+*.whl     binary

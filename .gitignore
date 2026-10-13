@@ -1,0 +1,62 @@
+# --- Rust ------------------------------------------------------------------------------------
+/target/
+**/*.rs.bk
+*.pdb
+# The documentation book, built by CI
+/book/
+/docs/book/
+
+# Packages written by examples and local runs (the test fixtures are .avro, which stay)
+/out/
+*.epc
+*.h5
+
+# --- Local state that no repository of this family ever commits ---------------------------
+# Secrets
+.env
+.env.*
+*.token
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# Editors, and the local settings of AI assistants
+.idea/
+.vscode/
+.fleet/
+.zed/
+*.swp
+*~
+.claude/
+CLAUDE.local.md
+
+# Operating systems
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Merge and backup leftovers
+*.orig
+*.rej
+*.bak
+
+# Logs, profiles and coverage
+*.log
+*.profraw
+perf.data*
+lcov.info
+coverage/
+htmlcov/
+.coverage
+
+# Python tooling (scripts, the Python bridge, fixture generators)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

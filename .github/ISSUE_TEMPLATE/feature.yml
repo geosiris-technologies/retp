@@ -1,0 +1,20 @@
+name: Feature request
+description: A protocol feature, an option, a server behaviour to tolerate or refuse.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need
+      description: The problem first; the solution you imagine second.
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Specification reference
+      description: Document, section and paragraph of the ETP specification, if the request follows from it.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead

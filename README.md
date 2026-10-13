@@ -1,0 +1,89 @@
+# retp
+
+**An Energistics Transfer Protocol (ETP) v1.2 stack in Rust.**
+
+ETP is the WebSocket protocol the energy industry uses to exchange subsurface
+data objects (RESQML, WITSML, PRODML), data arrays and streams with a server,
+including OSDU's Reservoir DDMS. `retp` is its Rust implementation: encode and
+decode, hold a session, talk to a server, and check one.
+
+> **Status: pre-release.** Nothing is published to crates.io yet. This
+> repository replaces the proof of concept `etp-rs`.
+> The workspace still depends on a sibling checkout of
+> [energyml-rust](https://github.com/geosiris-technologies/energyml-rust) by
+> path, until the energyml crates are on crates.io.
+
+## Crates
+
+> The bridge keeps the `energyml` prefix because it implements a
+> trait of energyml-rust.
+
+| Crate | What it is |
+|---|---|
+| `retp-avro` | Avro binary encoding for ETP: the runtime the generated types stand on |
+| `retp-derive` | the derives behind the generated types: codec, `Default`, message metadata |
+| `retp-types` | the ETP v1.2 messages and data types, generated from the Avro schemas (the field order **is** the encoding) |
+| `retp-proto` | the wire and the session, for a client and a server alike; no transport |
+| `retp-client` | a client: a transport under the connection, the native WebSocket, reads and writes. Compiles to wasm without its native transport |
+| `energyml-etp-store` | the bridge: an ETP dataspace behind energyml-rust's `EnergymlStorage`, so that code which reads a file reads a server |
+| `retp-conformance` | checks a server against what the specification makes mandatory, and writes the report a provider can act on |
+| `retp-cli` | the `retp` command |
+| `etptypes` 2.0 | a facade over `retp-types`, for dependents of the old crate |
+
+## Command line
+
+> `retp-cli` is being extracted from the energyml-rust command line, where the
+> same commands exist today as `energyml etp <command>`.
+
+```sh
+# What the server says of itself, before any session
+retp probe wss://etp.example.com/etp
+
+# Open a session and print what was agreed
+retp connect wss://etp.example.com/etp
+
+# Dataspaces, then what one holds
+retp dataspaces wss://etp.example.com/etp
+retp resources wss://etp.example.com/etp --uri "eml:///dataspace('demo')" --depth 1
+
+# Objects by URI, and a whole dataspace as an EPC package
+retp get wss://etp.example.com/etp "eml:///dataspace('demo')/resqml20.obj_LocalDepth3dCrs(50fb27d8-6c4c-469d-aa88-7ccb0cea63b9)" --out objects/
+retp download-epc wss://etp.example.com/etp demo --out demo.epc
+
+# One session, many commands
+retp shell wss://etp.example.com/etp
+```
+
+Secrets go through the environment (`ETP_TOKEN`, `ETP_USER`, `ETP_PASSWORD`,
+`ETP_CLIENT_SECRET`), not the command line. See [docs/cli.md](docs/cli.md).
+
+To judge a server rather than use it:
+
+```sh
+retp-conformance wss://etp.example.com/etp --out report.md
+```
+
+## Python
+
+A Python bridge is planned. See [docs/python.md](docs/python.md).
+
+## Documentation
+
+- [Library usage](docs/client.md) and [command line](docs/cli.md)
+- [What the conformance checker judges](docs/conformance.md)
+- [Architecture decisions](docs/adr/README.md)
+
+## Related
+
+- [energyml-rust](https://github.com/geosiris-technologies/energyml-rust):
+  RESQML, WITSML and PRODML in Rust, whose storage trait ETP plugs into.
+- https://www.geosiris.com
+
+## Licence
+
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). The ETP
+schemas are Copyright Energistics Consortium, Inc., Apache-2.0.
+
+**Not affiliated with or endorsed by Energistics or The Open Group.**
+Energistics(R), WITSML(TM), PRODML(TM) and RESQML(TM) are trademarks or
+registered trademarks of Energistics Consortium, Inc.

@@ -1,0 +1,26 @@
+[package]
+name = "retp-avro"
+description = "Avro binary encoding for ETP: the runtime the generated ETP types stand on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["etp", "avro", "energyml", "encoding", "serialization"]
+categories = ["encoding"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-avro"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+
+[dependencies]
+retp-derive = { workspace = true }
+# The Avro JSON encoding is a `serde_json::Value`. `float_roundtrip` is not
+# optional in spirit: without it the fast float parser can be one ulp off, and
+# a `double` that does not come back as it went is a lost digit nobody sees.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+
+# docs.rs builds on Linux with no native HDF5: every feature builds there.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true

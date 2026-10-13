@@ -1,0 +1,38 @@
+[package]
+name = "retp-conformance"
+description = "Checks an ETP v1.2 server against what the specification makes mandatory, and writes the report a provider can act on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["etp", "energyml", "conformance", "testing", "protocol"]
+categories = ["development-tools::testing", "network-programming"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-conformance"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+
+[[bin]]
+name = "retp-conformance"
+path = "src/bin/retp-conformance.rs"
+
+[dependencies]
+retp-proto = { workspace = true }
+retp-avro = { workspace = true }
+retp-client = { workspace = true }
+retp-types = { workspace = true }
+energyml-etp-store = { workspace = true }
+energyml-core = { workspace = true }
+energyml-storage = { path = "../../../energyml-rust/crates/energyml-storage", version = "0.1.0" }
+energyml-schemas = { path = "../../../energyml-rust/crates/energyml-schemas", version = "0.1.0", features = ["all"] }
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+
+# docs.rs builds on Linux with no native HDF5: every feature builds there.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true

@@ -1,0 +1,103 @@
+name: Interop
+
+# Nightly: run the client end to end, and the conformance checker, against
+# open-etp-server, the open-source Reservoir DDMS of OSDU, with PostgreSQL.
+# No real server, no token: the server runs with authentication off, in the job.
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Source: https://community.opengroup.org/osdu/platform/domain-data-mgmt-services/reservoir/open-etp-server
+  # Its container registry lists the repository
+  # `.../open-etp-server/open-etp-server-main` (checked read-only through the
+  # GitLab API); its tags are commit hashes.
+  # TODO(verify): that the image can be pulled anonymously from
+  # community.opengroup.org:5555, and which tag to pin (the latest of main moves).
+  OPEN_ETP_IMAGE: community.opengroup.org:5555/osdu/platform/domain-data-mgmt-services/reservoir/open-etp-server/open-etp-server-main:latest
+
+# Pre-publication layout: sibling checkout by path, see ci.yml.
+defaults:
+  run:
+    working-directory: retp
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tester
+          POSTGRES_PASSWORD: tester
+          POSTGRES_DB: postkv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tester -d postkv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: retp
+      - uses: actions/checkout@v7
+        with:
+          repository: geosiris-technologies/energyml-rust
+          ref: main
+          path: energyml-rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: retp
+
+      # The image's default command only prints usage, so the server is started
+      # with `docker run` rather than as a service (a service cannot take a
+      # command). Variables and flags follow the project README
+      # (authN and authZ off, single partition, standalone).
+      # TODO(verify): the README's flags against the pinned image.
+      - name: Start open-etp-server
+        working-directory: .
+        run: |
+          docker run -d --name open-etp-server --network host \
+            -e RDMS_DATA_PARTITION_MODE=single \
+            -e RDMS_DATA_CONNECTIVITY_MODE=standalone \
+            -e POSTGRESQL_CONN_STRING="host=127.0.0.1 port=5432 dbname=postkv user=tester password=tester" \
+            "$OPEN_ETP_IMAGE" \
+            openETPServer server --start --overwrite --authN none --authZ none
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/9002) 2>/dev/null; then echo "server is up"; exit 0; fi
+            sleep 2
+          done
+          docker logs open-etp-server
+          exit 1
+
+      # TODO(verify): the server's WebSocket path and whether the client accepts
+      # a plain ws:// URL; the README gives port 9002.
+      - name: Client, end to end
+        run: |
+          cargo run -q -p retp-cli -- connect ws://127.0.0.1:9002
+          cargo run -q -p retp-cli -- dataspaces ws://127.0.0.1:9002
+
+      - name: Conformance report
+        run: >
+          cargo run -q -p retp-conformance --bin retp-conformance --
+          ws://127.0.0.1:9002 --write --out interop-report.md --json interop-report.json
+
+      - name: Server log
+        if: always()
+        working-directory: .
+        run: docker logs open-etp-server || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: interop-report
+          path: |
+            retp/interop-report.md
+            retp/interop-report.json
+          if-no-files-found: warn

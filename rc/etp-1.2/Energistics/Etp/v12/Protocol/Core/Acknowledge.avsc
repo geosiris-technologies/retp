@@ -1,0 +1,15 @@
+{
+	"type": "record",
+	"namespace": "Energistics.Etp.v12.Protocol.Core",
+	"name": "Acknowledge",
+	"protocol": "0",
+	"messageType": "1001",
+	"senderRole": "*",
+	"protocolRoles": "client, server",
+	"multipartFlag": false,
+  
+	"fields":
+	[
+	
+	]
+}

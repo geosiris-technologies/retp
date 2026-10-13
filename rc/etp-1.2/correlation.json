@@ -1,0 +1,377 @@
+{
+  "$comment": [
+    "Which ETP message answers which: not in the .avsc schemas, so declared here,",
+    "and held against the schemas by `request_response_table_is_honest`",
+    "(crates/retp-tests/tests/correlation.rs). doc/design/etp-et-osdu/client-etp.md \u00a74 bis.",
+    "Source: ETP Specification v1.2 / Document v1.1, the \"Correlation Id Usage\" line",
+    "of every message section; `section` is where. Keys are `Namespace.Message`,",
+    "because four names repeat across protocols (ChannelData, Chunk, ...).",
+    "Guessing \"X answers X + Response\" would hold 120 times and fail on the first",
+    "message of every conversation: RequestSession is answered by OpenSession.",
+    "- responses: each response and the request(s) it is correlated to;",
+    "- alsoNotification: responses that may also be sent unprompted, with a zero",
+    "  correlationId (\"When sent as a notification\");",
+    "- chunks: a Chunk travels inside a multipart message and shares its correlation;",
+    "- universal: may answer any message (\u00a73.7.2);",
+    "- privateProtocols: numbers 2000 and up, which the specification does not cover;",
+    "- errata: where the specification names a message that does not exist.",
+    "Every other message is uncorrelated: a request if some response names it,",
+    "one-way otherwise. That is derived, not declared."
+  ],
+  "responses": {
+    "ChannelDataFrame.GetFrameMetadataResponse": {
+      "to": [
+        "ChannelDataFrame.GetFrameMetadata"
+      ],
+      "section": "7.3.6"
+    },
+    "ChannelDataFrame.GetFrameResponseHeader": {
+      "to": [
+        "ChannelDataFrame.GetFrame"
+      ],
+      "section": "7.3.2"
+    },
+    "ChannelDataFrame.GetFrameResponseRows": {
+      "to": [
+        "ChannelDataFrame.GetFrame"
+      ],
+      "section": "7.3.3"
+    },
+    "ChannelDataLoad.ChannelsClosed": {
+      "to": [
+        "ChannelDataLoad.CloseChannels"
+      ],
+      "section": "20.3.9"
+    },
+    "ChannelDataLoad.OpenChannelsResponse": {
+      "to": [
+        "ChannelDataLoad.OpenChannels"
+      ],
+      "section": "20.3.2"
+    },
+    "ChannelDataLoad.ReplaceRangeResponse": {
+      "to": [
+        "ChannelDataLoad.ReplaceRange"
+      ],
+      "section": "20.3.8"
+    },
+    "ChannelDataLoad.TruncateChannelsResponse": {
+      "to": [
+        "ChannelDataLoad.TruncateChannels"
+      ],
+      "section": "20.3.5"
+    },
+    "ChannelSubscribe.GetChangeAnnotationsResponse": {
+      "to": [
+        "ChannelSubscribe.GetChangeAnnotations"
+      ],
+      "section": "19.3.14"
+    },
+    "ChannelSubscribe.GetChannelMetadataResponse": {
+      "to": [
+        "ChannelSubscribe.GetChannelMetadata"
+      ],
+      "section": "19.3.2"
+    },
+    "ChannelSubscribe.GetRangesResponse": {
+      "to": [
+        "ChannelSubscribe.GetRanges"
+      ],
+      "section": "19.3.11"
+    },
+    "ChannelSubscribe.SubscribeChannelsResponse": {
+      "to": [
+        "ChannelSubscribe.SubscribeChannels"
+      ],
+      "section": "19.3.4"
+    },
+    "ChannelSubscribe.SubscriptionsStopped": {
+      "to": [
+        "ChannelSubscribe.UnsubscribeChannels"
+      ],
+      "section": "19.3.9"
+    },
+    "Core.AuthorizeResponse": {
+      "to": [
+        "Core.Authorize"
+      ],
+      "section": "5.3.7"
+    },
+    "Core.OpenSession": {
+      "to": [
+        "Core.RequestSession"
+      ],
+      "section": "5.3.2"
+    },
+    "Core.Pong": {
+      "to": [
+        "Core.Ping"
+      ],
+      "section": "5.3.6"
+    },
+    "DataArray.GetDataArrayMetadataResponse": {
+      "to": [
+        "DataArray.GetDataArrayMetadata"
+      ],
+      "section": "13.3.12"
+    },
+    "DataArray.GetDataArraysResponse": {
+      "to": [
+        "DataArray.GetDataArrays"
+      ],
+      "section": "13.3.2"
+    },
+    "DataArray.GetDataSubarraysResponse": {
+      "to": [
+        "DataArray.GetDataSubarrays"
+      ],
+      "section": "13.3.4"
+    },
+    "DataArray.PutDataArraysResponse": {
+      "to": [
+        "DataArray.PutDataArrays"
+      ],
+      "section": "13.3.6"
+    },
+    "DataArray.PutDataSubarraysResponse": {
+      "to": [
+        "DataArray.PutDataSubarrays"
+      ],
+      "section": "13.3.8"
+    },
+    "DataArray.PutUninitializedDataArraysResponse": {
+      "to": [
+        "DataArray.PutUninitializedDataArrays"
+      ],
+      "section": "13.3.10"
+    },
+    "Dataspace.DeleteDataspacesResponse": {
+      "to": [
+        "Dataspace.DeleteDataspaces"
+      ],
+      "section": "21.3.6"
+    },
+    "Dataspace.GetDataspacesResponse": {
+      "to": [
+        "Dataspace.GetDataspaces"
+      ],
+      "section": "21.3.2"
+    },
+    "Dataspace.PutDataspacesResponse": {
+      "to": [
+        "Dataspace.PutDataspaces"
+      ],
+      "section": "21.3.4"
+    },
+    "Discovery.GetDeletedResourcesResponse": {
+      "to": [
+        "Discovery.GetDeletedResources"
+      ],
+      "section": "8.3.5"
+    },
+    "Discovery.GetResourcesEdgesResponse": {
+      "to": [
+        "Discovery.GetResources"
+      ],
+      "section": "8.3.3"
+    },
+    "Discovery.GetResourcesResponse": {
+      "to": [
+        "Discovery.GetResources"
+      ],
+      "section": "8.3.2"
+    },
+    "DiscoveryQuery.FindResourcesResponse": {
+      "to": [
+        "DiscoveryQuery.FindResources"
+      ],
+      "section": "15.3.2"
+    },
+    "GrowingObject.DeletePartsResponse": {
+      "to": [
+        "GrowingObject.DeleteParts"
+      ],
+      "section": "11.3.10"
+    },
+    "GrowingObject.GetChangeAnnotationsResponse": {
+      "to": [
+        "GrowingObject.GetChangeAnnotations"
+      ],
+      "section": "11.3.18"
+    },
+    "GrowingObject.GetGrowingDataObjectsHeaderResponse": {
+      "to": [
+        "GrowingObject.GetGrowingDataObjectsHeader"
+      ],
+      "section": "11.3.4"
+    },
+    "GrowingObject.GetPartsByRangeResponse": {
+      "to": [
+        "GrowingObject.GetPartsByRange"
+      ],
+      "section": "11.3.12"
+    },
+    "GrowingObject.GetPartsMetadataResponse": {
+      "to": [
+        "GrowingObject.GetPartsMetadata"
+      ],
+      "section": "11.3.14"
+    },
+    "GrowingObject.GetPartsResponse": {
+      "to": [
+        "GrowingObject.GetParts"
+      ],
+      "section": "11.3.2"
+    },
+    "GrowingObject.PutGrowingDataObjectsHeaderResponse": {
+      "to": [
+        "GrowingObject.PutGrowingDataObjectsHeader"
+      ],
+      "section": "11.3.8"
+    },
+    "GrowingObject.PutPartsResponse": {
+      "to": [
+        "GrowingObject.PutParts"
+      ],
+      "section": "11.3.6"
+    },
+    "GrowingObject.ReplacePartsByRangeResponse": {
+      "to": [
+        "GrowingObject.ReplacePartsByRange"
+      ],
+      "section": "11.3.16"
+    },
+    "GrowingObjectNotification.PartSubscriptionEnded": {
+      "to": [
+        "GrowingObjectNotification.UnsubscribePartNotification"
+      ],
+      "section": "12.3.7"
+    },
+    "GrowingObjectNotification.SubscribePartNotificationsResponse": {
+      "to": [
+        "GrowingObjectNotification.SubscribePartNotifications"
+      ],
+      "section": "12.3.2"
+    },
+    "GrowingObjectQuery.FindPartsResponse": {
+      "to": [
+        "GrowingObjectQuery.FindParts"
+      ],
+      "section": "17.3.2"
+    },
+    "Store.DeleteDataObjectsResponse": {
+      "to": [
+        "Store.DeleteDataObjects"
+      ],
+      "section": "9.3.5"
+    },
+    "Store.GetDataObjectsResponse": {
+      "to": [
+        "Store.GetDataObjects"
+      ],
+      "section": "9.3.6"
+    },
+    "Store.PutDataObjectsResponse": {
+      "to": [
+        "Store.PutDataObjects"
+      ],
+      "section": "9.3.3"
+    },
+    "StoreNotification.SubscribeNotificationsResponse": {
+      "to": [
+        "StoreNotification.SubscribeNotifications"
+      ],
+      "section": "10.3.7"
+    },
+    "StoreNotification.SubscriptionEnded": {
+      "to": [
+        "StoreNotification.UnsubscribeNotifications"
+      ],
+      "section": "10.3.5"
+    },
+    "StoreQuery.FindDataObjectsResponse": {
+      "to": [
+        "StoreQuery.FindDataObjects"
+      ],
+      "section": "16.3.2"
+    },
+    "SupportedTypes.GetSupportedTypesResponse": {
+      "to": [
+        "SupportedTypes.GetSupportedTypes"
+      ],
+      "section": "22.3.2"
+    },
+    "Transaction.CommitTransactionResponse": {
+      "to": [
+        "Transaction.CommitTransaction"
+      ],
+      "section": "18.2.4"
+    },
+    "Transaction.RollbackTransactionResponse": {
+      "to": [
+        "Transaction.RollbackTransaction"
+      ],
+      "section": "18.2.6"
+    },
+    "Transaction.StartTransactionResponse": {
+      "to": [
+        "Transaction.StartTransaction"
+      ],
+      "section": "18.2.2"
+    }
+  },
+  "alsoNotification": [
+    "ChannelDataLoad.ChannelsClosed",
+    "ChannelSubscribe.SubscriptionsStopped",
+    "GrowingObjectNotification.PartSubscriptionEnded",
+    "StoreNotification.SubscriptionEnded"
+  ],
+  "chunks": {
+    "Store.Chunk": {
+      "partOf": [
+        "Store.GetDataObjectsResponse",
+        "Store.PutDataObjects"
+      ],
+      "section": "9.3.7"
+    },
+    "StoreNotification.Chunk": {
+      "partOf": [
+        "StoreNotification.ObjectChanged"
+      ],
+      "section": "10.3.10"
+    },
+    "StoreQuery.Chunk": {
+      "partOf": [
+        "StoreQuery.FindDataObjectsResponse"
+      ],
+      "section": "16.3.3"
+    }
+  },
+  "universal": [
+    "Core.Acknowledge",
+    "Core.ProtocolException"
+  ],
+  "privateProtocols": [
+    2100
+  ],
+  "errata": [
+    {
+      "message": "GrowingObjectNotification.PartSubscriptionEnded",
+      "section": "12.3.7",
+      "specSays": "UnsubscribePartNotifications",
+      "means": "UnsubscribePartNotification"
+    },
+    {
+      "message": "StoreQuery.FindDataObjectsResponse",
+      "section": "16.3.2",
+      "specSays": "FindObjects",
+      "means": "FindDataObjects"
+    },
+    {
+      "message": "StoreQuery.Chunk",
+      "section": "16.3.3",
+      "specSays": "FindObjectsResponse",
+      "means": "FindDataObjectsResponse"
+    }
+  ]
+}

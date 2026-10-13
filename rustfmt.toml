@@ -1,0 +1,18 @@
+# The style the workspace was written in. Declared here so `cargo fmt` stops
+# narrowing hand-written code to 100 columns, which reflows comments and
+# signatures that were laid out deliberately.
+#
+# The hand-written crates are formatted to this style. `crates/generated/` is
+# **not**, and must not be.
+#
+# `cargo fmt --all` and `cargo run -p energyml-codegen -- generate --all --check`
+# are mutually exclusive: CI requires the committed generated code to be
+# byte-identical to what the generator emits, and rustfmt rewrites ~190 of those
+# files. So `--all` turns a green build red, and the fix is to regenerate, not
+# to reformat. Every hand-written crate is formatted by name, by one script:
+#
+#     bash ci/fmt.sh            # format
+#     bash ci/fmt.sh --check    # what the pre-push hook and CI check
+#
+# Since 13/10/2026 the hand-written crates are rustfmt-clean, and the public CI checks it.
+max_width = 110

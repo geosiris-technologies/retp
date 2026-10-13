@@ -1,0 +1,1 @@
+{"context": {"uri": "value-68445", "depth": 18034, "dataObjectTypes": ["value-27424", "value-22137"], "navigableEdges": "Primary", "includeSecondaryTargets": false, "includeSecondarySources": true}, "scope": "self", "storeLastWriteFilter": {"long": 670232475}, "activeStatusFilter": {"Energistics.Etp.v12.Datatypes.Object.ActiveStatusKind": "Inactive"}}

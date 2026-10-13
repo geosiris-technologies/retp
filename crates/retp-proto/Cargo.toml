@@ -1,0 +1,29 @@
+[package]
+name = "retp-proto"
+description = "The ETP v1.2 protocol for a client and a server alike: the wire, and later the session. No transport."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["energyml", "etp", "protocol", "avro", "geoscience"]
+categories = ["network-programming", "encoding"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-proto"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+
+[dependencies]
+energyml-core = { workspace = true }
+retp-avro = { workspace = true }
+retp-types = { workspace = true }
+serde_json = "1.0"
+base64 = "0.22"
+# The deviations a tolerant negotiation accepts are logged: `log` is the
+# facade, and the application chooses where it goes.
+log = "0.4"
+
+# docs.rs builds on Linux with no native HDF5: every feature builds there.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true

@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "retp: an Energistics Transfer Protocol (ETP) v1.2 stack in Rust"
+type: software
+authors:
+  - name: "Geosiris"
+    website: "https://www.geosiris.com"
+repository-code: "https://github.com/geosiris-technologies/retp"
+url: "https://www.geosiris.com"
+license: Apache-2.0
+# TODO(verify): version and date-released, set at the first release.
+version: "0.1.0"
+keywords:
+  - ETP
+  - Energistics
+  - OSDU
+  - RESQML
+  - Rust

@@ -1,0 +1,22 @@
+# release-plz: version bumps, changelogs and crates.io publication.
+
+[workspace]
+changelog_update = true
+git_release_enable = false
+semver_check = true
+# Tag format: <crate>-v<version> (for example retp-cli-v0.2.0), which is what the
+# release-cli and docker workflows listen for (and release-plz.yml dispatches).
+git_tag_name = "{{ package }}-v{{ version }}"
+# Publish only when every dependency is on crates.io. While the energyml
+# crates are path dependencies of a sibling checkout, `release-plz release`
+# would fail on its own; the workflow is kept manual until then.
+
+[[package]]
+name = "retp-tests"
+release = false
+changelog_update = false
+
+# The facade for the existing crates.io crate `etptypes`.
+[[package]]
+name = "etptypes"
+changelog_update = true

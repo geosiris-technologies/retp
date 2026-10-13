@@ -1,0 +1,248 @@
+[
+  {
+    "name": "primitives",
+    "bytes": 68,
+    "schema": {
+      "type": "record",
+      "name": "Primitives",
+      "fields": [
+        {
+          "name": "flag",
+          "type": "boolean"
+        },
+        {
+          "name": "small",
+          "type": "int"
+        },
+        {
+          "name": "big",
+          "type": "long"
+        },
+        {
+          "name": "single",
+          "type": "float"
+        },
+        {
+          "name": "wide",
+          "type": "double"
+        },
+        {
+          "name": "text",
+          "type": "string"
+        },
+        {
+          "name": "raw",
+          "type": "bytes"
+        }
+      ]
+    }
+  },
+  {
+    "name": "extremes",
+    "bytes": 33,
+    "schema": {
+      "type": "record",
+      "name": "Extremes",
+      "fields": [
+        {
+          "name": "min_long",
+          "type": "long"
+        },
+        {
+          "name": "max_long",
+          "type": "long"
+        },
+        {
+          "name": "zero",
+          "type": "long"
+        },
+        {
+          "name": "minus_one",
+          "type": "long"
+        },
+        {
+          "name": "min_int",
+          "type": "int"
+        },
+        {
+          "name": "max_int",
+          "type": "int"
+        },
+        {
+          "name": "empty",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  {
+    "name": "collections",
+    "bytes": 120,
+    "schema": {
+      "type": "record",
+      "name": "Collections",
+      "fields": [
+        {
+          "name": "doubles",
+          "type": {
+            "type": "array",
+            "items": "double"
+          }
+        },
+        {
+          "name": "longs",
+          "type": {
+            "type": "array",
+            "items": "long"
+          }
+        },
+        {
+          "name": "names",
+          "type": {
+            "type": "array",
+            "items": "string"
+          }
+        },
+        {
+          "name": "empty",
+          "type": {
+            "type": "array",
+            "items": "int"
+          }
+        },
+        {
+          "name": "caps",
+          "type": {
+            "type": "map",
+            "values": "long"
+          }
+        },
+        {
+          "name": "no_caps",
+          "type": {
+            "type": "map",
+            "values": "string"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unions",
+    "bytes": 27,
+    "schema": {
+      "type": "record",
+      "name": "Unions",
+      "fields": [
+        {
+          "name": "absent",
+          "type": [
+            "null",
+            "long"
+          ],
+          "default": null
+        },
+        {
+          "name": "present",
+          "type": [
+            "null",
+            "long"
+          ]
+        },
+        {
+          "name": "picked",
+          "type": [
+            "null",
+            "boolean",
+            "int",
+            "string"
+          ]
+        },
+        {
+          "name": "first",
+          "type": [
+            "null",
+            "boolean",
+            "int",
+            "string"
+          ]
+        },
+        {
+          "name": "last",
+          "type": [
+            "null",
+            "boolean",
+            "int",
+            "string"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "named",
+    "bytes": 32,
+    "schema": {
+      "type": "record",
+      "name": "Named",
+      "fields": [
+        {
+          "name": "kind",
+          "type": {
+            "type": "enum",
+            "name": "IndexDirection",
+            "symbols": [
+              "Increasing",
+              "Decreasing",
+              "Unordered"
+            ]
+          }
+        },
+        {
+          "name": "first_symbol",
+          "type": "IndexDirection"
+        },
+        {
+          "name": "id",
+          "type": {
+            "type": "fixed",
+            "name": "Uuid",
+            "size": 16
+          }
+        },
+        {
+          "name": "nested",
+          "type": {
+            "type": "record",
+            "name": "Version",
+            "fields": [
+              {
+                "name": "major",
+                "type": "int"
+              },
+              {
+                "name": "minor",
+                "type": "int"
+              },
+              {
+                "name": "revision",
+                "type": "int"
+              },
+              {
+                "name": "patch",
+                "type": "int"
+              }
+            ]
+          }
+        },
+        {
+          "name": "many",
+          "type": {
+            "type": "array",
+            "items": "Version"
+          }
+        }
+      ]
+    }
+  }
+]

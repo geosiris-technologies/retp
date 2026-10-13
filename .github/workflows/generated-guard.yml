@@ -1,0 +1,31 @@
+name: Generated guard
+
+# crates/generated/ is produced by an internal Geosiris tool from the ETP v1.2
+# Avro schemas and synchronised into this repository by a bot. A pull request
+# from anyone else must not touch it: a hand edit would be overwritten at the
+# next synchronisation.
+
+on:
+  pull_request:
+    paths:
+      - "crates/generated/**"
+      - "rc/etp-1.2/**"
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse hand edits of generated code and of the schemas
+        env:
+          ACTOR: ${{ github.event.pull_request.user.login }}
+          # TODO(verify): the login of the synchronisation bot, once it exists.
+          SYNC_BOT: ${{ vars.SYNC_BOT_LOGIN || 'geosiris-sync[bot]' }}
+        run: |
+          if [ "$ACTOR" = "$SYNC_BOT" ]; then
+            echo "Synchronised by $SYNC_BOT: accepted."
+            exit 0
+          fi
+          echo "::error::crates/generated/ and rc/etp-1.2/ are not edited by hand."
+          echo "Open an issue describing the problem; it is fixed in the generator"
+          echo "and arrives as a synchronised commit. See crates/generated/README.md."
+          exit 1

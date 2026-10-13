@@ -1,0 +1,59 @@
+[package]
+name = "retp-client"
+description = "An ETP v1.2 client: a transport under retp-proto's connection, and what a client does with it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["etp", "energyml", "client", "websocket", "geoscience"]
+categories = ["network-programming", "api-bindings"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-client"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+
+[dependencies]
+energyml-core = { workspace = true }
+retp-proto = { workspace = true }
+retp-avro = { workspace = true }
+retp-types = { workspace = true }
+# What a tolerant client takes as meant is logged.
+log = "0.4"
+# The REST transport (`rest.rs`) reads JSON and base64 in a front end as natively:
+# both are pure Rust, and wasm takes them.
+serde_json = "1.0"
+base64 = "0.22"
+
+# The native transport: a blocking WebSocket over rustls, and the HTTP probe.
+# None of it compiles for wasm, and the front end brings its own transport
+# (tier 6), so none of it is asked there. rustls takes `ring`, never its
+# default `aws-lc-rs`, which needs cmake and nasm to build.
+# The front end's transports (`web.rs`): `fetch` for the REST API, and the
+# browser's own WebSocket for ETP. Conversion only - the logic is in `rest`
+# and in the engine, which native tests exercise.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "Headers", "MessageEvent", "Request", "RequestCredentials", "RequestInit", "Response", "WebSocket", "Window", "WorkerGlobalScope"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+ureq = "3"
+# The logins (§4.1.2): the HMAC of Cognito's SECRET_HASH is `ring`'s -
+# already here for rustls. Their JSON and base64 come from above.
+ring = "0.17"
+
+# Only for the tests, and only for one check: comparing `EVERY_RELEASE` with
+# the shipped registry. The crate itself must not depend on it - it would pull
+# the twelve generated crates into a client that reads none of them.
+[dev-dependencies]
+energyml-schemas = { path = "../../../energyml-rust/crates/energyml-schemas", version = "0.1.0", features = ["all"] }
+
+# docs.rs builds on Linux with no native HDF5: every feature builds there.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true

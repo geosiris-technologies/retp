@@ -1,0 +1,968 @@
+[
+  {
+    "protocol": 0,
+    "messageType": 1,
+    "name": "RequestSession",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.RequestSession",
+    "bytes": 298
+  },
+  {
+    "protocol": 0,
+    "messageType": 2,
+    "name": "OpenSession",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.OpenSession",
+    "bytes": 309
+  },
+  {
+    "protocol": 0,
+    "messageType": 5,
+    "name": "CloseSession",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.CloseSession",
+    "bytes": 12
+  },
+  {
+    "protocol": 0,
+    "messageType": 6,
+    "name": "Authorize",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.Authorize",
+    "bytes": 50
+  },
+  {
+    "protocol": 0,
+    "messageType": 7,
+    "name": "AuthorizeResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.AuthorizeResponse",
+    "bytes": 27
+  },
+  {
+    "protocol": 0,
+    "messageType": 8,
+    "name": "Ping",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.Ping",
+    "bytes": 5
+  },
+  {
+    "protocol": 0,
+    "messageType": 9,
+    "name": "Pong",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.Pong",
+    "bytes": 5
+  },
+  {
+    "protocol": 0,
+    "messageType": 1000,
+    "name": "ProtocolException",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.ProtocolException",
+    "bytes": 61
+  },
+  {
+    "protocol": 0,
+    "messageType": 1001,
+    "name": "Acknowledge",
+    "fullName": "Energistics.Etp.v12.Protocol.Core.Acknowledge",
+    "bytes": 0
+  },
+  {
+    "protocol": 1,
+    "messageType": 1,
+    "name": "ChannelMetadata",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelStreaming.ChannelMetadata",
+    "bytes": 987
+  },
+  {
+    "protocol": 1,
+    "messageType": 2,
+    "name": "ChannelData",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelStreaming.ChannelData",
+    "bytes": 55
+  },
+  {
+    "protocol": 1,
+    "messageType": 3,
+    "name": "StartStreaming",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelStreaming.StartStreaming",
+    "bytes": 0
+  },
+  {
+    "protocol": 1,
+    "messageType": 4,
+    "name": "StopStreaming",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelStreaming.StopStreaming",
+    "bytes": 0
+  },
+  {
+    "protocol": 1,
+    "messageType": 5,
+    "name": "TruncateChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelStreaming.TruncateChannels",
+    "bytes": 22
+  },
+  {
+    "protocol": 2,
+    "messageType": 1,
+    "name": "GetFrameMetadata",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.GetFrameMetadata",
+    "bytes": 13
+  },
+  {
+    "protocol": 2,
+    "messageType": 2,
+    "name": "GetFrameMetadataResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.GetFrameMetadataResponse",
+    "bytes": 758
+  },
+  {
+    "protocol": 2,
+    "messageType": 3,
+    "name": "GetFrame",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.GetFrame",
+    "bytes": 206
+  },
+  {
+    "protocol": 2,
+    "messageType": 4,
+    "name": "GetFrameResponseHeader",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.GetFrameResponseHeader",
+    "bytes": 230
+  },
+  {
+    "protocol": 2,
+    "messageType": 5,
+    "name": "CancelGetFrame",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.CancelGetFrame",
+    "bytes": 16
+  },
+  {
+    "protocol": 2,
+    "messageType": 6,
+    "name": "GetFrameResponseRows",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataFrame.GetFrameResponseRows",
+    "bytes": 47
+  },
+  {
+    "protocol": 3,
+    "messageType": 1,
+    "name": "GetResources",
+    "fullName": "Energistics.Etp.v12.Protocol.Discovery.GetResources",
+    "bytes": 43
+  },
+  {
+    "protocol": 3,
+    "messageType": 4,
+    "name": "GetResourcesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Discovery.GetResourcesResponse",
+    "bytes": 299
+  },
+  {
+    "protocol": 3,
+    "messageType": 5,
+    "name": "GetDeletedResources",
+    "fullName": "Energistics.Etp.v12.Protocol.Discovery.GetDeletedResources",
+    "bytes": 55
+  },
+  {
+    "protocol": 3,
+    "messageType": 6,
+    "name": "GetDeletedResourcesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Discovery.GetDeletedResourcesResponse",
+    "bytes": 80
+  },
+  {
+    "protocol": 3,
+    "messageType": 7,
+    "name": "GetResourcesEdgesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Discovery.GetResourcesEdgesResponse",
+    "bytes": 106
+  },
+  {
+    "protocol": 4,
+    "messageType": 1,
+    "name": "GetDataObjects",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.GetDataObjects",
+    "bytes": 33
+  },
+  {
+    "protocol": 4,
+    "messageType": 2,
+    "name": "PutDataObjects",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.PutDataObjects",
+    "bytes": 141
+  },
+  {
+    "protocol": 4,
+    "messageType": 3,
+    "name": "DeleteDataObjects",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.DeleteDataObjects",
+    "bytes": 22
+  },
+  {
+    "protocol": 4,
+    "messageType": 4,
+    "name": "GetDataObjectsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.GetDataObjectsResponse",
+    "bytes": 259
+  },
+  {
+    "protocol": 4,
+    "messageType": 8,
+    "name": "Chunk",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.Chunk",
+    "bytes": 20
+  },
+  {
+    "protocol": 4,
+    "messageType": 9,
+    "name": "PutDataObjectsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.PutDataObjectsResponse",
+    "bytes": 210
+  },
+  {
+    "protocol": 4,
+    "messageType": 10,
+    "name": "DeleteDataObjectsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Store.DeleteDataObjectsResponse",
+    "bytes": 44
+  },
+  {
+    "protocol": 5,
+    "messageType": 2,
+    "name": "ObjectChanged",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.ObjectChanged",
+    "bytes": 138
+  },
+  {
+    "protocol": 5,
+    "messageType": 3,
+    "name": "ObjectDeleted",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.ObjectDeleted",
+    "bytes": 33
+  },
+  {
+    "protocol": 5,
+    "messageType": 4,
+    "name": "UnsubscribeNotifications",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.UnsubscribeNotifications",
+    "bytes": 16
+  },
+  {
+    "protocol": 5,
+    "messageType": 5,
+    "name": "ObjectAccessRevoked",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.ObjectAccessRevoked",
+    "bytes": 33
+  },
+  {
+    "protocol": 5,
+    "messageType": 6,
+    "name": "SubscribeNotifications",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.SubscribeNotifications",
+    "bytes": 164
+  },
+  {
+    "protocol": 5,
+    "messageType": 7,
+    "name": "SubscriptionEnded",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.SubscriptionEnded",
+    "bytes": 28
+  },
+  {
+    "protocol": 5,
+    "messageType": 8,
+    "name": "UnsolicitedStoreNotifications",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.UnsolicitedStoreNotifications",
+    "bytes": 174
+  },
+  {
+    "protocol": 5,
+    "messageType": 9,
+    "name": "Chunk",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.Chunk",
+    "bytes": 22
+  },
+  {
+    "protocol": 5,
+    "messageType": 10,
+    "name": "SubscribeNotificationsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.SubscribeNotificationsResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 5,
+    "messageType": 11,
+    "name": "ObjectActiveStatusChanged",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreNotification.ObjectActiveStatusChanged",
+    "bytes": 125
+  },
+  {
+    "protocol": 6,
+    "messageType": 1,
+    "name": "DeleteParts",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.DeleteParts",
+    "bytes": 32
+  },
+  {
+    "protocol": 6,
+    "messageType": 3,
+    "name": "GetParts",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetParts",
+    "bytes": 63
+  },
+  {
+    "protocol": 6,
+    "messageType": 4,
+    "name": "GetPartsByRange",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetPartsByRange",
+    "bytes": 64
+  },
+  {
+    "protocol": 6,
+    "messageType": 5,
+    "name": "PutParts",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.PutParts",
+    "bytes": 72
+  },
+  {
+    "protocol": 6,
+    "messageType": 6,
+    "name": "GetPartsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetPartsResponse",
+    "bytes": 51
+  },
+  {
+    "protocol": 6,
+    "messageType": 7,
+    "name": "ReplacePartsByRange",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.ReplacePartsByRange",
+    "bytes": 106
+  },
+  {
+    "protocol": 6,
+    "messageType": 8,
+    "name": "GetPartsMetadata",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetPartsMetadata",
+    "bytes": 21
+  },
+  {
+    "protocol": 6,
+    "messageType": 9,
+    "name": "GetPartsMetadataResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetPartsMetadataResponse",
+    "bytes": 304
+  },
+  {
+    "protocol": 6,
+    "messageType": 10,
+    "name": "GetPartsByRangeResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetPartsByRangeResponse",
+    "bytes": 41
+  },
+  {
+    "protocol": 6,
+    "messageType": 11,
+    "name": "DeletePartsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.DeletePartsResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 6,
+    "messageType": 13,
+    "name": "PutPartsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.PutPartsResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 6,
+    "messageType": 14,
+    "name": "GetGrowingDataObjectsHeader",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetGrowingDataObjectsHeader",
+    "bytes": 51
+  },
+  {
+    "protocol": 6,
+    "messageType": 15,
+    "name": "GetGrowingDataObjectsHeaderResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetGrowingDataObjectsHeaderResponse",
+    "bytes": 140
+  },
+  {
+    "protocol": 6,
+    "messageType": 16,
+    "name": "PutGrowingDataObjectsHeader",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.PutGrowingDataObjectsHeader",
+    "bytes": 281
+  },
+  {
+    "protocol": 6,
+    "messageType": 17,
+    "name": "PutGrowingDataObjectsHeaderResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.PutGrowingDataObjectsHeaderResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 6,
+    "messageType": 18,
+    "name": "ReplacePartsByRangeResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.ReplacePartsByRangeResponse",
+    "bytes": 0
+  },
+  {
+    "protocol": 6,
+    "messageType": 19,
+    "name": "GetChangeAnnotations",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetChangeAnnotations",
+    "bytes": 27
+  },
+  {
+    "protocol": 6,
+    "messageType": 20,
+    "name": "GetChangeAnnotationsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObject.GetChangeAnnotationsResponse",
+    "bytes": 126
+  },
+  {
+    "protocol": 7,
+    "messageType": 2,
+    "name": "PartsChanged",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsChanged",
+    "bytes": 78
+  },
+  {
+    "protocol": 7,
+    "messageType": 3,
+    "name": "PartsDeleted",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsDeleted",
+    "bytes": 59
+  },
+  {
+    "protocol": 7,
+    "messageType": 4,
+    "name": "UnsubscribePartNotification",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.UnsubscribePartNotification",
+    "bytes": 16
+  },
+  {
+    "protocol": 7,
+    "messageType": 6,
+    "name": "PartsReplacedByRange",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartsReplacedByRange",
+    "bytes": 135
+  },
+  {
+    "protocol": 7,
+    "messageType": 7,
+    "name": "SubscribePartNotifications",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.SubscribePartNotifications",
+    "bytes": 173
+  },
+  {
+    "protocol": 7,
+    "messageType": 8,
+    "name": "PartSubscriptionEnded",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.PartSubscriptionEnded",
+    "bytes": 28
+  },
+  {
+    "protocol": 7,
+    "messageType": 9,
+    "name": "UnsolicitedPartNotifications",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.UnsolicitedPartNotifications",
+    "bytes": 173
+  },
+  {
+    "protocol": 7,
+    "messageType": 10,
+    "name": "SubscribePartNotificationsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectNotification.SubscribePartNotificationsResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 9,
+    "messageType": 1,
+    "name": "GetDataArraysResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataArraysResponse",
+    "bytes": 42
+  },
+  {
+    "protocol": 9,
+    "messageType": 2,
+    "name": "GetDataArrays",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataArrays",
+    "bytes": 33
+  },
+  {
+    "protocol": 9,
+    "messageType": 3,
+    "name": "GetDataSubarrays",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataSubarrays",
+    "bytes": 56
+  },
+  {
+    "protocol": 9,
+    "messageType": 4,
+    "name": "PutDataArrays",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutDataArrays",
+    "bytes": 61
+  },
+  {
+    "protocol": 9,
+    "messageType": 5,
+    "name": "PutDataSubarrays",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutDataSubarrays",
+    "bytes": 62
+  },
+  {
+    "protocol": 9,
+    "messageType": 6,
+    "name": "GetDataArrayMetadata",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataArrayMetadata",
+    "bytes": 33
+  },
+  {
+    "protocol": 9,
+    "messageType": 7,
+    "name": "GetDataArrayMetadataResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataArrayMetadataResponse",
+    "bytes": 106
+  },
+  {
+    "protocol": 9,
+    "messageType": 8,
+    "name": "GetDataSubarraysResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataSubarraysResponse",
+    "bytes": 33
+  },
+  {
+    "protocol": 9,
+    "messageType": 9,
+    "name": "PutUninitializedDataArrays",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutUninitializedDataArrays",
+    "bytes": 105
+  },
+  {
+    "protocol": 9,
+    "messageType": 10,
+    "name": "PutDataArraysResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutDataArraysResponse",
+    "bytes": 40
+  },
+  {
+    "protocol": 9,
+    "messageType": 11,
+    "name": "PutDataSubarraysResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutDataSubarraysResponse",
+    "bytes": 38
+  },
+  {
+    "protocol": 9,
+    "messageType": 12,
+    "name": "PutUninitializedDataArraysResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DataArray.PutUninitializedDataArraysResponse",
+    "bytes": 40
+  },
+  {
+    "protocol": 13,
+    "messageType": 1,
+    "name": "FindResources",
+    "fullName": "Energistics.Etp.v12.Protocol.DiscoveryQuery.FindResources",
+    "bytes": 53
+  },
+  {
+    "protocol": 13,
+    "messageType": 2,
+    "name": "FindResourcesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.DiscoveryQuery.FindResourcesResponse",
+    "bytes": 283
+  },
+  {
+    "protocol": 14,
+    "messageType": 1,
+    "name": "FindDataObjects",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreQuery.FindDataObjects",
+    "bytes": 77
+  },
+  {
+    "protocol": 14,
+    "messageType": 2,
+    "name": "FindDataObjectsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreQuery.FindDataObjectsResponse",
+    "bytes": 264
+  },
+  {
+    "protocol": 14,
+    "messageType": 3,
+    "name": "Chunk",
+    "fullName": "Energistics.Etp.v12.Protocol.StoreQuery.Chunk",
+    "bytes": 22
+  },
+  {
+    "protocol": 16,
+    "messageType": 1,
+    "name": "FindParts",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectQuery.FindParts",
+    "bytes": 24
+  },
+  {
+    "protocol": 16,
+    "messageType": 2,
+    "name": "FindPartsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.GrowingObjectQuery.FindPartsResponse",
+    "bytes": 84
+  },
+  {
+    "protocol": 18,
+    "messageType": 1,
+    "name": "StartTransaction",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.StartTransaction",
+    "bytes": 39
+  },
+  {
+    "protocol": 18,
+    "messageType": 2,
+    "name": "StartTransactionResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.StartTransactionResponse",
+    "bytes": 29
+  },
+  {
+    "protocol": 18,
+    "messageType": 3,
+    "name": "CommitTransaction",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.CommitTransaction",
+    "bytes": 16
+  },
+  {
+    "protocol": 18,
+    "messageType": 4,
+    "name": "RollbackTransaction",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.RollbackTransaction",
+    "bytes": 16
+  },
+  {
+    "protocol": 18,
+    "messageType": 5,
+    "name": "CommitTransactionResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.CommitTransactionResponse",
+    "bytes": 29
+  },
+  {
+    "protocol": 18,
+    "messageType": 6,
+    "name": "RollbackTransactionResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Transaction.RollbackTransactionResponse",
+    "bytes": 29
+  },
+  {
+    "protocol": 21,
+    "messageType": 1,
+    "name": "GetChannelMetadata",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetChannelMetadata",
+    "bytes": 21
+  },
+  {
+    "protocol": 21,
+    "messageType": 2,
+    "name": "GetChannelMetadataResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetChannelMetadataResponse",
+    "bytes": 726
+  },
+  {
+    "protocol": 21,
+    "messageType": 3,
+    "name": "SubscribeChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.SubscribeChannels",
+    "bytes": 65
+  },
+  {
+    "protocol": 21,
+    "messageType": 4,
+    "name": "ChannelData",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.ChannelData",
+    "bytes": 191
+  },
+  {
+    "protocol": 21,
+    "messageType": 6,
+    "name": "RangeReplaced",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.RangeReplaced",
+    "bytes": 207
+  },
+  {
+    "protocol": 21,
+    "messageType": 7,
+    "name": "UnsubscribeChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.UnsubscribeChannels",
+    "bytes": 14
+  },
+  {
+    "protocol": 21,
+    "messageType": 8,
+    "name": "SubscriptionsStopped",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.SubscriptionsStopped",
+    "bytes": 25
+  },
+  {
+    "protocol": 21,
+    "messageType": 9,
+    "name": "GetRanges",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetRanges",
+    "bytes": 276
+  },
+  {
+    "protocol": 21,
+    "messageType": 10,
+    "name": "GetRangesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetRangesResponse",
+    "bytes": 165
+  },
+  {
+    "protocol": 21,
+    "messageType": 11,
+    "name": "CancelGetRanges",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.CancelGetRanges",
+    "bytes": 16
+  },
+  {
+    "protocol": 21,
+    "messageType": 12,
+    "name": "SubscribeChannelsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.SubscribeChannelsResponse",
+    "bytes": 21
+  },
+  {
+    "protocol": 21,
+    "messageType": 13,
+    "name": "ChannelsTruncated",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.ChannelsTruncated",
+    "bytes": 18
+  },
+  {
+    "protocol": 21,
+    "messageType": 14,
+    "name": "GetChangeAnnotations",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetChangeAnnotations",
+    "bytes": 26
+  },
+  {
+    "protocol": 21,
+    "messageType": 15,
+    "name": "GetChangeAnnotationsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelSubscribe.GetChangeAnnotationsResponse",
+    "bytes": 200
+  },
+  {
+    "protocol": 22,
+    "messageType": 1,
+    "name": "OpenChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.OpenChannels",
+    "bytes": 20
+  },
+  {
+    "protocol": 22,
+    "messageType": 2,
+    "name": "OpenChannelsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.OpenChannelsResponse",
+    "bytes": 640
+  },
+  {
+    "protocol": 22,
+    "messageType": 3,
+    "name": "CloseChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.CloseChannels",
+    "bytes": 26
+  },
+  {
+    "protocol": 22,
+    "messageType": 4,
+    "name": "ChannelData",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.ChannelData",
+    "bytes": 90
+  },
+  {
+    "protocol": 22,
+    "messageType": 6,
+    "name": "ReplaceRange",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.ReplaceRange",
+    "bytes": 162
+  },
+  {
+    "protocol": 22,
+    "messageType": 7,
+    "name": "ChannelsClosed",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.ChannelsClosed",
+    "bytes": 37
+  },
+  {
+    "protocol": 22,
+    "messageType": 8,
+    "name": "ReplaceRangeResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.ReplaceRangeResponse",
+    "bytes": 5
+  },
+  {
+    "protocol": 22,
+    "messageType": 9,
+    "name": "TruncateChannels",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.TruncateChannels",
+    "bytes": 23
+  },
+  {
+    "protocol": 22,
+    "messageType": 10,
+    "name": "TruncateChannelsResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.ChannelDataLoad.TruncateChannelsResponse",
+    "bytes": 25
+  },
+  {
+    "protocol": 24,
+    "messageType": 1,
+    "name": "GetDataspaces",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.GetDataspaces",
+    "bytes": 6
+  },
+  {
+    "protocol": 24,
+    "messageType": 2,
+    "name": "GetDataspacesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.GetDataspacesResponse",
+    "bytes": 143
+  },
+  {
+    "protocol": 24,
+    "messageType": 3,
+    "name": "PutDataspaces",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.PutDataspaces",
+    "bytes": 54
+  },
+  {
+    "protocol": 24,
+    "messageType": 4,
+    "name": "DeleteDataspaces",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.DeleteDataspaces",
+    "bytes": 21
+  },
+  {
+    "protocol": 24,
+    "messageType": 5,
+    "name": "DeleteDataspacesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.DeleteDataspacesResponse",
+    "bytes": 40
+  },
+  {
+    "protocol": 24,
+    "messageType": 6,
+    "name": "PutDataspacesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.Dataspace.PutDataspacesResponse",
+    "bytes": 39
+  },
+  {
+    "protocol": 25,
+    "messageType": 1,
+    "name": "GetSupportedTypes",
+    "fullName": "Energistics.Etp.v12.Protocol.SupportedTypes.GetSupportedTypes",
+    "bytes": 15
+  },
+  {
+    "protocol": 25,
+    "messageType": 2,
+    "name": "GetSupportedTypesResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.SupportedTypes.GetSupportedTypesResponse",
+    "bytes": 19
+  },
+  {
+    "protocol": 2100,
+    "messageType": 1,
+    "name": "WMLS_AddToStore",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_AddToStore",
+    "bytes": 48
+  },
+  {
+    "protocol": 2100,
+    "messageType": 2,
+    "name": "WMLS_AddToStoreResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_AddToStoreResponse",
+    "bytes": 15
+  },
+  {
+    "protocol": 2100,
+    "messageType": 3,
+    "name": "WMLS_DeleteFromStore",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_DeleteFromStore",
+    "bytes": 48
+  },
+  {
+    "protocol": 2100,
+    "messageType": 4,
+    "name": "WMLS_DeleteFromStoreResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_DeleteFromStoreResponse",
+    "bytes": 15
+  },
+  {
+    "protocol": 2100,
+    "messageType": 5,
+    "name": "WMLS_GetBaseMsg",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetBaseMsg",
+    "bytes": 3
+  },
+  {
+    "protocol": 2100,
+    "messageType": 6,
+    "name": "WMLS_GetBaseMsgResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetBaseMsgResponse",
+    "bytes": 10
+  },
+  {
+    "protocol": 2100,
+    "messageType": 7,
+    "name": "WMLS_GetCap",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetCap",
+    "bytes": 12
+  },
+  {
+    "protocol": 2100,
+    "messageType": 8,
+    "name": "WMLS_GetCapResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetCapResponse",
+    "bytes": 27
+  },
+  {
+    "protocol": 2100,
+    "messageType": 9,
+    "name": "WMLS_GetFromStore",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetFromStore",
+    "bytes": 47
+  },
+  {
+    "protocol": 2100,
+    "messageType": 10,
+    "name": "WMLS_GetFromStoreResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetFromStoreResponse",
+    "bytes": 27
+  },
+  {
+    "protocol": 2100,
+    "messageType": 11,
+    "name": "WMLS_GetVersion",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetVersion",
+    "bytes": 0
+  },
+  {
+    "protocol": 2100,
+    "messageType": 12,
+    "name": "WMLS_GetVersionResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_GetVersionResponse",
+    "bytes": 11
+  },
+  {
+    "protocol": 2100,
+    "messageType": 13,
+    "name": "WMLS_UpdateInStore",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_UpdateInStore",
+    "bytes": 48
+  },
+  {
+    "protocol": 2100,
+    "messageType": 14,
+    "name": "WMLS_UpdateInStoreResponse",
+    "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_UpdateInStoreResponse",
+    "bytes": 15
+  }
+]

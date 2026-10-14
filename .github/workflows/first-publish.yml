@@ -10,7 +10,9 @@ name: First publication
 # checked out next to this repository; `cargo publish` drops the path and each
 # packaged crate is built against the energyml crates on crates.io.
 #
-# Rerunnable: a crate whose version is already on crates.io is skipped. crates.io
+# Only crates new to crates.io: a crate that already exists (`etptypes`, whatever
+# its version) is an update, which the token cannot make and trusted publishing
+# does (release-plz.yml). Rerunnable: a crate published by a previous run is skipped. crates.io
 # limits how fast new crates are accepted (a burst, then one every few minutes);
 # on a 429 the job waits until the time the registry gives, then goes on.
 
@@ -70,7 +72,8 @@ jobs:
           crates = [(p["name"], p["version"]) for p in meta["packages"] if p.get("publish") != []]
 
           def on_registry(name, version):
-              req = urllib.request.Request(f"https://crates.io/api/v1/crates/{name}/{version}",
+              # The crate, not this version: an existing crate is not for this workflow.
+              req = urllib.request.Request(f"https://crates.io/api/v1/crates/{name}",
                                            headers={"User-Agent": "retp first-publish"})
               try:
                   urllib.request.urlopen(req, timeout=30)

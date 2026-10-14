@@ -39,6 +39,5 @@ from the manifests (normal, build and dev dependencies):
 
 `retp-tests` is never published.
 
-While the crates above level 0 are not on the registry, the checks of the CI
-package with `--no-verify`: a crate cannot be built from its packed sources
-before its dependencies exist on the registry.
+The energyml crates are dependencies from crates.io, not by path: a version of
+retp that needs an unreleased change of energyml-rust waits for that release.

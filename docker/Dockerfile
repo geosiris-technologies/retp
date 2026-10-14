@@ -9,19 +9,14 @@
 #
 # Built by `.github/workflows/docker.yml` only.
 #
-# Build context: the PARENT directory holding `retp/` and its sibling
-# `energyml-rust/`, because the workspace still depends on energyml crates by
-# path. Once those are on crates.io the context becomes this repository alone
-# (TODO: simplify then).
+# Build context: this repository; the energyml crates come from crates.io.
 
 FROM rust:1-bookworm AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libhdf5-dev pkg-config \
  && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-COPY retp/ retp/
-COPY energyml-rust/ energyml-rust/
 WORKDIR /src/retp
+COPY . .
 ARG RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_LTO=${RELEASE_LTO}
 RUN --mount=type=cache,target=/usr/local/cargo/registry/index,sharing=locked \

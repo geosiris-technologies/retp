@@ -19,11 +19,6 @@ env:
   # community.opengroup.org:5555, and which tag to pin (the latest of main moves).
   OPEN_ETP_IMAGE: community.opengroup.org:5555/osdu/platform/domain-data-mgmt-services/reservoir/open-etp-server/open-etp-server-main:latest
 
-# Pre-publication layout: sibling checkout by path, see ci.yml.
-defaults:
-  run:
-    working-directory: retp
-
 jobs:
   interop:
     runs-on: ubuntu-latest
@@ -43,17 +38,8 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: main
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
 
       # The image's default command only prints usage, so the server is started
       # with `docker run` rather than as a service (a service cannot take a
@@ -61,7 +47,6 @@ jobs:
       # (authN and authZ off, single partition, standalone).
       # TODO(verify): the README's flags against the pinned image.
       - name: Start open-etp-server
-        working-directory: .
         run: |
           docker run -d --name open-etp-server --network host \
             -e RDMS_DATA_PARTITION_MODE=single \
@@ -90,7 +75,6 @@ jobs:
 
       - name: Server log
         if: always()
-        working-directory: .
         run: docker logs open-etp-server || true
 
       - uses: actions/upload-artifact@v7
@@ -98,6 +82,6 @@ jobs:
         with:
           name: interop-report
           path: |
-            retp/interop-report.md
-            retp/interop-report.json
+            interop-report.md
+            interop-report.json
           if-no-files-found: warn

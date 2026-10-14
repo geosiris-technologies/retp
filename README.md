@@ -7,11 +7,9 @@ data objects (RESQML, WITSML, PRODML), data arrays and streams with a server,
 including OSDU's Reservoir DDMS. `retp` is its Rust implementation: encode and
 decode, hold a session, talk to a server, and check one.
 
-> **Status: pre-release.** Nothing is published to crates.io yet. This
-> repository replaces the proof of concept `etp-rs`.
-> The workspace still depends on a sibling checkout of
-> [energyml-rust](https://github.com/geosiris-technologies/energyml-rust) by
-> path, until the energyml crates are on crates.io.
+> **Status: early.** Version 0.1 is on crates.io; the API will still move. This
+> repository replaces the proof of concept `etp-rs`. The energyml crates it
+> builds on come from crates.io, like any other dependency.
 
 ## Crates
 

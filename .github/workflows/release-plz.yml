@@ -11,17 +11,14 @@ name: Release-plz
 # crates.io needs one publication with an API token first (docs/releasing.md).
 #
 # Both jobs run only once the repository variable RELEASE_PLZ_PUBLISH is 'true'.
-# Leave it unset until every dependency is on crates.io: release-plz works on a
-# copy of this repository alone, where the sibling ../energyml-rust the workspace
-# depends on by path does not exist, so neither the release pull request nor
-# `cargo publish` can succeed before.
+# release-plz works on a copy of this repository alone: every dependency, the
+# energyml crates included, comes from crates.io.
 
 on:
   push:
     branches: [main, dev]
   workflow_dispatch:
 
-# Pre-publication layout: sibling checkout by path, see ci.yml.
 jobs:
   release-plz-pr:
     name: Release PR
@@ -36,25 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          path: retp
           fetch-depth: 0
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: main
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: release-plz/action@v0.5
         with:
           command: release-pr
-          manifest_path: retp/Cargo.toml
+          manifest_path: Cargo.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release:
     name: Publish
     runs-on: ubuntu-latest
-    # Publishing is disabled until the energyml crates are on crates.io.
     if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && vars.RELEASE_PLZ_PUBLISH == 'true' }}
     environment: crates-io
     permissions:
@@ -64,19 +54,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          path: retp
           fetch-depth: 0
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: main
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - id: rp
         uses: release-plz/action@v0.5
         with:
           command: release
-          manifest_path: retp/Cargo.toml
+          manifest_path: Cargo.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No CARGO_REGISTRY_TOKEN: the action exchanges the OIDC token for a

@@ -16,17 +16,9 @@ on:
 permissions:
   contents: write
 
-# Pre-publication layout: sibling checkout by path, see ci.yml.
-defaults:
-  run:
-    working-directory: retp
-
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v7
       - name: Create the release if it does not exist
@@ -62,20 +54,12 @@ jobs:
           # built here.
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: main
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          # Run from the repository checked out under retp/.
-          manifest-path: retp/Cargo.toml
+          manifest-path: Cargo.toml
           bin: retp
           target: ${{ matrix.target }}
           # $tag is `retp-cli-vX.Y.Z`: the archive is retp-cli-vX.Y.Z-<target>.

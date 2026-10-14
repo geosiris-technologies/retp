@@ -7,10 +7,6 @@
 #
 # Nothing is pushed until the repository variable IMAGE_PUBLISH is 'true': until
 # then main, tags and manual runs only build and smoke-test, as a pull request does.
-#
-# While the workspace depends on energyml crates by path, the sibling
-# repository is checked out next to this one and the build context is their
-# common parent (see docker/Dockerfile).
 name: docker
 
 on:
@@ -46,12 +42,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          path: energyml-rust
       - uses: docker/setup-buildx-action@v4
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && vars.IMAGE_PUBLISH == 'true'
@@ -72,7 +62,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: retp/docker/Dockerfile
+          file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: |
             REVISION=${{ github.sha }}

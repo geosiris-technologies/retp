@@ -14,52 +14,29 @@ env:
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
 
-# Pre-publication layout: this workspace depends on the sibling checkout
-# ../energyml-rust by path. Every job therefore checks out two repositories side
-# by side and works inside `retp/`. This disappears once the energyml crates are
-# on crates.io.
-defaults:
-  run:
-    working-directory: retp
+# The energyml crates come from crates.io, at the version Cargo.lock holds; the
+# weekly canary builds against the main branch of energyml-rust instead.
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      # `cargo fmt` loads the workspace, which names ../energyml-rust by path.
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       # Never `cargo fmt --all`: it would rewrite crates/generated/.
       - name: rustfmt, every hand-written crate (scripts/fmt.sh --check)
-        working-directory: retp
         run: bash scripts/fmt.sh --check
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -71,17 +48,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - run: cargo test --workspace -j 4 -- --test-threads=4
 
   # The ETP crates that the page uses must keep compiling for wasm.
@@ -89,19 +57,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - run: >
           cargo check --target wasm32-unknown-unknown
           -p retp-avro -p retp-types -p retp-proto -p retp-client
@@ -114,20 +73,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Pinned: the fixtures are compared byte for byte with what this version writes.
       - run: pip install fastavro==1.13.1
       - name: Regenerate the fixtures
-        working-directory: retp/crates/retp-tests/tests/fixtures
+        working-directory: crates/retp-tests/tests/fixtures
         run: |
           python make.py
           python make_json.py
@@ -137,25 +89,14 @@ jobs:
         run: git diff --exit-code -- crates/retp-tests/tests/fixtures
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - run: cargo test --workspace --test crossaudit --test unions --test json
 
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
@@ -166,16 +107,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: retp/Cargo.toml
+          manifest-path: Cargo.toml
           command: check
 
   doc:
@@ -184,17 +118,8 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: ${{ vars.ENERGYML_RUST_REF || 'main' }}
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
       - run: cargo doc --workspace --no-deps
       - uses: peaceiris/actions-mdbook@v2
         with:
@@ -207,8 +132,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -219,9 +142,6 @@ jobs:
   # action's current major is v3.0.0 (Node 24).
   gitleaks:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v7
         with:

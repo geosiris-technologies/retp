@@ -58,5 +58,21 @@ cargo check --target wasm32-unknown-unknown -p retp-client
 `cargo fmt --all` would rewrite the generated crates. Format the hand-written
 crates by name.
 
+## Working against an unreleased energyml-rust
+
+The energyml crates come from crates.io. To build against a local checkout of
+[energyml-rust](https://github.com/geosiris-technologies/energyml-rust) instead,
+patch them in a `.cargo/config.toml` that you do not commit (the weekly canary
+does the same against its main branch):
+
+```toml
+[patch.crates-io]
+energyml-core = { path = "../energyml-rust/crates/energyml-core" }
+energyml-storage = { path = "../energyml-rust/crates/energyml-storage" }
+# ... every energyml crate in `cargo tree`
+```
+
+A change in retp that needs a change in energyml-rust is released there first.
+
 By contributing you agree that your contribution is licensed under the
 Apache License 2.0, as the project is.

@@ -11,12 +11,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Pre-publication layout: sibling checkout by path, see ci.yml. Once the
-# energyml crates are on crates.io this job swaps the checkout for a [patch]
-# pointing at the git main branch of energyml-rust.
-defaults:
-  run:
-    working-directory: retp
+# The workspace takes the energyml crates from crates.io; here every one of them in
+# the dependency graph is patched to the main branch of energyml-rust instead.
 
 jobs:
   canary:
@@ -26,22 +22,20 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: retp
-      - uses: actions/checkout@v7
-        with:
-          repository: geosiris-technologies/energyml-rust
-          ref: main
-          path: energyml-rust
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: retp
+      - name: Patch the energyml crates to energyml-rust main
+        run: |
+          mkdir -p .cargo
+          echo '[patch.crates-io]' > .cargo/config.toml
+          cargo metadata --format-version 1             | jq -r '.packages[] | select(.source != null and (.source | startswith("registry+")) and (.name | startswith("energyml"))) | .name'             | sort -u             | while read -r name; do
+                echo "$name = { git = \"https://github.com/geosiris-technologies/energyml-rust\", branch = \"main\" }" >> .cargo/config.toml
+              done
+          cat .cargo/config.toml
       - run: cargo test --workspace -j 4 -- --test-threads=4
 
       - name: Open an issue when the canary fails
         if: failure()
-        working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

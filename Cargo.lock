@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "energyml-etp-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "energyml-core",
@@ -1120,7 +1120,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "retp-avro"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "retp-derive",
  "serde_json",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "retp-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "retp-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "energyml-core",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "retp-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "retp-derive"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "retp-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "energyml-core",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "retp-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "energyml-core",
  "energyml-etp-store",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "retp-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "retp-avro",
  "retp-proto",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "retp-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "retp-avro",
 ]

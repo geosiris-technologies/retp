@@ -22,4 +22,5 @@ changelog_update = false
 [[package]]
 name = "etptypes"
 # Not published for now: crates.io keeps etptypes 1.x (Cargo.toml says publish = false).
+publish = false
 release = false

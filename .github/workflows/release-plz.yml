@@ -40,16 +40,31 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      # A pull request opened with GITHUB_TOKEN starts its checks only once a
+      # maintainer approves them. Opened by the release bot (a GitHub App: variable
+      # RELEASE_BOT_CLIENT_ID, secret RELEASE_BOT_PRIVATE_KEY), its checks run like
+      # those of any other pull request. Without the app, GITHUB_TOKEN.
+      - id: bot
+        if: ${{ vars.RELEASE_BOT_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      # The semver check builds each changed crate's rustdoc with all its features,
+      # `hdf5` among them, which links the HDF5 C library.
+      - name: Install HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
       - uses: release-plz/action@v0.5
         with:
           command: release-pr
           manifest_path: Cargo.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.bot.outputs.token || secrets.GITHUB_TOKEN }}
 
   release:
     name: Publish

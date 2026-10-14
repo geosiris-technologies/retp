@@ -28,7 +28,10 @@ jobs:
         run: |
           mkdir -p .cargo
           echo '[patch.crates-io]' > .cargo/config.toml
-          cargo metadata --format-version 1             | jq -r '.packages[] | select(.source != null and (.source | startswith("registry+")) and (.name | startswith("energyml"))) | .name'             | sort -u             | while read -r name; do
+          cargo metadata --format-version 1 \
+            | jq -r '.packages[] | select(.source != null and (.source | startswith("registry+")) and (.name | startswith("energyml"))) | .name' \
+            | sort -u \
+            | while read -r name; do
                 echo "$name = { git = \"https://github.com/geosiris-technologies/energyml-rust\", branch = \"main\" }" >> .cargo/config.toml
               done
           cat .cargo/config.toml

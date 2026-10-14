@@ -26,7 +26,7 @@ decode, hold a session, talk to a server, and check one.
 | `energyml-etp-store` | the bridge: an ETP dataspace behind energyml-rust's `EnergymlStorage`, so that code which reads a file reads a server |
 | `retp-conformance` | checks a server against what the specification makes mandatory, and writes the report a provider can act on |
 | `retp-cli` | the `retp` command |
-| `etptypes` 2.0 | a facade over `retp-types`, for dependents of the old crate |
+| `etptypes` 2.0 | a facade over `retp-types`, for dependents of the old crate (not published yet: crates.io keeps 1.x) |
 
 ## Command line
 

@@ -2,6 +2,9 @@
 name = "etptypes"
 version = "2.0.0"
 description = "Moved to retp-types - this crate re-exports it"
+# Not published for now (decision of 14/10/2026): crates.io keeps etptypes 1.x for the
+# projects that depend on it.
+publish = false
 readme = "README.md"
 keywords = ["etp", "energistics", "osdu", "avro"]
 categories = ["encoding"]

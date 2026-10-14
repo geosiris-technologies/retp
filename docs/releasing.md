@@ -38,6 +38,23 @@ from the manifests (normal, build and dev dependencies):
 | 7 | `retp-cli`, `retp-conformance` |
 
 `retp-tests` is never published.
+`etptypes` is not published for now: crates.io keeps its 1.x versions for the
+projects that depend on them, and the facade waits.
+
+## Publishing from a GitHub release
+
+A published GitHub release publishes too. Its tag must name a version of the
+manifests, `vX.Y.Z` for the workspace version or `<crate>-vX.Y.Z`, and its commit
+must be on `main` or `dev`; otherwise the job stops before uploading anything.
+The release pull request is still what prepares the versions and the changelogs:
+merge it, then create the release on the merge commit.
+
+The repository variable `RELEASE_PLZ_PUBLISH` chooses the trigger: `true`
+publishes on a merge to `main` or `dev` and on a release, `release` on a release
+only, and nothing is published while it is unset. A GitHub release marked as a
+pre-release publishes to crates.io but starts neither the CLI binaries nor the
+image.
+
 
 The energyml crates are dependencies from crates.io, not by path: a version of
 retp that needs an unreleased change of energyml-rust waits for that release.

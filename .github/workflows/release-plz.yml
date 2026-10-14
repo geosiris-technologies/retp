@@ -13,16 +13,25 @@ name: Release-plz
 # Both jobs run only once the repository variable RELEASE_PLZ_PUBLISH is 'true'.
 # release-plz works on a copy of this repository alone: every dependency, the
 # energyml crates included, comes from crates.io.
+#
+# A GitHub release (event `release: published`) publishes too, once its tag is
+# checked against the manifests. The repository variable RELEASE_PLZ_PUBLISH
+# chooses: 'true' publishes on a merge to main or dev and on a release; 'release'
+# on a release only (the release pull request still prepares versions and
+# changelogs); unset, nothing is published. The `crates-io` environment accepts
+# the branches main and dev and the tags `v*` and `*-v*`.
 
 on:
   push:
     branches: [main, dev]
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
   release-plz-pr:
     name: Release PR
-    if: ${{ github.ref == 'refs/heads/main' && vars.RELEASE_PLZ_PUBLISH == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -45,7 +54,9 @@ jobs:
   release:
     name: Publish
     runs-on: ubuntu-latest
-    if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && vars.RELEASE_PLZ_PUBLISH == 'true' }}
+    if: >-
+      ${{ (github.event_name != 'release' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && vars.RELEASE_PLZ_PUBLISH == 'true')
+       || (github.event_name == 'release' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release')) }}
     environment: crates-io
     permissions:
       contents: write
@@ -56,6 +67,34 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      # A GitHub release publishes what its tag names, from the history of main or dev
+      # only: `vX.Y.Z` (the workspace version) or `<crate>-vX.Y.Z`. Anything else is
+      # refused before a single crate leaves.
+      - name: Check the release
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git fetch --quiet origin main
+          git fetch --quiet origin dev 2>/dev/null || true
+          on_branch=no
+          for b in main dev; do
+            if git rev-parse -q --verify "origin/$b" >/dev/null && git merge-base --is-ancestor HEAD "origin/$b"; then
+              on_branch=yes
+            fi
+          done
+          if [ "$on_branch" != yes ]; then
+            echo "::error::release $TAG: its commit is on neither main nor dev"
+            exit 1
+          fi
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | "v\(.version)", "\(.name)-v\(.version)"' \
+            | sort -u > versions.txt
+          if ! grep -qxF "$TAG" versions.txt; then
+            echo "::error::release $TAG names no version of the manifests (expected v<workspace version> or <crate>-v<version>)"
+            exit 1
+          fi
+          rm versions.txt
       - id: rp
         uses: release-plz/action@v0.5
         with:
@@ -72,8 +111,8 @@ jobs:
       # extra secret; the publish gates stay in those workflows (IMAGE_PUBLISH)
       # and in this job (RELEASE_PLZ_PUBLISH).
       - name: Start the tag workflows
-        # Not from dev: a pre-release must not become the `latest` image.
-        if: ${{ github.ref == 'refs/heads/main' && steps.rp.outputs.releases_created == 'true' }}
+        # Not from dev nor a GitHub pre-release: a pre-release must not become the `latest` image.
+        if: ${{ github.ref != 'refs/heads/dev' && !github.event.release.prerelease && steps.rp.outputs.releases_created == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

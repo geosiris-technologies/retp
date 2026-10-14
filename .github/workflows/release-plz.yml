@@ -4,8 +4,11 @@ name: Release-plz
 # publishes to crates.io when it is merged. Configuration: release-plz.toml.
 #
 # Publication uses crates.io trusted publishing (OIDC), like energyml-rust: no
-# token is stored. The first publication of each crate is done by hand, then
-# trusted publishing is configured per crate (docs/releasing.md).
+# token is stored. The publish job runs in the `crates-io` environment, which
+# crates.io checks (each crate's trusted publisher names it) and which only `main`
+# and `dev` may deploy to. A push to dev publishes a pre-release set by hand in
+# Cargo.toml, without a release pull request, CLI binaries or image. A crate new to
+# crates.io needs one publication with an API token first (docs/releasing.md).
 #
 # Both jobs run only once the repository variable RELEASE_PLZ_PUBLISH is 'true'.
 # Leave it unset until every dependency is on crates.io: release-plz works on a
@@ -15,14 +18,14 @@ name: Release-plz
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 # Pre-publication layout: sibling checkout by path, see ci.yml.
 jobs:
   release-plz-pr:
     name: Release PR
-    if: vars.RELEASE_PLZ_PUBLISH == 'true'
+    if: ${{ github.ref == 'refs/heads/main' && vars.RELEASE_PLZ_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -52,7 +55,8 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     # Publishing is disabled until the energyml crates are on crates.io.
-    if: ${{ github.ref == 'refs/heads/main' && vars.RELEASE_PLZ_PUBLISH == 'true' }}
+    if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && vars.RELEASE_PLZ_PUBLISH == 'true' }}
+    environment: crates-io
     permissions:
       contents: write
       id-token: write # crates.io trusted publishing
@@ -84,7 +88,8 @@ jobs:
       # extra secret; the publish gates stay in those workflows (IMAGE_PUBLISH)
       # and in this job (RELEASE_PLZ_PUBLISH).
       - name: Start the tag workflows
-        if: ${{ steps.rp.outputs.releases_created == 'true' }}
+        # Not from dev: a pre-release must not become the `latest` image.
+        if: ${{ github.ref == 'refs/heads/main' && steps.rp.outputs.releases_created == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

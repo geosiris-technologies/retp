@@ -13,6 +13,8 @@ git_tag_name = "{{ package }}-v{{ version }}"
 
 [[package]]
 name = "retp-tests"
+# Never published (publish = false in its Cargo.toml): release-plz must agree.
+publish = false
 release = false
 changelog_update = false
 

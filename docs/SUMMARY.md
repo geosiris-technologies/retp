@@ -3,7 +3,7 @@
 - [Library usage](client.md)
 - [Command line](cli.md)
 - [Conformance checker](conformance.md)
-- [Python bridge (planned)](python.md)
+- [Python bridge](python.md)
 - [Releasing](releasing.md)
 - [Architecture decisions](adr/README.md)
   - [1. Client architecture](adr/0001-client-architecture.md)

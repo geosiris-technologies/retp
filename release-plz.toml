@@ -4,12 +4,12 @@
 changelog_update = true
 git_release_enable = false
 semver_check = true
-# Tag format: <crate>-v<version> (for example retp-cli-v0.2.0), which is what the
-# release-cli and docker workflows listen for (and release-plz.yml dispatches).
+# Tag format: <crate>-v<version> (for example retp-cli-v0.2.0). The workflows that
+# publish the CLI archives, the image and the wheels listen for the GitHub release
+# `vX.Y.Z`; release-cli.yml and docker.yml also accept a `retp-cli-v*` tag.
 git_tag_name = "{{ package }}-v{{ version }}"
-# Publish only when every dependency is on crates.io. While the energyml
-# crates are path dependencies of a sibling checkout, `release-plz release`
-# would fail on its own; the workflow is kept manual until then.
+# Every dependency is on crates.io (the energyml crates included): the workspace
+# publishes on its own.
 
 [[package]]
 name = "retp-tests"
@@ -24,3 +24,11 @@ name = "etptypes"
 # Not published for now: crates.io keeps etptypes 1.x (Cargo.toml says publish = false).
 publish = false
 release = false
+
+# The Python bridge ships as wheels (python.yml), never to crates.io: release-plz must
+# neither publish it nor tag it.
+[[package]]
+name = "retp-python"
+publish = false
+release = false
+changelog_update = false

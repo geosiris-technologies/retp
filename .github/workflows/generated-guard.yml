@@ -35,7 +35,8 @@ jobs:
             exit 0
           fi
           from=$(git merge-base "$BASE" "$HEAD")
-          versionless() { sed -E 's/version = "[^"]*"/version = ""/g'; }
+          # `version = "..."` as a key of its own: `rust-version = "..."` is not release metadata.
+          versionless() { sed -E 's/(^|[^-A-Za-z_])version = "[^"]*"/\1version = ""/g'; }
           kept=""
           for f in $(git diff --name-only "$from" "$HEAD" -- crates/generated/ rc/etp-1.2/); do
             case "$f" in

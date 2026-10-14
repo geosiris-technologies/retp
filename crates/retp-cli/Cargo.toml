@@ -27,14 +27,16 @@ retp-client = { workspace = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }
-energyml-storage = { version = "0.1.1" }
-energyml-schemas = { version = "0.1.1", features = ["all"] }
+energyml-storage = { version = "0.1.2" }
+energyml-schemas = { version = "0.1.2", features = ["all"] }
 
 [features]
 default = []
 # Write the arrays of a downloaded dataspace to HDF5. Needs the HDF5 C library
 # at build time; without it `download-epc` refuses to write arrays and says so.
 hdf5 = ["energyml-storage/hdf5"]
+# HDF5 built from its sources and linked in (CMake and a C compiler at build time): the release archives.
+hdf5-static = ["hdf5", "energyml-storage/hdf5-static"]
 
 [lints.rust]
 missing_docs = "warn"

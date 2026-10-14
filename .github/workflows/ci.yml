@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -51,6 +54,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace -j 4 -- --test-threads=4
+
+  # The HDF5 paths (`retp-cli/hdf5`), on a system HDF5. `--all-targets` does not
+  # build the targets behind a feature that is off, so without this job nothing in
+  # the CI compiles `hdf5`. Features are enabled through the workspace, never
+  # `-p <crate>`, so the build matches the full suite.
+  hdf5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install HDF5
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
+      - name: Test with HDF5 enabled
+        run: cargo test --workspace -j 4 --features retp-cli/hdf5 -- --test-threads=4
+      - name: Clippy with HDF5 enabled
+        run: cargo clippy --workspace --all-targets --features retp-cli/hdf5 -- -D warnings
+
+  # What the CLI archives and the wheels ship: HDF5 built from its sources
+  # (`hdf5-static`, CMake and a C compiler). Checked here so that a breakage
+  # shows on a pull request, not when a release is cut. Linux only; the release
+  # workflows build every target.
+  hdf5-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --features retp-cli/hdf5-static
 
   # The ETP crates that the page uses must keep compiling for wasm.
   wasm:
@@ -101,7 +135,8 @@ jobs:
         with:
           tool: cargo-hack
       # Each crate against its own rust-version (from the workspace's Cargo.toml).
-      - run: cargo hack check --workspace --rust-version
+      # The Python bridge is a cdylib built by maturin, not a library to check here.
+      - run: cargo hack check --workspace --exclude retp-python --rust-version
 
   deny:
     runs-on: ubuntu-latest
@@ -120,7 +155,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --exclude retp-python
       - uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: latest

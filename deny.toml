@@ -4,6 +4,8 @@ all-features = true
 
 [advisories]
 version = 2
+# A yanked crate is an error, not a warning.
+yanked = "deny"
 ignore = [
     # proc-macro-error2 is unmaintained (no vulnerability). It is a build-time proc-macro dependency of
     # hdf5-metno-derive (HDF5 bindings, behind the optional `hdf5` feature), which has no maintained
@@ -26,8 +28,15 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "CDLA-Permissive-2.0",
+    # The HDF5 licence, of hdf5-metno-src (HDF5 built from its sources, behind the
+    # `hdf5-static` feature of the CLI archives and the wheels). With all-features
+    # on, the graph holds it as soon as `retp-cli` has that feature.
+    "HDF5",
 ]
 confidence-threshold = 0.8
+# TODO(verify): run `cargo deny check licenses` on the tree with `hdf5-static` and add any
+# other licence it reports and that is compatible with Apache-2.0 (energyml-rust also
+# allows MIT-0, 0BSD, BSL-1.0 and Unlicense), and trim entries that stay unused.
 
 # `ring` carries a mixed ISC/OpenSSL-style licence file that cargo-deny does
 # not recognise by itself. TODO(verify): the hash is the one published in the
@@ -40,6 +49,9 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Dev-dependencies on a crate of this repository are by path only, without a
+# `version` (docs/releasing.md): not a wildcard.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

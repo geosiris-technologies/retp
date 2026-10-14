@@ -1,25 +1,27 @@
 name: Release-plz
 
 # Opens and maintains a release pull request (version bumps, changelogs), and
-# publishes to crates.io when it is merged. Configuration: release-plz.toml.
+# publishes the crates to crates.io. Configuration: release-plz.toml.
 #
-# Publication uses crates.io trusted publishing (OIDC), like energyml-rust: no
-# token is stored. The publish job runs in the `crates-io` environment, which
-# crates.io checks (each crate's trusted publisher names it) and which only `main`
-# and `dev` may deploy to. A push to dev publishes a pre-release set by hand in
-# Cargo.toml, without a release pull request, CLI binaries or image. A crate new to
-# crates.io needs one publication with an API token first (docs/releasing.md).
+# A published GitHub release `vX.Y.Z` is what publishes everything (docs/releasing.md):
+# the crates here, and, from the same release, the CLI archives (release-cli.yml), the
+# image (docker.yml) and the Python wheels (python.yml). Merging the release pull
+# request publishes nothing.
 #
-# Both jobs run only once the repository variable RELEASE_PLZ_PUBLISH is 'true'.
+# The repository variable RELEASE_PLZ_PUBLISH chooses: 'release' publishes on a
+# release only (the setting to use); 'true' also publishes on a merge to main or dev;
+# unset, nothing is published and no release pull request is opened. A release is
+# checked first: its commit is on main or dev, and its tag names a version of the
+# manifests. The `crates-io` environment accepts the branches main and dev and the
+# tags `v*` and `*-v*`.
+#
+# Publication uses crates.io trusted publishing (OIDC): no token is stored. A push to
+# dev publishes a pre-release set by hand in Cargo.toml (only with 'true'), without a
+# release pull request, CLI binaries or image. A crate new to crates.io needs one
+# publication with an API token first (docs/releasing.md).
+#
 # release-plz works on a copy of this repository alone: every dependency, the
 # energyml crates included, comes from crates.io.
-#
-# A GitHub release (event `release: published`) publishes too, once its tag is
-# checked against the manifests. The repository variable RELEASE_PLZ_PUBLISH
-# chooses: 'true' publishes on a merge to main or dev and on a release; 'release'
-# on a release only (the release pull request still prepares versions and
-# changelogs); unset, nothing is published. The `crates-io` environment accepts
-# the branches main and dev and the tags `v*` and `*-v*`.
 
 on:
   push:
@@ -28,17 +30,22 @@ on:
     types: [published]
   workflow_dispatch:
 
+# One run at a time, but a release is never replaced by a push: GitHub keeps one
+# pending run per group and cancels an older pending one, so the group names the
+# event as well (a `release` run waiting behind a push run must not be dropped).
+concurrency:
+  group: release-plz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # Opens the release pull request (versions, changelogs, semver check).
   release-plz-pr:
     name: Release PR
-    if: ${{ github.ref == 'refs/heads/main' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release') }}
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'release' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
-    concurrency:
-      group: release-plz-pr-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       # A pull request opened with GITHUB_TOKEN starts its checks only once a
       # maintainer approves them. Opened by the release bot (a GitHub App: variable
@@ -56,7 +63,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       # The semver check builds each changed crate's rustdoc with all its features,
-      # `hdf5` among them, which links the HDF5 C library.
+      # `hdf5` (and `hdf5-static`, which needs CMake: on the runner image) among them,
+      # which links the HDF5 C library.
       - name: Install HDF5
         run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
       - uses: release-plz/action@v0.5
@@ -76,7 +84,7 @@ jobs:
     permissions:
       contents: write
       id-token: write # crates.io trusted publishing
-      actions: write # start the tag workflows below (workflow_dispatch)
+      actions: write # start the tag workflows below (workflow_dispatch), outside a release
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,7 +92,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # A GitHub release publishes what its tag names, from the history of main or dev
       # only: `vX.Y.Z` (the workspace version) or `<crate>-vX.Y.Z`. Anything else is
-      # refused before a single crate leaves.
+      # refused before a single crate leaves. This also catches a release created on a
+      # commit still at the previous version.
       - name: Check the release
         if: github.event_name == 'release'
         env:
@@ -121,13 +130,15 @@ jobs:
           # short-lived one (an empty value would be rejected, not ignored).
 
       # Tags pushed with GITHUB_TOKEN start no workflow (push events), but
-      # workflow_dispatch started with GITHUB_TOKEN does run. So the release job
-      # itself starts, on the new tag, the two workflows that listen for it. No
-      # extra secret; the publish gates stay in those workflows (IMAGE_PUBLISH)
-      # and in this job (RELEASE_PLZ_PUBLISH).
+      # workflow_dispatch started with GITHUB_TOKEN does run. So, on a merge that
+      # publishes (RELEASE_PLZ_PUBLISH=true), the release job itself starts the two
+      # workflows that listen for the new tag. No extra secret; the publish gates stay
+      # in those workflows (IMAGE_PUBLISH) and in this job (RELEASE_PLZ_PUBLISH).
       - name: Start the tag workflows
-        # Not from dev nor a GitHub pre-release: a pre-release must not become the `latest` image.
-        if: ${{ github.ref != 'refs/heads/dev' && !github.event.release.prerelease && steps.rp.outputs.releases_created == 'true' }}
+        # Not from dev: a pre-release must not become the `latest` image. Not on a GitHub
+        # release either: release-cli.yml, docker.yml and python.yml listen for the release
+        # itself and attach to it; starting them here too would build everything twice.
+        if: ${{ github.ref != 'refs/heads/dev' && github.event_name != 'release' && steps.rp.outputs.releases_created == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

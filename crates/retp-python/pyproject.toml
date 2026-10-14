@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+# **`retp`, and the import is `retp`.** The Rust ETP stack is called `retp`
+# (crates `retp-*`, command `retp`), and the name is reserved on PyPI for it.
+# Decided; the alternatives that were weighed are in `DESIGN.md` section 5.
+name = "retp"
+requires-python = ">=3.9"
+# PEP 639: an SPDX expression, and the files named (see `energyml-rust`'s
+# pyproject for why they are listed rather than left to be found).
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+description = "An ETP v1.2 client for Python, over retp: sessions, dataspaces, EnergyML objects and data arrays"
+authors = [{ name = "Geosiris" }]
+maintainers = [{ name = "Geosiris" }]
+# The version comes from `Cargo.toml`: Rust is the source.
+dynamic = ["version"]
+dependencies = ["numpy>=1.21"]
+readme = "README.md"
+keywords = ["etp", "energistics", "energyml", "resqml", "witsml", "prodml", "rddms"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Networking",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://www.geosiris.com"
+# TODO(verify): the documentation URL of the retp book, once published.
+Documentation = "https://geosiris-technologies.github.io/retp/"
+Repository = "https://github.com/geosiris-technologies/retp"
+Issues = "https://github.com/geosiris-technologies/retp/issues"
+
+[tool.maturin]
+# A mixed project, as `energyml-rust`'s: `python/` holds the package and the
+# compiled extension sits at its leaf (`retp/_core`).
+python-source = "python"
+module-name = "retp._core"
+# `abi3-py39` on the pyo3 side: one wheel per platform.
+# `python` turns on the binding and the HDF5 backend (see the crate's
+# `Cargo.toml`); the published wheels (`python.yml`) pass the whole list on the
+# command line, with `hdf5-static` added, because a `--features` there replaces
+# this one.
+features = ["python", "pyo3/extension-module"]

@@ -1,68 +1,144 @@
 name: Release CLI
 
-# Builds the `retp` command for the targets of the distribution plan and
-# attaches the archives to the GitHub release of a version tag.
-#
-# A tag is only created on request.
+# Builds the `retp` command for the targets of the distribution plan and attaches
+# one archive per target, with SHA256SUMS, to a GitHub release: the release `vX.Y.Z`
+# a maintainer publishes (the one that publishes everything, see docs/releasing.md),
+# or the release of a tag `retp-cli-v*` when release-plz publishes on a merge and
+# starts this workflow.
 
 on:
+  release:
+    types: [published]
   push:
     tags:
       - "retp-cli-v*"
   # Started by release-plz.yml on the new tag (a tag pushed with GITHUB_TOKEN
-  # starts no workflow). Must be run with `--ref <tag>`.
+  # starts no workflow). Must be run with `--ref <tag>`: the archive names and
+  # the release come from the ref.
   workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  create-release:
+  version:
+    # A manual run on a branch would build archives named after the branch.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Create the release if it does not exist
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: The tag names the version of the code
+        shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-        if: startsWith(github.ref, 'refs/tags/')
+          # The tag must name the version of the code it builds: a release `vX.Y.Z` created on a
+          # commit still at another version would publish one version under the name of
+          # another. crates.io and PyPI refuse it; so here.
+          crate=$(python3 - <<'PY'
+          import tomllib
+          cli = tomllib.load(open("crates/retp-cli/Cargo.toml", "rb"))["package"]["version"]
+          if isinstance(cli, dict):
+              cli = tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"]
+          print(cli)
+          PY
+          )
+          tag="${GITHUB_REF_NAME#retp-cli-}"
+          tag="${tag#v}"
+          echo "tag=$tag retp-cli=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match retp-cli version $crate"
+            exit 1
+          fi
 
   build:
-    name: ${{ matrix.target }}
-    needs: create-release
-    # A manual run on a branch would build archives named after the branch.
-    if: startsWith(github.ref, 'refs/tags/')
+    name: build ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-latest }
-          # TODO(verify): the ARM runner label (ubuntu-24.04-arm) is available
-          # to this repository.
-          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-24.04-arm }
-          - { target: x86_64-unknown-linux-musl,   os: ubuntu-latest }
-          - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm }
-          - { target: aarch64-apple-darwin,        os: macos-latest }
-          - { target: x86_64-apple-darwin,         os: macos-latest }
-          - { target: x86_64-pc-windows-msvc,      os: windows-latest }
+          # `features: hdf5-static` builds HDF5 from its sources and links it in (CMake is on
+          # every runner image): the archive writes the arrays of `download-epc` on a machine
+          # without HDF5. A target without it still downloads a dataspace and refuses by name
+          # to write an array (FeatureNotEnabled).
+          # TODO(verify): HDF5 for the musl targets (built with cross).
+          # TODO(verify): the ARM runner label (ubuntu-24.04-arm) is available to this repository.
           # TODO(verify): ring and the HDF5 backend on Windows arm64.
-          - { target: aarch64-pc-windows-msvc,     os: windows-latest }
-          # FreeBSD x86_64 is best-effort in the plan (via `cross`) and is not
-          # built here.
+          - { target: x86_64-unknown-linux-gnu,   os: ubuntu-22.04,     features: hdf5-static, ext: tar.gz }
+          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-24.04-arm, features: hdf5-static, ext: tar.gz }
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-22.04,     features: "",          ext: tar.gz, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04,     features: "",          ext: tar.gz, musl: true }
+          - { target: aarch64-apple-darwin,       os: macos-latest,     features: hdf5-static, ext: tar.gz }
+          - { target: x86_64-apple-darwin,        os: macos-latest,     features: hdf5-static, ext: tar.gz }
+          - { target: x86_64-pc-windows-msvc,     os: windows-latest,   features: hdf5-static, ext: zip }
+          - { target: aarch64-pc-windows-msvc,    os: windows-latest,   features: hdf5-static, ext: zip }
+          # FreeBSD x86_64 is best-effort in the plan (via `cross`) and is not built here.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          manifest-path: Cargo.toml
-          bin: retp
-          target: ${{ matrix.target }}
-          # $tag is `retp-cli-vX.Y.Z`: the archive is retp-cli-vX.Y.Z-<target>.
-          archive: $tag-$target
-          checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          key: ${{ matrix.target }}
+      - name: Install cross (musl and foreign-architecture Linux targets)
+        if: matrix.musl
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      # The `dist` profile (Cargo.toml): thin LTO and 16 codegen units. The release
+      # profile's fat LTO with one codegen unit ran the Windows and Linux arm64 runners
+      # out of memory at link time. Only the binary that is shipped is built.
+      - name: Build
+        shell: bash
+        run: |
+          feat=""
+          if [ -n "${{ matrix.features }}" ]; then feat="--features ${{ matrix.features }}"; fi
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            cross build --profile dist --locked -p retp-cli --bin retp --target ${{ matrix.target }} $feat
+          else
+            cargo build --profile dist --locked -p retp-cli --bin retp --target ${{ matrix.target }} $feat
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          # The same name whether the run comes from `vX.Y.Z` or from `retp-cli-vX.Y.Z`.
+          ver="${GITHUB_REF_NAME#retp-cli-}"
+          ver="${ver#v}"
+          name="retp-v$ver-${{ matrix.target }}"
+          mkdir "$name"
+          bin=retp
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=retp.exe; fi
+          cp "target/${{ matrix.target }}/dist/$bin" "$name/"
+          cp LICENSE NOTICE README.md "$name/"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            7z a "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          echo "ASSET=$name.${{ matrix.ext }}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  # Attaches every archive to the GitHub release of the tag (created here when the
+  # run comes from a tag with no release yet).
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # A published release keeps the notes its author wrote.
+          generate_release_notes: ${{ github.event_name != 'release' }}

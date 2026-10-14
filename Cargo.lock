@@ -192,6 +192,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -243,9 +252,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e8b185e53cf12e14509228eda14bc32afe5424e820c7aaf92e84cff98032bc3"
+checksum = "e1e12b68ffb62ef226c830ba8e935bf2fe1796fc85469768842f132d7d782c7e"
 dependencies = [
  "energyml-derive",
  "quick-xml",
@@ -257,9 +266,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-derive"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd7cfb0fef133ee29ae7fbd637594f72a08bd5d5221eaf82532e10368b6a620"
+checksum = "85f261fe5ef11f22a4eb8827a54d9ef98202c4eb636084d3f44ebf285ea18e27"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -269,9 +278,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-domain"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9203b0d6cf0e3ea6b9027f45f7e634fedd62c5ec990fe938416cea15b912f6d"
+checksum = "fb72e2ea8ed89bc9e2a685621476d99e301bf17a52f3aa51f988423ab9c9ca76"
 dependencies = [
  "energyml-core",
  "energyml-storage",
@@ -281,9 +290,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-eml-2-0"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d477abbd944cae80e65db633ebada6fec625371d236fa8e8a64ccb9ed3220c3"
+checksum = "f918a2d2c8da05759a50c4628d2c571d78209b0a426f219bb832718585997427"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -291,9 +300,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-eml-2-1"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed8e2673a968860f789fc91ebafcda1e04ff3f12587a7bd42888c723d37cdd6b"
+checksum = "86643283eadbc99a65e0dbe9e2fc3fb59dfb2d4620077e3346abf759d00259f9"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -301,9 +310,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-eml-2-2"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06b9d13747fe26206334bc93f08c4ec06c66640b02d0ab7ac4076c1b99766634"
+checksum = "8ac0883eb7bcd275619b36ade20eded49f00cc90dbfc1ecd748889c002ad1b6f"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -311,9 +320,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-eml-2-3"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da2ae44208ebd6902f06bf53734866c993ede1210d61089d04b2664964b7a2a4"
+checksum = "aaa8ccbfd1d763e8228e144328cf2ee3e93da1ae0396b28eb7345cfbbe68f56f"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -342,9 +351,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-geometry"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f530e16d164fb11f6a078b609182c88565bf307ddb5f2e90f0810358db35b5a9"
+checksum = "a3487312e91a2232d0fbb25ad80842df57a37867129ea0ac4c9bd9931de0c8cd"
 dependencies = [
  "energyml-core",
  "energyml-domain",
@@ -354,9 +363,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-prodml-2-0"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f08d15ec5aafb2acc5b43e85cfb686832cff95ba08c19882f007a1ac53f38cb9"
+checksum = "b446be291f448db04325e417ba60180347aac111e9995686c575b0a04d2fa2cd"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -365,9 +374,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-prodml-2-2"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "968990b8f1e61d220af851ffab4b13c3c0ae1e9645ecf7a9310f360a5eae7bc7"
+checksum = "259b1b93dc888886ee37a81ea1d1c9cc1856fc14b246930f007c33802e74c958"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -376,9 +385,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-prodml-2-3"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb477d4bf02b2bc66435948fb4f5f46a45579222e0acbb7fba19aecf0949ce7c"
+checksum = "29086d3a49048b1d7263bd02fcdca9f47648bdacd71c3ab31f78d078cbbbba00"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -387,9 +396,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-resqml-2-0-1"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da06e0c87d4158957fe21ab4b1c955f0f98b900442c643222a65b31da8bb91bd"
+checksum = "a3b54164451daa731e31d63df88269539d5b64ce6572f02e06be16a5448e0474"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -398,9 +407,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-resqml-2-2"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "628aa499ee410d5275d054ac101aa6e2191eb03a7b68a5325fd954effbbef6b3"
+checksum = "1bd06dae3afb2590b1df5492558b45595309767a77faa79b607f19a72905eacc"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -409,9 +418,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-resqml-2-2-dev3"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "583d22797a0fb242d92b7863941a321614e0adc9f921dd920ebeaabd138a22e2"
+checksum = "fa4d419019c75adbaedbc0f85f8346ed3e48ee5cd21ccd6647258008951ec319"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -420,9 +429,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-schemas"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01ad34e75deb389124d2101e094f97408dc300085044db636ff7f91018b9c2e"
+checksum = "1471cbf35c51c1e6653d6cf99c650001936aabef392f93d469e50c43b44d29c7"
 dependencies = [
  "energyml-core",
  "energyml-eml-2-0",
@@ -441,9 +450,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-storage"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10777ff741f3deb8e52bd21bcd8b6a3b1f413d3f8c003df713b3849c4b3aae31"
+checksum = "162cdc0ad43f5f1ec9471f14d8d5b2abaeef3c3e528d06f2156a906b50b9901d"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -458,9 +467,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-witsml-2-0"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24268af0770bf34d6481ea638fe3f3afa2677dbafdc6d2513a1fe9dd96742fbc"
+checksum = "2091696f6dc58b32fed0ae00ab09c741ce2993f4c36d60a24cc57b8a60ead346"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -469,9 +478,9 @@ dependencies = [
 
 [[package]]
 name = "energyml-witsml-2-1"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a628381dbbb5130a21e3d311fbfb7c5f7898a8615f7f502b338d9da0fbf217f"
+checksum = "efd9c901e0c9156e3b3ef8a64f89ff79c3ce6984b097547a5d437f5111d47055"
 dependencies = [
  "energyml-core",
  "energyml-derive",
@@ -612,13 +621,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdf5-metno-src"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69c883c565498492954e344c482f8622525e58c7a71100dd9498c4940da82885"
+dependencies = [
+ "cmake",
+ "libz-sys",
+]
+
+[[package]]
 name = "hdf5-metno-sys"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567a57ee34c38263f551f2cf02b95675def6b91d0e321c5e70f8c6d5ef9cee87"
 dependencies = [
+ "hdf5-metno-src",
  "libc",
  "libloading",
+ "libz-sys",
  "parking_lot",
  "pkg-config",
  "regex",
@@ -711,6 +732,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-sys"
+version = "1.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f710a23e6dbf193214fd46ca56a9d6864e550abe86202184532ae7275e46de19"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,6 +824,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "numpy"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a5b15d63a5ff39e378daed0e1340d3a5964703ea9712eb09a0dc66fade996f4"
+dependencies = [
+ "libc",
+ "ndarray",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "pyo3",
+ "pyo3-build-config",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -913,6 +962,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pyo3"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "700d18fa267b73b9b521fd7e13580e2f446916f176cacee1ab63fcc8191f1655"
+dependencies = [
+ "libc",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b3fc0c4d08f6bb10e71fe39dfb9e2f59c6eb6854e22ec8092f50c69a4499adb"
+dependencies = [
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfc0b8e19df29aad7086cf977bb0c2a2f143e30567eb113e9cf72b62ca698330"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6100e8a4b5eba53afaa5ed078364851a0b2499c553a44c31026b929049b49dc6"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6143877a16e82b5a727b7127ff4cd86858a24a28d745d72f43e6f227c7b1bdb3"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1098,6 +1204,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "retp-python"
+version = "0.1.0"
+dependencies = [
+ "energyml-core",
+ "energyml-etp-store",
+ "energyml-schemas",
+ "energyml-storage",
+ "numpy",
+ "pyo3",
+ "retp-client",
+ "retp-proto",
+ "retp-types",
+]
+
+[[package]]
 name = "retp-tests"
 version = "0.1.0"
 dependencies = [
@@ -1127,6 +1248,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustls"
@@ -1286,6 +1413,12 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "target-lexicon"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "thiserror"
@@ -1455,6 +1588,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

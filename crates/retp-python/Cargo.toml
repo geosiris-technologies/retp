@@ -1,0 +1,66 @@
+[package]
+name = "retp-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for retp: an ETP v1.2 client (sessions, dataspaces, objects, arrays)"
+# The module is published by maturin, not by cargo on a crate registry:
+# nobody depends on this one from Rust.
+publish = false
+# One test binary, `tests/main.rs` - see its doc.
+autotests = false
+
+[lib]
+# `cdylib` so that Python can load the module, and `rlib` so that the
+# repository's native suite can exercise `session` without an interpreter.
+#
+# Not `retp`: `retp-cli` ships a binary of that name, and two targets writing the
+# same `target/debug/deps/retp.pdb` is the Windows link error `energyml-python`
+# already met with `energyml` (LNK1201). The name follows the crate instead.
+# Maturin renames the artefact after `module-name` in `pyproject.toml`
+# (`retp._core`), so `import` never sees this name.
+name = "retp_python"
+crate-type = ["cdylib", "rlib"]
+
+# **The ETP client, its bridge to EnergyML objects, and the schemas to read
+# objects with.** Nothing else: geometry, export, translation and the rest of
+# the EnergyML workshops are `energyml-rust`'s wheel, not this one.
+# `tests/scope.rs` reads this table and goes red if something else shows up.
+[dependencies]
+retp-client = { workspace = true }
+retp-proto = { workspace = true }
+retp-types = { workspace = true }
+energyml-etp-store = { workspace = true }
+# The energyml crates come from crates.io (0.1.2), through the workspace table.
+energyml-core = { workspace = true }
+energyml-schemas = { workspace = true, features = ["all"] }
+energyml-storage = { workspace = true }
+pyo3 = { version = "0.29", features = ["abi3-py39"], optional = true }
+numpy = { version = "0.29", optional = true }
+
+# **Nothing is on by default**, for the reason `energyml-python` gives: a
+# workspace member that needs an interpreter would impose it on every other
+# member through feature unification. Without `python`, `lib.rs` exposes only
+# `session`, which compiles and is tested with no interpreter at all, so that
+# `cargo clippy --workspace` and `cargo test --workspace` need no Python.
+[features]
+default = []
+# What maturin turns on (with `pyo3/extension-module`): the pyo3 binding, and the
+# HDF5 backend. `push_epc` sends the arrays an EPC references, which the storage
+# layer reads from `.h5` files: without HDF5 it refuses a package with arrays by
+# name, so the module carries it, as `energyml-rust`'s does.
+python = ["dep:pyo3", "dep:numpy", "hdf5"]
+# The native backend, alone (system HDF5 library at build time).
+hdf5 = ["energyml-storage/hdf5"]
+# HDF5 built from its sources and linked into the module: the published wheels
+# (`python.yml` passes it), which then need no HDF5 on the user's machine.
+hdf5-static = ["hdf5", "energyml-storage/hdf5-static"]
+# Opt-in tests against a live ETP server (`RETP_TEST_URL`, `RETP_TEST_TOKEN`).
+# Off by default and never on in CI without a server: see `tests/live.rs`.
+live-server = []
+
+[[test]]
+name = "python"
+path = "tests/main.rs"

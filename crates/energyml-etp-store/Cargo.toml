@@ -15,21 +15,23 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
 
 [dependencies]
 energyml-core = { workspace = true }
-energyml-storage = { version = "0.1.1" }
+energyml-storage = { version = "0.1.2" }
 retp-proto = { workspace = true }
 retp-client = { workspace = true }
 retp-types = { workspace = true }
-energyml-domain = { version = "0.1.1" }
+energyml-domain = { version = "0.1.2" }
 async-trait = "0.1"
 
 [dev-dependencies]
 serde_json = "1"
-energyml-geometry = { version = "0.1.1" }
-energyml-eml-2-0 = { version = "0.1.1" }
-energyml-resqml-2-0-1 = { version = "0.1.1" }
-energyml-eml-2-3 = { version = "0.1.1" }
-energyml-resqml-2-2 = { version = "0.1.1" }
-retp-avro = { workspace = true }
+energyml-geometry = { version = "0.1.2" }
+energyml-eml-2-0 = { version = "0.1.2" }
+energyml-resqml-2-0-1 = { version = "0.1.2" }
+energyml-eml-2-3 = { version = "0.1.2" }
+energyml-resqml-2-2 = { version = "0.1.2" }
+# By path only, no `version`: cargo publish resolves a versioned dev-dependency on the
+# registry (docs/releasing.md).
+retp-avro = { path = "../retp-avro" }
 futures-executor = "0.3"
 
 # docs.rs builds on Linux with no native HDF5: every feature builds there.

@@ -9,6 +9,9 @@ on:
     - cron: "41 2 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Source: https://community.opengroup.org/osdu/platform/domain-data-mgmt-services/reservoir/open-etp-server

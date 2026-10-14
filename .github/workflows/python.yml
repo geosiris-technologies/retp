@@ -1,0 +1,292 @@
+name: python
+
+# Wheels and sdist for the retp Python bridge (crates/retp-python), built with maturin,
+# HDF5 compiled into the module (feature `hdf5-static`): a wheel needs no HDF5 on the
+# machine that installs it.
+#  - pull request touching the crates: one Linux wheel, installed and smoke-tested;
+#  - push to main or dev: the full matrix and the sdist, at a development version
+#    X.Y.(Z+1).devN (N = the run number), published to TestPyPI;
+#  - a published GitHub release `vX.Y.Z` (the one that publishes everything, see
+#    docs/releasing.md), or a tag `python-vX.Y.Z` for the Python package alone: the
+#    full matrix and the sdist at the crate's own version, published to PyPI.
+#    Releases go to PyPI only, development versions to TestPyPI only.
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/wheel-smoke.py"
+      - ".github/workflows/python.yml"
+  push:
+    branches: [main, dev]
+    # Path filters are not applied to tags: a python-v* tag always runs.
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/wheel-smoke.py"
+      - ".github/workflows/python.yml"
+    tags:
+      - "python-v*"
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes a running build pointless; a tag always finishes.
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+env:
+  MANIFEST: crates/retp-python/Cargo.toml
+  PYPROJECT: crates/retp-python/pyproject.toml
+  CRATE: retp-python
+  DIST: retp
+  # The runtime dependencies of the wheel (pyproject.toml), installed from PyPI before the
+  # wheel itself (which is installed with --no-index, so that no other project of the
+  # same name on the index can be picked instead).
+  PY_DEPS: numpy
+  # Given on the command line, maturin's `--features` replaces pyproject's list instead of
+  # adding to it: without `python` (pyo3) it built a cffi module, which no runner could
+  # load. So the whole list, and `hdf5-static`: HDF5 built from its sources and linked in
+  # (cmake and a C compiler at build time).
+  FEATURES: python,pyo3/extension-module,hdf5-static
+
+jobs:
+  # The version the wheels carry. A tag must name exactly the version the crate
+  # declares (version.workspace -> Cargo.toml), and the wheels keep it (empty
+  # output: pyproject's dynamic version, read from Cargo.toml). A push to a branch
+  # builds a PEP 440 development version above the last release: X.Y.(Z+1).devN,
+  # or X.Y.Z.devN when the crate already carries a pre-release (X.Y.Z-alpha.1 on dev).
+  version:
+    if: github.event_name == 'push' || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        shell: bash
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$CRATE'))")
+          if ! [[ "$crate" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
+            echo "::error::$CRATE version not read: '$crate'"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # `vX.Y.Z` (a release) or `python-vX.Y.Z`. The tag must name the version of the
+            # code it builds: a release created on a commit still at another version would
+            # publish wheels of one version under the name of another.
+            tag="${GITHUB_REF_NAME#python-}"
+            tag="${tag#v}"
+            echo "tag=$tag crate=$crate"
+            if [ "$tag" != "$crate" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match $CRATE version $crate"
+              exit 1
+            fi
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            core="${crate%%-*}"
+            if [ "$core" = "$crate" ]; then
+              IFS=. read -r major minor patch <<< "$core"
+              core="$major.$minor.$((patch + 1))"
+            fi
+            echo "crate=$crate development=$core.dev$GITHUB_RUN_NUMBER"
+            echo "version=$core.dev$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Pull requests: one Linux wheel, installed and exercised.
+  test-wheel:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --profile dist --manifest-path ${{ env.MANIFEST }} --out dist --features ${{ env.FEATURES }}
+          manylinux: "2_28"
+          sccache: "true"
+          before-script-linux: command -v cmake >/dev/null || yum install -y cmake
+      - name: Install the wheel and smoke-test it
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install $PY_DEPS
+          pip install --no-index --find-links dist "$DIST"
+          # Outside the source tree, so that the installed module is the one imported.
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/wheel-smoke.py"
+
+  wheels:
+    needs: version
+    name: wheel ${{ matrix.target }} (${{ matrix.os }}${{ matrix.manylinux && format(', {0}', matrix.manylinux) || '' }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `smoke`: the runner can load what it built (same OS, libc and architecture).
+        include:
+          - { os: ubuntu-22.04,     target: x86_64,  manylinux: "2_28",        smoke: true }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28",        smoke: true }
+          - { os: ubuntu-22.04,     target: x86_64,  manylinux: musllinux_1_2, smoke: false }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2, smoke: false }
+          - { os: macos-latest,     target: aarch64,                           smoke: true }
+          - { os: macos-latest,     target: x86_64,                            smoke: false }
+          - { os: windows-latest,   target: x64,                               smoke: true }
+          - { os: windows-latest,   target: aarch64,                           smoke: false }  # TODO(verify): Windows arm64 is untested
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Development version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          path, version = os.environ["PYPROJECT"], os.environ["VERSION"]
+          text = open(path, encoding="utf-8").read()
+          if text.count('dynamic = ["version"]') != 1:
+              raise SystemExit(f"{path}: no single `dynamic = [\"version\"]` to replace")
+          open(path, "w", encoding="utf-8").write(text.replace('dynamic = ["version"]', f'version = "{version}"'))
+          print(f"{path}: version {version}")
+          PY
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          command: build
+          # The `dist` profile: thin LTO and 16 codegen units (see Cargo.toml). Fat LTO with
+          # one codegen unit took more than 30 minutes per wheel.
+          # abi3-py39 (Cargo.toml): one wheel per platform.
+          args: --profile dist --manifest-path ${{ env.MANIFEST }} --out dist --features ${{ env.FEATURES }}
+          sccache: "true"
+          # The cross builds (macOS x86_64, Windows aarch64) are built, not smoke-tested.
+          # TODO(verify): the musllinux builds of HDF5.
+          # HDF5 2.2 needs CMake 3.26 or newer. The manylinux images have yum (3.26.5); the
+          # musllinux cross images are Ubuntu 22.04 with CMake 3.22, so a newer one from pip.
+          before-script-linux: |
+            recent() { command -v cmake >/dev/null && [ "$(printf '%s\n' 3.26 "$(cmake --version | head -1 | awk '{print $3}')" | sort -V | head -1)" = 3.26 ]; }
+            if ! recent; then
+              if command -v yum >/dev/null; then yum install -y cmake
+              elif command -v apt-get >/dev/null; then apt-get update && apt-get install -y python3-pip && python3 -m pip install 'cmake>=3.26'
+              else apk add cmake; fi
+            fi
+            hash -r
+            cmake --version
+      - name: Install the wheel and smoke-test it
+        if: matrix.smoke
+        shell: bash
+        run: |
+          # A clean venv, and a working directory outside the source tree and outside
+          # target/ (the Linux build container leaves target/ owned by root).
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ -d "$RUNNER_TEMP/venv/Scripts" ]; then . "$RUNNER_TEMP/venv/Scripts/activate"; else . "$RUNNER_TEMP/venv/bin/activate"; fi
+          pip install $PY_DEPS
+          pip install --no-index --find-links dist "$DIST"
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/wheel-smoke.py"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux }}
+          path: dist
+
+  sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Development version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          sed -i "s/^dynamic = \[\"version\"\]$/version = \"$VERSION\"/" "$PYPROJECT"
+          grep -q "^version = \"$VERSION\"$" "$PYPROJECT"
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --manifest-path ${{ env.MANIFEST }} --out dist
+      # The index refuses an sdist whose metadata names a licence file that the archive does
+      # not hold (maturin recorded `License-File: LICENSE` at the archive root and left the
+      # file in the crate folder). Caught here, not at upload. The fix is PEP 639 `license`
+      # and `license-files` in pyproject.toml.
+      # TODO(verify): the layout (a `License-File` path is read relative to the archive root).
+      - name: Every License-File of the sdist is in the archive
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, sys, tarfile
+          bad = 0
+          for path in glob.glob("dist/*.tar.gz"):
+              with tarfile.open(path) as tar:
+                  names = tar.getnames()
+                  root = names[0].split("/")[0]
+                  text = tar.extractfile(f"{root}/PKG-INFO").read().decode("utf-8")
+              files = [l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("License-File:")]
+              if not files:
+                  print(f"{path}: no License-File entry in PKG-INFO")
+                  bad += 1
+              for f in files:
+                  if f"{root}/{f}" not in names:
+                      print(f"{path}: License-File {f} is not in the archive")
+                      bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist
+
+  # PyPI trusted publishing (OIDC): no API token. The `pypi` environment and the
+  # publisher are declared on PyPI for this repository and this workflow file. Only from
+  # a published release or a python-v* tag, and only once publishing is switched on in
+  # the repository's variables: creating the repository must not publish anything.
+  publish:
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'release' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'python-v'))) && vars.PYPI_PUBLISH == 'true' }}
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The development versions, to TestPyPI (its own publisher, environment `testpypi`),
+  # from main and dev only, once TESTPYPI_PUBLISH is 'true'. Install one with
+  #   pip install --pre -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ retp
+  # (the dependencies come from PyPI). A run attempted again re-uploads its files: skipped.
+  publish-test:
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    if: ${{ github.ref_type == 'branch' && (github.ref_name == 'main' || github.ref_name == 'dev') && vars.TESTPYPI_PUBLISH == 'true' }}
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true

@@ -26,6 +26,7 @@ decode, hold a session, talk to a server, and check one.
 | `energyml-etp-store` | the bridge: an ETP dataspace behind energyml-rust's `EnergymlStorage`, so that code which reads a file reads a server |
 | `retp-conformance` | checks a server against what the specification makes mandatory, and writes the report a provider can act on |
 | `retp-cli` | the `retp` command |
+| `retp-python` | the Python bridge (`pip install retp`). Not published to crates.io |
 | `etptypes` 2.0 | a facade over `retp-types`, for dependents of the old crate (not published yet: crates.io keeps 1.x) |
 
 ## Command line
@@ -63,7 +64,13 @@ retp-conformance wss://etp.example.com/etp --out report.md
 
 ## Python
 
-A Python bridge is planned. See [docs/python.md](docs/python.md).
+```sh
+pip install retp          # the Python package, imported as `retp`
+```
+
+A Python client over the Rust stack: sessions, dataspaces, EnergyML objects as
+dictionaries, arrays as numpy arrays. It carries nothing the Rust library does
+not have. See [docs/python.md](docs/python.md).
 
 ## Documentation
 

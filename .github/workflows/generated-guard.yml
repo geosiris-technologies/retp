@@ -3,7 +3,8 @@ name: Generated guard
 # crates/generated/ is produced by an internal Geosiris tool from the ETP v1.2
 # Avro schemas and synchronised into this repository by a bot. A pull request
 # from anyone else must not touch it: a hand edit would be overwritten at the
-# next synchronisation.
+# next synchronisation. Release metadata is the exception: release-plz writes
+# each crate's CHANGELOG.md and bumps the `version = "…"` values of its Cargo.toml.
 
 on:
   pull_request:
@@ -11,21 +12,48 @@ on:
       - "crates/generated/**"
       - "rc/etp-1.2/**"
 
+permissions:
+  contents: read
+
 jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Refuse hand edits of generated code and of the schemas
         env:
           ACTOR: ${{ github.event.pull_request.user.login }}
           # TODO(verify): the login of the synchronisation bot, once it exists.
           SYNC_BOT: ${{ vars.SYNC_BOT_LOGIN || 'geosiris-sync[bot]' }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ "$ACTOR" = "$SYNC_BOT" ]; then
             echo "Synchronised by $SYNC_BOT: accepted."
             exit 0
           fi
+          from=$(git merge-base "$BASE" "$HEAD")
+          versionless() { sed -E 's/version = "[^"]*"/version = ""/g'; }
+          kept=""
+          for f in $(git diff --name-only "$from" "$HEAD" -- crates/generated/ rc/etp-1.2/); do
+            case "$f" in
+              crates/generated/*/CHANGELOG.md) continue ;;
+              crates/generated/*/Cargo.toml)
+                if before=$(git show "$from:$f" 2>/dev/null) && after=$(git show "$HEAD:$f" 2>/dev/null) \
+                  && [ "$(versionless <<< "$before")" = "$(versionless <<< "$after")" ]; then
+                  continue
+                fi ;;
+            esac
+            kept="$kept$f"$'\n'
+          done
+          if [ -z "$kept" ]; then
+            echo "Only release metadata (changelogs, versions) changed: accepted."
+            exit 0
+          fi
           echo "::error::crates/generated/ and rc/etp-1.2/ are not edited by hand."
           echo "Open an issue describing the problem; it is fixed in the generator"
           echo "and arrives as a synchronised commit. See crates/generated/README.md."
+          printf '%s' "$kept"
           exit 1

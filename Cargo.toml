@@ -26,6 +26,13 @@ repository = "https://github.com/geosiris-technologies/retp"
 lto = "fat"
 codegen-units = 1
 
+# What is distributed outside wasm (Python wheels, CLI archives): thin LTO, which
+# a GitHub runner can link without running out of memory.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # Backtraces keep file and line; full debug info cost ~570 MB per test binary.
 [profile.dev]
 debug = "line-tables-only"

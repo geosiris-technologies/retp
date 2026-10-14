@@ -24,6 +24,8 @@ async-trait = "0.1"
 
 [dev-dependencies]
 serde_json = "1"
+# The contract of the storage traits, played on an EtpStore (tests/contract.rs).
+energyml-storage = { version = "0.2.0-alpha.1", features = ["contract"] }
 energyml-geometry = { version = "0.2.0-alpha.1" }
 energyml-eml-2-0 = { version = "0.2.0-alpha.1" }
 energyml-resqml-2-0-1 = { version = "0.2.0-alpha.1" }

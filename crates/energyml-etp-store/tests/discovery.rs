@@ -818,8 +818,13 @@ fn the_capabilities_are_what_the_session_agreed() {
     assert!(capabilities.native_context);
     assert!(!capabilities.changes);
     assert_eq!(
-        capabilities.deletions_kept_for, None,
-        "the server stated no ChangeRetentionPeriod"
+        capabilities.deletions_kept_for,
+        Some(86_400),
+        "the server stated no ChangeRetentionPeriod: its default, ETP 1.2 §9.2.3"
+    );
+    assert!(
+        capabilities.contained_objects,
+        "Store (4) agreed: containment is the server's"
     );
     assert_eq!(capabilities.raw_formats, [RawFormat::Xml]);
 }

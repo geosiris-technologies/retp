@@ -38,6 +38,13 @@ use retp_types::protocol::data_array::{
 use crate::ClientError;
 use crate::caller::{Blocking, run};
 
+/// Writing one block the caller chose (`PutDataSubarrays`) and declaring an
+/// array before writing it (`PutUninitializedDataArrays`), on the blocking client.
+mod blocks;
+pub use blocks::{
+    Declaration, SubarrayWrite, check_declaration, check_subarray, declare_arrays, write_subarrays,
+};
+
 /// DataArray's protocol number.
 pub const DATA_ARRAY: i32 = 9;
 
@@ -655,8 +662,12 @@ struct MapAnswer<V> {
 /// The array reads, for any `Caller` - written once, and run on the
 /// blocking client by the functions beside this module.
 pub mod asynchronous {
+    /// The same two exchanges on a [`Caller`], built on this module's own
+    /// block requests.
+    mod blocks;
     use super::*;
     use crate::caller::Caller;
+    pub use blocks::{declare_arrays, write_subarrays};
 
     async fn answers<K: Caller, V>(
         client: &mut K,

@@ -52,6 +52,8 @@ use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::{ContextScopeKind, Resource};
 use retp_types::datatypes::{AnyLogicalArrayType, ErrorInfo};
 
+/// Blocks and declarations of arrays, for the writer.
+mod blocks;
 /// The reading additions on a dataspace: what the server states (store times,
 /// edge kinds), contexts answered natively, objects as bytes, deletions.
 pub mod discovery;
@@ -79,6 +81,9 @@ pub struct EtpStore<T: Transport, C: Clock> {
     /// The transaction `EnergymlWriter::begin` opened on the server, if any:
     /// its `transactionUuid` and what was asked.
     writer_transaction: Option<energyml_storage::Transaction>,
+    /// The form objects are written in (`EnergymlWriter::put_objects`): XML for
+    /// an ETP store, JSON for a Reservoir DDMS REST API, which refuses XML.
+    write_format: push::WriteFormat,
 }
 
 fn remote(why: impl std::fmt::Display) -> Error {
@@ -143,7 +148,16 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
             listing: Mutex::new(None),
             diagnostics: Mutex::new(Vec::new()),
             writer_transaction: None,
+            write_format: push::WriteFormat::Xml,
         }
+    }
+
+    /// The form objects are written in: XML by default (an ETP store), JSON for
+    /// a store that takes only the EnergyML JSON encoding (the Reservoir DDMS
+    /// REST API).
+    pub fn write_format(mut self, format: push::WriteFormat) -> Self {
+        self.write_format = format;
+        self
     }
 
     /// How objects are read (tolerant by default, like an EPC).
@@ -277,11 +291,21 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
                 error.code, error.message
             )));
         }
-        Ok(listed
-            .items
-            .into_iter()
-            .map(|d| discovery::dataspace_from_etp(&d))
-            .collect())
+        let mut out = Vec::with_capacity(listed.items.len());
+        for listed in &listed.items {
+            let (dataspace, left) = discovery::dataspace_from_etp_said(listed);
+            if !left.is_empty() {
+                self.record(Diagnostic::warning(
+                    &dataspace.uri,
+                    format!(
+                        "custom data of a form storage does not hold, left out: {}",
+                        left.join(", ")
+                    ),
+                ));
+            }
+            out.push(dataspace);
+        }
+        Ok(out)
     }
 
     async fn resources(&self) -> Result<Vec<ObjectSummary>> {

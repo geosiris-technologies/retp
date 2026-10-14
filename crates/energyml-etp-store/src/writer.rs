@@ -10,18 +10,12 @@
 //! | `delete_objects` | Store (4), `DeleteDataObjects` |
 //! | `begin`, `commit`, `rollback` | Transaction (18) |
 //! | `put_arrays` | DataArray (9), `PutDataArrays`, and for an array too big for one message `PutUninitializedDataArrays` then `PutDataSubarrays` (the client's own cut) |
+//! | `put_arrays` with `start`/`count` | DataArray (9), `PutDataSubarrays` (`blocks.rs`) |
+//! | `declare_arrays` | DataArray (9), `PutUninitializedDataArrays` (`blocks.rs`) |
 //! | `list_dataspaces`, `put_dataspaces`, `delete_dataspaces` | Dataspace (24) |
 //!
 //! # Refused by name
 //!
-//! - **Part of an array** (`start` or `count` set): `retp-client` cuts an array
-//!   into blocks itself but offers no call that writes **one block the caller
-//!   chose**, so the store says [`Error::Unsupported`] rather than rebuild the
-//!   `PutDataSubarrays` exchange here (a second implementation of the same
-//!   door).
-//! - **Declaring an array before writing it** (`declare_arrays`): the same
-//!   reason, `PutUninitializedDataArrays` is only reachable inside
-//!   `write_arrays_with`. The trait's default refusal stands.
 //! - **Another dataspace**: an `EtpStore` is bound to one. An object, array or
 //!   transaction that names another is [`Error::BadUri`] or
 //!   [`Error::NotFound`], never written through this store into somewhere else.
@@ -46,9 +40,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use energyml_core::identifiers::{self, EtpUri};
 use energyml_core::identity;
-use energyml_core::registry::{DynObject, to_part};
-use energyml_core::xml::XmlWriteOptions;
-use energyml_storage::array::{ArrayData, ArrayLocation};
+use energyml_core::registry::DynObject;
+use energyml_storage::array::{ArrayData, ArrayLocation, ArrayMetadata};
 use energyml_storage::dataspaces::EnergymlDataspaces;
 use energyml_storage::error::{Error, ExternalDataReason, Result};
 use energyml_storage::raw::RawObject;
@@ -149,7 +142,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     }
 
     /// The object as the server will hold it: its URI in this dataspace, and the
-    /// ETP data object (XML, as `to_part` writes it).
+    /// ETP data object in the store's write format (`EtpStore::write_format`).
     ///
     /// The URI is the short form - type and uuid, no `objectVersion` -, like
     /// `push` addresses an object. TODO(verify): whether an object that declares
@@ -164,7 +157,10 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
         let qualified = reflect.type_info().qualified_type.ok_or_else(|| {
             Error::Package("this object's type has no qualified ETP name, so it has no URI".into())
         })?;
-        let text = to_part(object, XmlWriteOptions::default())?;
+        let format = self.write_format;
+        let text = format.write(object).map_err(|why| {
+            Error::Package(format!("this object does not write as {}: {why}", format.name()))
+        })?;
         Ok(DataObject {
             resource: Resource {
                 uri: self.uri_for(qualified, &uuid),
@@ -173,7 +169,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
                     .to_string(),
                 ..Default::default()
             },
-            format: "xml".into(),
+            format: format.name().into(),
             blob_id: None,
             data: text.into_bytes(),
         })
@@ -484,17 +480,17 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
         let mut results: Vec<Option<Result<()>>> = arrays.iter().map(|_| None).collect();
         let mut slots = Vec::new();
         let mut writes: Vec<(DataArrayIdentifier, Array)> = Vec::new();
+        // A block the caller chose (a `start` or a `count`) is
+        // `PutDataSubarrays`, through `write_blocks` (blocks.rs), ETP 1.2 §13.3.7.
+        let mut block_slots = Vec::new();
+        let mut blocks: Vec<(DataArrayIdentifier, &ArrayLocation, &ArrayData)> = Vec::new();
         for (position, (location, data)) in arrays.iter().enumerate() {
+            let is_block = !location.start.is_empty() || !location.count.is_empty();
             let prepared = self.writable().and_then(|()| {
-                // A block the caller chose is `PutDataSubarrays`, which the
-                // client does not offer on its own (see the module doc).
-                if !location.start.is_empty() || !location.count.is_empty() {
-                    return Err(Error::Unsupported {
-                        operation: "writing part of an array (PutDataSubarrays)",
-                        store: KIND,
-                    });
-                }
                 let id = self.array_address(location)?;
+                if is_block {
+                    return Ok((id, None));
+                }
                 // The shape and the values agree before anything leaves: a shape
                 // that promises more numbers than there are is a plausible array
                 // that nothing flags.
@@ -516,12 +512,16 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
                     location: format!("{} {}", id.uri, id.path_in_resource),
                     reason: ExternalDataReason::Backend(why),
                 })?;
-                Ok((id, array))
+                Ok((id, Some(array)))
             });
             match prepared {
-                Ok(write) => {
+                Ok((id, None)) => {
+                    block_slots.push(position);
+                    blocks.push((id, location, data));
+                }
+                Ok((id, Some(array))) => {
                     slots.push(position);
-                    writes.push(write);
+                    writes.push((id, array));
                 }
                 Err(why) => results[position] = Some(Err(why)),
             }
@@ -558,6 +558,39 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
                 }
             }
         }
+        if !blocks.is_empty() {
+            let written = self.write_blocks(&blocks);
+            self.forget_listing();
+            for (slot, one) in block_slots.into_iter().zip(written) {
+                results[slot] = Some(one);
+            }
+        }
+        results
+            .into_iter()
+            .map(|one| one.unwrap_or_else(|| Err(remote("no answer was recorded for this array"))))
+            .collect()
+    }
+
+    async fn declare_arrays(&mut self, arrays: &[(ArrayLocation, ArrayMetadata)]) -> Vec<Result<()>> {
+        let mut results: Vec<Option<Result<()>>> = arrays.iter().map(|_| None).collect();
+        let mut slots = Vec::new();
+        let mut items: Vec<(DataArrayIdentifier, &ArrayLocation, &ArrayMetadata)> = Vec::new();
+        for (position, (location, metadata)) in arrays.iter().enumerate() {
+            match self.writable().and_then(|()| self.array_address(location)) {
+                Ok(id) => {
+                    slots.push(position);
+                    items.push((id, location, metadata));
+                }
+                Err(why) => results[position] = Some(Err(why)),
+            }
+        }
+        if !items.is_empty() {
+            let declared = self.declare(&items);
+            self.forget_listing();
+            for (slot, one) in slots.into_iter().zip(declared) {
+                results[slot] = Some(one);
+            }
+        }
         results
             .into_iter()
             .map(|one| one.unwrap_or_else(|| Err(remote("no answer was recorded for this array"))))
@@ -565,8 +598,9 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
     }
 }
 
-/// What the client said of one array, as the trait says it.
-fn array_error(id: &DataArrayIdentifier, failure: &ArrayFailure) -> Error {
+/// What the client said of one array, as the trait says it. Shared with
+/// `blocks.rs`.
+pub(crate) fn array_error(id: &DataArrayIdentifier, failure: &ArrayFailure) -> Error {
     Error::ExternalData {
         location: format!("{} {}", id.uri, id.path_in_resource),
         reason: ExternalDataReason::Backend(failure.to_string()),
@@ -595,7 +629,11 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlDataspaces for EtpStore<T, C>
                         path,
                         store_last_write: 0,
                         store_created: 0,
-                        custom_data: BTreeMap::new(),
+                        custom_data: dataspace
+                            .custom_data
+                            .iter()
+                            .map(|(key, value)| (key.clone(), crate::discovery::custom_value_to_etp(value)))
+                            .collect(),
                     },
                 ))),
                 Err(why) => results[position] = Some(Err(why)),

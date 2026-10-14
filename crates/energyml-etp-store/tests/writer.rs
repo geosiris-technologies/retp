@@ -751,27 +751,23 @@ fn an_array_is_written_whole_and_a_shape_that_lies_is_refused() {
     assert_eq!(values, &vec![0.0, 0.0, 0.0, 10.0, 20.0, 30.0]);
 }
 
-/// **What the client cannot do is refused by name, not answered empty**: a
-/// block the caller chose, and an array declared before it is written.
+/// **A block whose end only the array could say is refused by name, and
+/// nothing leaves**: a `start` without a `count` means "to the end" for a read,
+/// which only the array's dimensions know. Blocks and declarations themselves
+/// are written through `blocks.rs` (tests/blocks.rs).
 #[test]
-fn part_of_an_array_and_a_declaration_are_refused_by_name() {
+fn a_block_without_its_count_is_refused_by_name() {
     let (mut store, log) = writing_store(Log::default());
     let (mut location, data) = points();
     location.start = vec![0, 0];
-    location.count = vec![1, 3];
-    let results = block(store.put_arrays(&[(location, data.clone())]));
+    let results = block(store.put_arrays(&[(location, data)]));
     assert!(
-        matches!(results[0], Err(Error::Unsupported { .. })),
+        matches!(
+            results[0],
+            Err(Error::ExternalData { .. }) | Err(Error::Unsupported { .. })
+        ),
         "{:?}",
         results[0]
-    );
-
-    let (whole, _) = points();
-    let declared = block(store.declare_arrays(&[(whole, data.metadata.clone())]));
-    assert!(
-        matches!(declared[0], Err(Error::Unsupported { .. })),
-        "{:?}",
-        declared[0]
     );
     assert!(log.lock().unwrap().events.is_empty());
 }

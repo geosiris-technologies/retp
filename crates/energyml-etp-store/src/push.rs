@@ -178,10 +178,22 @@ pub enum WriteFormat {
 }
 
 impl WriteFormat {
-    fn name(self) -> &'static str {
+    /// The word ETP uses for it (`DataObject.format`).
+    pub(crate) fn name(self) -> &'static str {
         match self {
             WriteFormat::Xml => "xml",
             WriteFormat::Json => "json",
+        }
+    }
+
+    /// The object written in this form - the one place an object becomes the
+    /// bytes it leaves in, for `push` and for the writer (`writer.rs`).
+    pub(crate) fn write(self, object: &dyn DynObject) -> std::result::Result<String, String> {
+        match self {
+            WriteFormat::Xml => to_part(object, XmlWriteOptions::default()).map_err(|why| why.to_string()),
+            WriteFormat::Json => {
+                energyml_core::json::write_string(object.as_reflect(), false).map_err(|why| why.to_string())
+            }
         }
     }
 }
@@ -737,14 +749,7 @@ pub async fn push<K: Caller>(
                 continue;
             }
         };
-        let written = match format {
-            WriteFormat::Xml => {
-                to_part(object.as_ref(), XmlWriteOptions::default()).map_err(|why| why.to_string())
-            }
-            WriteFormat::Json => {
-                energyml_core::json::write_string(object.as_reflect(), false).map_err(|why| why.to_string())
-            }
-        };
+        let written = format.write(object.as_ref());
         let xml = match written {
             Ok(text) => text.into_bytes(),
             Err(why) => {

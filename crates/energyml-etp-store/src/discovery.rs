@@ -36,7 +36,7 @@ use energyml_storage::context::{
 use energyml_storage::error::{Diagnostic, Error, Result};
 use energyml_storage::graph::{Edge, EdgeKind};
 use energyml_storage::raw::{RawFormat, RawObject};
-use energyml_storage::resource::{ActiveStatus, Dataspace, ObjectSummary};
+use energyml_storage::resource::{ActiveStatus, CustomValue, Dataspace, ObjectSummary};
 use retp_client::asynchronous::get_data_objects_in_batches;
 use retp_client::{Clock, Transport};
 use retp_proto::capabilities::names;
@@ -104,6 +104,10 @@ pub fn summary_from_resource(resource: &Resource, content_type: &str) -> Option<
         ActiveStatusKind::Active => ActiveStatus::Active,
         ActiveStatusKind::Inactive => ActiveStatus::Inactive,
     });
+    // Present only when the request asked for counts; a negative count is not a
+    // count.
+    summary.source_count = resource.source_count.and_then(|n| u32::try_from(n).ok());
+    summary.target_count = resource.target_count.and_then(|n| u32::try_from(n).ok());
     Some(summary)
 }
 
@@ -134,10 +138,55 @@ pub fn edge_from_etp(edge: &EtpEdge) -> Edge {
 /// lexical `created` and `last_changed` stay unstated (ETP carries only the
 /// store times).
 pub fn dataspace_from_etp(dataspace: &EtpDataspace) -> Dataspace {
+    dataspace_from_etp_said(dataspace).0
+}
+
+/// [`dataspace_from_etp`], and the keys of the custom data it could not carry
+/// (a value of a form [`CustomValue`] does not hold): a caller says them rather
+/// than dropping them unseen.
+pub fn dataspace_from_etp_said(dataspace: &EtpDataspace) -> (Dataspace, Vec<String>) {
     let mut out = Dataspace::new(dataspace.uri.clone(), dataspace.path.clone());
     out.store_created = store_time(dataspace.store_created);
     out.store_last_write = store_time(dataspace.store_last_write);
-    out
+    let mut left = Vec::new();
+    for (key, value) in &dataspace.custom_data {
+        match custom_value_from_etp(value) {
+            Some(value) => {
+                out.custom_data.insert(key.clone(), value);
+            }
+            None => left.push(key.clone()),
+        }
+    }
+    (out, left)
+}
+
+/// One ETP `DataValue` of a dataspace's custom data, in a form storage holds:
+/// a text, a list of texts, a boolean, an integer. `None` for any other form
+/// (a float, bytes, a sparse array, null).
+pub fn custom_value_from_etp(value: &retp_types::datatypes::DataValue) -> Option<CustomValue> {
+    use retp_types::datatypes::DataValueItem as V;
+    match &value.item {
+        V::String(text) => Some(CustomValue::Text(text.clone())),
+        V::ArrayOfString(texts) => Some(CustomValue::Texts(texts.values.clone())),
+        V::Boolean(flag) => Some(CustomValue::Bool(*flag)),
+        V::Int(n) => Some(CustomValue::Integer(i64::from(*n))),
+        V::Long(n) => Some(CustomValue::Integer(*n)),
+        _ => None,
+    }
+}
+
+/// A storage custom value as ETP carries it.
+pub fn custom_value_to_etp(value: &CustomValue) -> retp_types::datatypes::DataValue {
+    use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem as V};
+    let item = match value {
+        CustomValue::Text(text) => V::String(text.clone()),
+        CustomValue::Texts(texts) => V::ArrayOfString(ArrayOfString {
+            values: texts.clone(),
+        }),
+        CustomValue::Bool(flag) => V::Boolean(*flag),
+        CustomValue::Integer(n) => V::Long(*n),
+    };
+    DataValue { item }
 }
 
 /// The word ETP spells a logical array type with (`arrayOfDouble64LE`).
@@ -262,9 +311,12 @@ pub fn resources_request(context: &Context, include_edges: bool) -> Result<GetRe
     Ok(GetResources {
         context: info,
         scope,
-        count_objects: false,
+        count_objects: context.count_objects,
         store_last_write_filter: context.store_last_write_after,
-        active_status_filter: None,
+        active_status_filter: context.active_status.map(|status| match status {
+            ActiveStatus::Active => ActiveStatusKind::Active,
+            ActiveStatus::Inactive => ActiveStatusKind::Inactive,
+        }),
         include_edges,
     })
 }
@@ -287,12 +339,12 @@ pub fn resources_request(context: &Context, include_edges: bool) -> Result<GetRe
 /// - `store_times`, `edge_kinds`, `native_context`: Discovery (3) agreed - the
 ///   times and kinds are fields of its records and `GetResources` is the
 ///   native context.
-/// - `deletions_kept_for`: the server's `ChangeRetentionPeriod` when it
-///   **stated** one. The specification's default is 86 400 s and says stores
-///   "MUST support retention of tombstones" (8.2.1), so an unstated period may
-///   mean the default; `TODO(verify)`: until that is settled it is `None`
-///   (unknown), and `deleted_resources` is still tried, since it is a message
-///   every Discovery store answers.
+/// - `deletions_kept_for`: the server's `ChangeRetentionPeriod` when it stated
+///   one, its default otherwise: 86 400 s (ETP 1.2 §9.2.3, p. 192, "Default:
+///   86,400", minimum the same), stores "MUST support retention of tombstones"
+///   (§8.2.1). Discovery (3) agreed.
+/// - `contained_objects`: Store (4) agreed - containment is the server's to
+///   know; `prune_contained` travels as asked.
 /// - `raw_formats`: the formats agreed for the session, those storage knows
 ///   (`xml`, `json`), when Store (4) was agreed. `TODO(verify)`: which JSON
 ///   the server means by `json` (the RDDMS convention or another).
@@ -301,6 +353,8 @@ pub fn resources_request(context: &Context, include_edges: bool) -> Result<GetRe
 // The record is `#[non_exhaustive]`: built from its default and its fields set.
 #[allow(clippy::field_reassign_with_default)]
 pub fn capabilities_of(negotiated: &Negotiated) -> Capabilities {
+    /// ETP 1.2 §9.2.3: the default `ChangeRetentionPeriod`, in seconds.
+    const DEFAULT_CHANGE_RETENTION: u64 = 86_400;
     let agreed = |protocol: i32| negotiated.protocols.contains_key(&protocol);
     let mut capabilities = Capabilities::default();
     capabilities.writes = agreed(STORE) && agreed(DATA_ARRAY);
@@ -311,12 +365,16 @@ pub fn capabilities_of(negotiated: &Negotiated) -> Capabilities {
     capabilities.store_times = agreed(DISCOVERY);
     capabilities.edge_kinds = agreed(DISCOVERY);
     capabilities.native_context = agreed(DISCOVERY);
-    if agreed(DISCOVERY) && negotiated.theirs.sent(names::CHANGE_RETENTION_PERIOD) {
-        capabilities.deletions_kept_for = negotiated
+    if agreed(DISCOVERY) {
+        let stated = negotiated
             .theirs
-            .long(names::CHANGE_RETENTION_PERIOD)
+            .sent(names::CHANGE_RETENTION_PERIOD)
+            .then(|| negotiated.theirs.long(names::CHANGE_RETENTION_PERIOD))
+            .flatten()
             .and_then(|seconds| u64::try_from(seconds).ok());
+        capabilities.deletions_kept_for = Some(stated.unwrap_or(DEFAULT_CHANGE_RETENTION));
     }
+    capabilities.contained_objects = agreed(STORE);
     if agreed(STORE) {
         for format in &negotiated.formats {
             if let Some(raw) = RawFormat::from_etp(format)

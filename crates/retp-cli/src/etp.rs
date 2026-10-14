@@ -2148,10 +2148,10 @@ fn write_array(file: &std::path::Path, array: &energyml_etp_store::pack::PackedA
     use energyml_storage::array::{ArrayData, ArrayMetadata};
     use energyml_storage::backend::ArrayBackend;
     let data = ArrayData {
-        metadata: ArrayMetadata {
-            dimensions: array.dimensions.iter().map(|d| *d as i64).collect(),
-            element_type: array.values.element_type().to_string(),
-        },
+        metadata: ArrayMetadata::new(
+            array.dimensions.iter().map(|d| *d as i64).collect(),
+            array.values.element_type().to_string(),
+        ),
         values: array.values.clone(),
     };
     energyml_storage::hdf5::Hdf5Backend

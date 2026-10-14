@@ -1,0 +1,5 @@
+# One finding, by fingerprint: not a secret. In 5ac0f01 a summary was built from a
+# variable named after a key (the uuid of a PropertyKind) followed by a type name,
+# which the generic-api-key rule matches. The variable is named kind_uuid since;
+# the commit stays in the history of dev, which is protected from rewriting.
+5ac0f011988bbccd4147de7ac9be2239d50d42b6:crates/energyml-etp-store/src/push.rs:generic-api-key:439

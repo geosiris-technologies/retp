@@ -416,12 +416,12 @@ pub fn well_known_kinds(
             continue;
         }
         for kind in chain {
-            let key = kind.uuid.to_ascii_lowercase();
-            if !done.insert(key.clone()) {
+            let kind_uuid = kind.uuid.to_ascii_lowercase();
+            if !done.insert(kind_uuid.clone()) {
                 continue;
             }
             // The same shape as the reference that named it.
-            let uri = to.replace(&uuid, &key);
+            let uri = to.replace(&uuid, &kind_uuid);
             let xml = kind_xml(&kind);
             let object = match registry.read_xml(
                 "application/x-eml+xml;version=2.3;type=PropertyKind",
@@ -438,7 +438,7 @@ pub fn well_known_kinds(
             let edges = kind
                 .parent
                 .as_deref()
-                .filter(|parent| !parent.eq_ignore_ascii_case(&key))
+                .filter(|parent| !parent.eq_ignore_ascii_case(&kind_uuid))
                 .map(|parent| {
                     energyml_storage::graph::Edge::new(
                         uri.clone(),
@@ -448,7 +448,7 @@ pub fn well_known_kinds(
                 })
                 .into_iter()
                 .collect();
-            let summary = ObjectSummary::new(uri, key, "eml23.PropertyKind")
+            let summary = ObjectSummary::new(uri, kind_uuid, "eml23.PropertyKind")
                 .with_content_type("application/x-eml+xml;version=2.3;type=PropertyKind")
                 .with_locator("PropertyKindDictionary_v2.3");
             found.kinds.push((summary, object, edges));

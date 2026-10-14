@@ -51,7 +51,7 @@ ring = "0.17"
 # the shipped registry. The crate itself must not depend on it - it would pull
 # the twelve generated crates into a client that reads none of them.
 [dev-dependencies]
-energyml-schemas = { version = "0.2.0-alpha.2", features = ["all"] }
+energyml-schemas = { version = "0.2.0-alpha.3", features = ["all"] }
 
 # docs.rs builds on Linux with no native HDF5: every feature builds there.
 [package.metadata.docs.rs]

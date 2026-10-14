@@ -27,8 +27,8 @@ retp-client = { workspace = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }
-energyml-storage = { version = "0.2.0-alpha.2" }
-energyml-schemas = { version = "0.2.0-alpha.2", features = ["all"] }
+energyml-storage = { version = "0.2.0-alpha.3" }
+energyml-schemas = { version = "0.2.0-alpha.3", features = ["all"] }
 
 [features]
 default = []

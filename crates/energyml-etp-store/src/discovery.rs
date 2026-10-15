@@ -5,8 +5,10 @@
 //! Two kinds of item live here.
 //!
 //! **Pure conversions**, public free functions: an ETP record in, a storage
-//! record out (or the other way for a [`Context`](energyml_storage::context::Context)). They read no session, so
-//! each can be tested with a fabricated record (`tests/discovery.rs`).
+//! record out. They now live in [`crate::convert`], beside their inverses (what
+//! a server answers with), and are re-exported here by their names. They read
+//! no session, so each can be tested with a fabricated record
+//! (`tests/discovery.rs`, `tests/convert_objects.rs`, `tests/convert_arrays.rs`).
 //!
 //! **Inherent helpers** of [`EtpStore`], `pub(crate)`: the exchanges. The
 //! `impl EnergymlStorage for EtpStore` block of `lib.rs` delegates to them one
@@ -28,31 +30,34 @@
 use std::collections::HashSet;
 
 use energyml_core::identifiers::EtpUri;
-use energyml_storage::array::{ArrayLocation, ArrayMetadata};
 use energyml_storage::capabilities::Capabilities;
-use energyml_storage::context::{
-    Context, DeletedFilter, DeletedResource, Found, Navigable, Scope, is_dataspace_uri,
-};
+use energyml_storage::context::{Context, DeletedFilter, DeletedResource, Found, Scope, is_dataspace_uri};
 use energyml_storage::error::{Diagnostic, Error, Result};
-use energyml_storage::graph::{Edge, EdgeKind};
+use energyml_storage::graph::Edge;
 use energyml_storage::raw::{RawFormat, RawObject};
-use energyml_storage::resource::{ActiveStatus, CustomValue, Dataspace, ObjectSummary};
+use energyml_storage::resource::{ActiveStatus, ObjectSummary};
 use retp_client::asynchronous::get_data_objects_in_batches;
 use retp_client::{Clock, Transport};
 use retp_proto::capabilities::names;
 use retp_proto::negotiate::Negotiated;
 use retp_proto::uris::{UriUse, check_uri};
 use retp_proto::wire::{Body, Delivery, Exception};
-use retp_types::datatypes::data_array_types::{DataArrayIdentifier, DataArrayMetadata};
+use retp_types::datatypes::ErrorInfo;
 use retp_types::datatypes::object::{
-    ActiveStatusKind, ContextInfo, ContextScopeKind, Dataspace as EtpDataspace, Edge as EtpEdge,
-    RelationshipKind, Resource,
+    ActiveStatusKind, ContextScopeKind, Edge as EtpEdge, RelationshipKind, Resource,
 };
-use retp_types::datatypes::{AnyLogicalArrayType, ErrorInfo};
 use retp_types::dispatch::Message;
 use retp_types::protocol::discovery::{GetDeletedResources, GetResources};
 
-use crate::{EtpStore, KIND, element_type, pack, qualified_type_of, refused, remote};
+use crate::{EtpStore, KIND, pack, qualified_type_of, refused, remote};
+
+/// Moved to [`crate::convert::arrays`], beside their inverses; kept here by name.
+pub use crate::convert::arrays::{array_metadata_from_etp, identifier_of, logical_symbol};
+/// Moved to [`crate::convert::objects`], beside their inverses; kept here by name.
+pub use crate::convert::objects::{
+    context_info, custom_value_from_etp, custom_value_to_etp, dataspace_from_etp, dataspace_from_etp_said,
+    edge_from_etp, edge_kind_from_etp, relationship_kind, scope_kind, summary_from_resource,
+};
 
 /// The protocols whose agreement `capabilities_of` reads: Discovery, Store,
 /// DataArray, Transaction, Dataspace.
@@ -76,221 +81,6 @@ const DATASPACE: i32 = 24;
 /// literally; until then it is read as "not stated".
 pub fn store_time(timestamp: i64) -> Option<i64> {
     (timestamp != 0).then_some(timestamp)
-}
-
-/// A listed ETP resource as a storage summary, or `None` when its URI does not
-/// name a data object this store can address (a dataspace, a URI without a
-/// uuid).
-///
-/// `content_type` is what the registry knows of the qualified type (empty when
-/// it knows nothing); the caller looks it up, so that this function reads no
-/// registry.
-///
-/// `activeStatus` is passed through as stated: ETP makes it required, but only
-/// channels and growing objects give it a meaning (23.34.1, 23.34.11), so a
-/// server's answer for any other type is whatever it fills in (the Avro zero
-/// is `Active`). `TODO(verify)`: what a store puts for an object that cannot
-/// grow.
-pub fn summary_from_resource(resource: &Resource, content_type: &str) -> Option<ObjectSummary> {
-    let parsed = EtpUri::parse(&resource.uri).ok()?;
-    let qualified_type = qualified_type_of(&parsed)?;
-    let mut summary = ObjectSummary::new(resource.uri.clone(), parsed.uuid?, qualified_type)
-        .with_content_type(content_type)
-        .with_locator(resource.uri.clone());
-    summary.alternate_uris = resource.alternate_uris.clone();
-    summary.store_created = store_time(resource.store_created);
-    summary.store_last_write = store_time(resource.store_last_write);
-    summary.active_status = Some(match resource.active_status {
-        ActiveStatusKind::Active => ActiveStatus::Active,
-        ActiveStatusKind::Inactive => ActiveStatus::Inactive,
-    });
-    // Present only when the request asked for counts; a negative count is not a
-    // count.
-    summary.source_count = resource.source_count.and_then(|n| u32::try_from(n).ok());
-    summary.target_count = resource.target_count.and_then(|n| u32::try_from(n).ok());
-    Some(summary)
-}
-
-/// The kind of an ETP edge. `Both` is a filter of a request, not the kind of
-/// an edge ("For edges, RelationshipKind CANNOT be Both", ETP 1.2 23.34.13),
-/// so it has none.
-pub fn edge_kind_from_etp(kind: RelationshipKind) -> Option<EdgeKind> {
-    match kind {
-        RelationshipKind::Primary => Some(EdgeKind::Primary),
-        RelationshipKind::Secondary => Some(EdgeKind::Secondary),
-        RelationshipKind::Both => None,
-    }
-}
-
-/// An ETP edge as a storage edge: source to target, with the kind the server
-/// stated.
-///
-/// ETP names no path inside the source (`Grid2dPatch.SupportingRepresentation`
-/// and the like): [`Edge::path`] is empty. A `Both` edge, which the
-/// specification forbids, keeps its ends and has no kind.
-pub fn edge_from_etp(edge: &EtpEdge) -> Edge {
-    let mut out = Edge::new(edge.source_uri.clone(), edge.target_uri.clone(), "");
-    out.kind = edge_kind_from_etp(edge.relationship_kind);
-    out
-}
-
-/// An ETP dataspace as a storage dataspace. The name is its `path`; the
-/// lexical `created` and `last_changed` stay unstated (ETP carries only the
-/// store times).
-pub fn dataspace_from_etp(dataspace: &EtpDataspace) -> Dataspace {
-    dataspace_from_etp_said(dataspace).0
-}
-
-/// [`dataspace_from_etp`], and the keys of the custom data it could not carry
-/// (a value of a form [`CustomValue`] does not hold): a caller says them rather
-/// than dropping them unseen.
-pub fn dataspace_from_etp_said(dataspace: &EtpDataspace) -> (Dataspace, Vec<String>) {
-    let mut out = Dataspace::new(dataspace.uri.clone(), dataspace.path.clone());
-    out.store_created = store_time(dataspace.store_created);
-    out.store_last_write = store_time(dataspace.store_last_write);
-    let mut left = Vec::new();
-    for (key, value) in &dataspace.custom_data {
-        match custom_value_from_etp(value) {
-            Some(value) => {
-                out.custom_data.insert(key.clone(), value);
-            }
-            None => left.push(key.clone()),
-        }
-    }
-    (out, left)
-}
-
-/// One ETP `DataValue` of a dataspace's custom data, in a form storage holds:
-/// a text, a list of texts, a boolean, an integer. `None` for any other form
-/// (a float, bytes, a sparse array, null).
-pub fn custom_value_from_etp(value: &retp_types::datatypes::DataValue) -> Option<CustomValue> {
-    use retp_types::datatypes::DataValueItem as V;
-    match &value.item {
-        V::String(text) => Some(CustomValue::Text(text.clone())),
-        V::ArrayOfString(texts) => Some(CustomValue::Texts(texts.values.clone())),
-        V::Boolean(flag) => Some(CustomValue::Bool(*flag)),
-        V::Int(n) => Some(CustomValue::Integer(i64::from(*n))),
-        V::Long(n) => Some(CustomValue::Integer(*n)),
-        _ => None,
-    }
-}
-
-/// A storage custom value as ETP carries it.
-pub fn custom_value_to_etp(value: &CustomValue) -> retp_types::datatypes::DataValue {
-    use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem as V};
-    let item = match value {
-        CustomValue::Text(text) => V::String(text.clone()),
-        CustomValue::Texts(texts) => V::ArrayOfString(ArrayOfString {
-            values: texts.clone(),
-        }),
-        CustomValue::Bool(flag) => V::Boolean(*flag),
-        CustomValue::Integer(n) => V::Long(*n),
-    };
-    DataValue { item }
-}
-
-/// The word ETP spells a logical array type with (`arrayOfDouble64LE`).
-pub fn logical_symbol(logical: AnyLogicalArrayType) -> &'static str {
-    use AnyLogicalArrayType as L;
-    match logical {
-        L::ArrayOfBoolean => "arrayOfBoolean",
-        L::ArrayOfInt8 => "arrayOfInt8",
-        L::ArrayOfUInt8 => "arrayOfUInt8",
-        L::ArrayOfInt16Le => "arrayOfInt16LE",
-        L::ArrayOfInt32Le => "arrayOfInt32LE",
-        L::ArrayOfInt64Le => "arrayOfInt64LE",
-        L::ArrayOfUInt16Le => "arrayOfUInt16LE",
-        L::ArrayOfUInt32Le => "arrayOfUInt32LE",
-        L::ArrayOfUInt64Le => "arrayOfUInt64LE",
-        L::ArrayOfFloat32Le => "arrayOfFloat32LE",
-        L::ArrayOfDouble64Le => "arrayOfDouble64LE",
-        L::ArrayOfInt16Be => "arrayOfInt16BE",
-        L::ArrayOfInt32Be => "arrayOfInt32BE",
-        L::ArrayOfInt64Be => "arrayOfInt64BE",
-        L::ArrayOfUInt16Be => "arrayOfUInt16BE",
-        L::ArrayOfUInt32Be => "arrayOfUInt32BE",
-        L::ArrayOfUInt64Be => "arrayOfUInt64BE",
-        L::ArrayOfFloat32Be => "arrayOfFloat32BE",
-        L::ArrayOfDouble64Be => "arrayOfDouble64BE",
-        L::ArrayOfString => "arrayOfString",
-        L::ArrayOfCustom => "arrayOfCustom",
-    }
-}
-
-/// ETP array metadata as storage array metadata.
-///
-/// `logical` is the logical type the array is **read** as (the caller resolved
-/// it with `retp_client::arrays::reading_type`, which may correct a server
-/// that sends a type its transport cannot carry); it gives the element type,
-/// as `lib.rs` has always done. [`ArrayMetadata::logical_type`] is the word
-/// the server itself used for `logicalArrayType`, so a correction stays
-/// visible. `preferredSubarrayDimensions` and the store times are carried
-/// over (0 times are unstated).
-pub fn array_metadata_from_etp(meta: &DataArrayMetadata, logical: AnyLogicalArrayType) -> ArrayMetadata {
-    let mut out = ArrayMetadata::new(meta.dimensions.clone(), element_type(logical).to_string());
-    out.logical_type = Some(logical_symbol(meta.logical_array_type).to_string());
-    out.preferred_subarray_dimensions = meta.preferred_subarray_dimensions.clone();
-    out.store_created = store_time(meta.store_created);
-    out.store_last_write = store_time(meta.store_last_write);
-    out
-}
-
-/// Where an array is asked for: the ETP address when the location has one
-/// (`resource_uri`, then `path_in_file` as `pathInResource`), else its `file`
-/// when that was filled with the URI of the holding object (what `arrays_of`
-/// does today). `None` for a location that names nothing.
-pub fn identifier_of(location: &ArrayLocation) -> Option<DataArrayIdentifier> {
-    match location.etp_address() {
-        Some((uri, path)) => Some(DataArrayIdentifier {
-            uri: uri.to_string(),
-            path_in_resource: path.to_string(),
-        }),
-        None => (!location.file.is_empty()).then(|| DataArrayIdentifier {
-            uri: location.file.clone(),
-            path_in_resource: location.path_in_file.clone(),
-        }),
-    }
-}
-
-/// The ETP `ContextScopeKind` of a scope.
-pub fn scope_kind(scope: Scope) -> ContextScopeKind {
-    match scope {
-        Scope::Itself => ContextScopeKind::Self_,
-        Scope::Sources => ContextScopeKind::Sources,
-        Scope::Targets => ContextScopeKind::Targets,
-        Scope::SourcesOrSelf => ContextScopeKind::SourcesOrSelf,
-        Scope::TargetsOrSelf => ContextScopeKind::TargetsOrSelf,
-    }
-}
-
-/// The ETP `RelationshipKind` of a navigation filter.
-///
-/// `TODO(verify)`: `Both` is allowed by 8.3.1 ("Choices are Primary, Secondary
-/// or Both") and discouraged by 23.34.15 ("SHOULD NOT be set to Both"); it is
-/// sent as asked, since "both" is what a [`Context`] says by default.
-pub fn relationship_kind(navigable: Navigable) -> RelationshipKind {
-    match navigable {
-        Navigable::Primary => RelationshipKind::Primary,
-        Navigable::Secondary => RelationshipKind::Secondary,
-        Navigable::Both => RelationshipKind::Both,
-    }
-}
-
-/// A [`Context`] as ETP's `ContextInfo`. A depth that does not fit ETP's `int`
-/// is refused by name, never clamped.
-pub fn context_info(context: &Context) -> Result<ContextInfo> {
-    let depth = i32::try_from(context.depth).map_err(|_| Error::Unsupported {
-        operation: "a context depth beyond 2147483647 (ETP depth is an int)",
-        store: KIND,
-    })?;
-    Ok(ContextInfo {
-        uri: context.uri.clone(),
-        depth,
-        data_object_types: context.types.clone(),
-        navigable_edges: relationship_kind(context.navigable),
-        include_secondary_targets: context.include_secondary_targets,
-        include_secondary_sources: context.include_secondary_sources,
-    })
 }
 
 /// The `GetResources` a [`Context`] stands for (ETP 1.2 8.3.1).

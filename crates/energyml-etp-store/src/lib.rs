@@ -52,10 +52,14 @@ use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::{ContextScopeKind, Resource};
 use retp_types::datatypes::{AnyLogicalArrayType, ErrorInfo};
 
+/// Moved to [`crate::convert::arrays`], beside their inverses; kept here by name.
+pub use crate::convert::arrays::values_of;
+
 /// Blocks and declarations of arrays, for the writer.
 mod blocks;
 /// The reading additions on a dataspace: what the server states (store times,
 /// edge kinds), contexts answered natively, objects as bytes, deletions.
+pub mod convert;
 pub mod discovery;
 pub mod pack;
 pub mod push;
@@ -643,27 +647,4 @@ pub fn read_object(
     said.extend(departures.defaulted.into_iter().map(|item| item.to_string()));
     said.extend(departures.repaired.into_iter().map(|item| item.to_string()));
     Ok((object, said))
-}
-
-/// An array as storage keeps it: numbers of the logical type the store gave.
-/// Strings are not an array a package holds.
-pub fn values_of(array: &retp_client::arrays::Array) -> std::result::Result<ArrayValues, String> {
-    match array.values.decode(array.logical) {
-        Some(Decoded::F64(v)) => Ok(ArrayValues::F64(v)),
-        Some(Decoded::F32(v)) => Ok(ArrayValues::F32(v)),
-        Some(Decoded::I64(v)) => Ok(ArrayValues::I64(v)),
-        Some(Decoded::I32(v)) => Ok(ArrayValues::I32(v)),
-        Some(Decoded::I16(v)) => Ok(ArrayValues::I16(v)),
-        Some(Decoded::I8(v)) => Ok(ArrayValues::I8(v)),
-        Some(Decoded::U64(v)) => Ok(ArrayValues::U64(v)),
-        Some(Decoded::U32(v)) => Ok(ArrayValues::U32(v)),
-        Some(Decoded::U16(v)) => Ok(ArrayValues::U16(v)),
-        Some(Decoded::U8(v)) => Ok(ArrayValues::U8(v)),
-        // Flags as the bytes HDF5 keeps them in.
-        Some(Decoded::Booleans(v)) => Ok(ArrayValues::U8(v.into_iter().map(u8::from).collect())),
-        Some(Decoded::Strings(_)) | None => Err(format!(
-            "{:?} values are not numbers, and a storage array holds numbers",
-            array.logical
-        )),
-    }
 }

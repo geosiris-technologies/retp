@@ -2,6 +2,7 @@
 
 - [Library usage](client.md)
 - [Command line](cli.md)
+- [MCP server](mcp.md)
 - [Conformance checker](conformance.md)
 - [Python bridge](python.md)
 - [Releasing](releasing.md)

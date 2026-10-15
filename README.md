@@ -51,6 +51,9 @@ retp download-epc wss://etp.example.com/etp demo --out demo.epc
 
 # One session, many commands
 retp shell wss://etp.example.com/etp
+
+# One dataspace as MCP tools for an AI assistant (feature `mcp`)
+retp mcp wss://etp.example.com/etp --dataspace demo
 ```
 
 Secrets go through the environment (`ETP_TOKEN`, `ETP_USER`, `ETP_PASSWORD`,

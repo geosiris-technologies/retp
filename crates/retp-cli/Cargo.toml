@@ -19,6 +19,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+# The MCP tools and their stdio server (feature `mcp`).
+energyml-mcp = { version = "0.2.0-alpha.4", features = ["server"], optional = true }
 clap = { version = "4.6", features = ["derive"] }
 # Where the ETP crates' `log` lines go: stderr, through a logger of a few lines.
 log = "0.4"
@@ -27,8 +29,8 @@ retp-client = { workspace = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }
-energyml-storage = { version = "0.2.0-alpha.3" }
-energyml-schemas = { version = "0.2.0-alpha.3", features = ["all"] }
+energyml-storage = { version = "0.2.0-alpha.4" }
+energyml-schemas = { version = "0.2.0-alpha.4", features = ["all"] }
 
 [features]
 default = []
@@ -37,6 +39,9 @@ default = []
 hdf5 = ["energyml-storage/hdf5"]
 # HDF5 built from its sources and linked in (CMake and a C compiler at build time): the release archives.
 hdf5-static = ["hdf5", "energyml-storage/hdf5-static"]
+# `retp mcp`: the generic MCP tools of energyml-mcp over stdio, on one
+# dataspace. Off by default: it brings tokio and the MCP SDK.
+mcp = ["dep:energyml-mcp"]
 
 [lints.rust]
 missing_docs = "warn"

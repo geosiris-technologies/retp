@@ -30,6 +30,12 @@ use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::ContextScopeKind;
 use retp_types::datatypes::object::Dataspace;
 
+// `retp mcp`, a child of this module: it reuses `Server` and `LoginArgs`,
+// which are private here.
+#[cfg(feature = "mcp")]
+#[path = "mcp.rs"]
+mod mcp;
+
 type Session = native::Remote;
 
 #[derive(Parser)]
@@ -519,6 +525,10 @@ enum EtpCommand {
     /// What the server says of itself before any connection
     /// (`/.well-known/etp-server-capabilities`).
     Probe(Server),
+    /// Serve the generic read-only MCP tools of energyml-mcp over stdio, on
+    /// one dataspace (builds with the `mcp` feature).
+    #[cfg(feature = "mcp")]
+    Mcp(mcp::McpArgs),
     /// Open a session, say what was agreed, ping, close.
     Connect(Server),
     /// The store's dataspaces (Dataspace, protocol 24).
@@ -794,6 +804,8 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
     }
     match args.command {
         EtpCommand::Probe(server) => probe(&server),
+        #[cfg(feature = "mcp")]
+        EtpCommand::Mcp(args) => mcp::run(args),
         EtpCommand::Connect(server) => one_shot(&server, |session| {
             info(session);
             ping(session)?;

@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use retp_avro::Role;
-use retp_types::datatypes::{SupportedDataObject, SupportedProtocol, Uuid, Version};
+use retp_types::datatypes::{
+    Contact, ServerCapabilities, SupportedDataObject, SupportedProtocol, Uuid, Version,
+};
 use retp_types::protocol::core::{OpenSession, RequestSession};
 
 use crate::capabilities::{Capabilities, Scope, names, smaller_of_two};
@@ -320,6 +322,38 @@ impl Offer {
             current_date_time: now,
             earliest_retained_change_time,
             server_authorization_required: false,
+            endpoint_capabilities: self.endpoint.to_map(),
+        }
+    }
+
+    /// The `ServerCapabilities` a server publishes at its
+    /// `/.well-known/etp-server-capabilities` (§4.3.1): what this offer says,
+    /// each protocol with the role **this** end plays. The counterpart of
+    /// [`crate::probe::parse_server_capabilities`], which reads it back.
+    ///
+    /// `supportedEncodings` is `binary` alone (the JSON encoding "is for internal
+    /// testing and debugging only", §4.3, and is not implemented here), and no
+    /// compression is offered (none is implemented, as in [`Offer::request_session`]).
+    /// The contact is empty: an offer does not hold one.
+    pub fn server_capabilities(&self) -> ServerCapabilities {
+        ServerCapabilities {
+            application_name: self.application_name.clone(),
+            application_version: self.application_version.clone(),
+            contact_information: Contact::default(),
+            supported_compression: Vec::new(),
+            supported_encodings: vec!["binary".to_string()],
+            supported_formats: self.formats.clone(),
+            supported_data_objects: self.data_objects.clone(),
+            supported_protocols: self
+                .protocols
+                .iter()
+                .map(|p| SupportedProtocol {
+                    protocol: p.protocol,
+                    protocol_version: p.version.clone(),
+                    role: p.role.as_str().to_string(),
+                    protocol_capabilities: p.capabilities.to_map(),
+                })
+                .collect(),
             endpoint_capabilities: self.endpoint.to_map(),
         }
     }

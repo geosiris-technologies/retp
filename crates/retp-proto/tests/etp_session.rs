@@ -1764,6 +1764,47 @@ fn sample_capabilities() -> ServerCapabilities {
 }
 
 #[test]
+fn an_offer_publishes_capabilities_a_client_reads_back() {
+    // What a server serves at `.well-known`, read by the probe a client runs:
+    // the same offer, both ways.
+    let offer = Offer::new("a store", "3.1", Uuid([7; 16]))
+        .with_types(["resqml20.*", "eml20.*"])
+        .unwrap()
+        .with_capability(names::MAX_WEBSOCKET_MESSAGE_PAYLOAD_SIZE, Value::Long(1 << 20))
+        .unwrap()
+        .protocol(ProtocolOffer::v12(3, Role::Store))
+        .unwrap()
+        .protocol(ProtocolOffer::v12(4, Role::Store))
+        .unwrap();
+    let published = offer.server_capabilities();
+    let read = probe::parse_server_capabilities(&published.to_avro(), Some("avro/binary")).unwrap();
+    assert_eq!(read, published);
+    assert_eq!(read.application_name, "a store");
+    assert_eq!(read.supported_encodings, ["binary"]);
+    assert_eq!(read.supported_formats, offer.formats);
+    let roles: Vec<(i32, &str)> = read
+        .supported_protocols
+        .iter()
+        .map(|p| (p.protocol, p.role.as_str()))
+        .collect();
+    assert_eq!(
+        roles,
+        [(3, "store"), (4, "store")],
+        "each protocol in the role the server plays"
+    );
+    let types: Vec<&str> = read
+        .supported_data_objects
+        .iter()
+        .map(|d| d.qualified_type.as_str())
+        .collect();
+    assert_eq!(types, ["resqml20.*", "eml20.*"]);
+    assert!(
+        read.endpoint_capabilities
+            .contains_key(names::MAX_WEBSOCKET_MESSAGE_PAYLOAD_SIZE)
+    );
+}
+
+#[test]
 fn server_capabilities_parses_binary_and_json() {
     let expected = sample_capabilities();
     let binary = expected.to_avro();

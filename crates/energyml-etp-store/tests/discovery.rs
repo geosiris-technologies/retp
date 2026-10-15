@@ -571,15 +571,24 @@ fn a_context_is_answered_by_one_get_resources() {
     assert_eq!(found.resources[0].uri, points_uri());
     assert_eq!(found.resources[0].store_last_write, Some(T0 + S));
     assert_eq!(found.resources[0].active_status, Some(ActiveStatus::Inactive));
-    assert_eq!(
-        found.edges.len(),
-        1,
-        "the edge to an object outside the answer is left out"
-    );
-    assert_eq!(found.edges[0].kind, Some(EdgeKind::Primary));
-    assert_eq!(found.edges[0].to, crs_uri());
+    // Every edge the server states with one end among the answer is kept
+    // (ETP 1.2 section 8.3.1, GetResourcesEdgesResponse row 3.c: "if EITHER
+    // end (or both) are present"), the one to an object the types filtered
+    // out included; none is left out.
+    assert!(!found.edges.is_empty());
     assert!(
-        store.diagnostics().iter().any(|d| d.message.contains("left out")),
+        found.edges.iter().all(|edge| edge.from == points_uri()),
+        "{:?}",
+        found.edges
+    );
+    let to_crs = found
+        .edges
+        .iter()
+        .find(|edge| edge.to == crs_uri())
+        .expect("the edge to the CRS");
+    assert_eq!(to_crs.kind, Some(EdgeKind::Primary));
+    assert!(
+        !store.diagnostics().iter().any(|d| d.message.contains("left out")),
         "{:?}",
         store.diagnostics()
     );

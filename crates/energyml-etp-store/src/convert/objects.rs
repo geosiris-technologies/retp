@@ -390,6 +390,10 @@ pub fn error_code_of(error: &Error) -> EtpError {
         Error::UnknownType(_) => EtpError::EDATAOBJECTTYPE_NOTSUPPORTED,
         Error::Package(_) | Error::Xml(_) | Error::Core(_) => EtpError::EINVALID_OBJECT,
         Error::Unsupported { .. } => EtpError::ENOTSUPPORTED,
+        // TODO(verify): at the next release of energyml-storage, `Error::UnstatedKind`
+        // (a request by relationship kind that met an edge whose kind nobody states)
+        // answers `ENOTSUPPORTED` here, like `Unsupported`; the published version
+        // this crate builds on has no such variant yet, so it takes the `_` arm.
         Error::Transaction { .. } => EtpError::EINVALID_STATE,
         Error::ExternalData { reason, .. } => match reason {
             ExternalDataReason::FeatureNotEnabled { .. } => EtpError::ENOTSUPPORTED,
@@ -466,9 +470,11 @@ pub fn edge_kind_from_etp(kind: RelationshipKind) -> Option<EdgeKind> {
 /// and the like): [`Edge::path`] is empty. A `Both` edge, which the
 /// specification forbids, keeps its ends and has no kind.
 pub fn edge_from_etp(edge: &EtpEdge) -> Edge {
-    let mut out = Edge::new(edge.source_uri.clone(), edge.target_uri.clone(), "");
-    out.kind = edge_kind_from_etp(edge.relationship_kind);
-    out
+    let out = Edge::new(edge.source_uri.clone(), edge.target_uri.clone(), "");
+    match edge_kind_from_etp(edge.relationship_kind) {
+        Some(kind) => out.with_kind(kind),
+        None => out,
+    }
 }
 
 /// An ETP dataspace as a storage dataspace. The name is its `path`; the

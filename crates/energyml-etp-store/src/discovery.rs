@@ -290,11 +290,12 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     /// navigable edges, the secondary flags, the types, the
     /// `storeLastWriteFilter` and `includeEdges = true` (8.3.1).
     ///
-    /// The edges kept are those whose two ends are among the resources, as
-    /// [`Found`] says: 8.1.1.1.4 step 4 removes the edges "not connected to a
-    /// node in the final set", which keeps an edge with **one** end in it, so
-    /// the others are dropped here and counted in a note.
-    /// `TODO(verify)`: whether step 4 means one end or both.
+    /// The edges kept are those with **either** end among the resources, as
+    /// [`Found`] says (8.3.1, p. 163, `GetResourcesEdgesResponse` row 3.c: an
+    /// edge "if EITHER end (or both) are present", even when the other end was
+    /// filtered out by the types). An edge the server sends with neither end
+    /// among them is dropped here and counted in a note: 8.1.1.1.4 step 4
+    /// removes "edges that are not connected to a node in the final set".
     ///
     /// A resource that is not a data object URI is left out with a warning, as
     /// `resources()` does.
@@ -319,12 +320,12 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
         let held: HashSet<&str> = resources.iter().map(|summary| summary.uri.as_str()).collect();
         let (kept, dropped): (Vec<Edge>, Vec<Edge>) = edges
             .into_iter()
-            .partition(|edge| held.contains(edge.from.as_str()) && held.contains(edge.to.as_str()));
+            .partition(|edge| held.contains(edge.from.as_str()) || held.contains(edge.to.as_str()));
         if !dropped.is_empty() {
             self.record(Diagnostic::note(
                 &context.uri,
                 format!(
-                    "{} edge(s) with an end outside the resources found were left out",
+                    "{} edge(s) with neither end among the resources found were left out",
                     dropped.len()
                 ),
             ));

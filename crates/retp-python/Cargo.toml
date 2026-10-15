@@ -29,8 +29,6 @@ crate-type = ["cdylib", "rlib"]
 # the EnergyML workshops are `energyml-rust`'s wheel, not this one.
 # `tests/scope.rs` reads this table and goes red if something else shows up.
 [dependencies]
-# What arrives for a subscription, in the JSON the Rust library writes, turned into a dict.
-serde_json = "1.0"
 # `live`: a session driven by a task of its own (`Session.subscribe`).
 retp-client = { workspace = true, features = ["live"] }
 retp-proto = { workspace = true }

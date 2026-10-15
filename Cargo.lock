@@ -1465,7 +1465,6 @@ dependencies = [
  "retp-client",
  "retp-proto",
  "retp-types",
- "serde_json",
 ]
 
 [[package]]

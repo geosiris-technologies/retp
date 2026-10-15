@@ -77,10 +77,11 @@ fn target_of(to: Option<&Bound<'_, PyAny>>) -> PyResult<Target> {
     choose(path, to.is_callable(), true).map_err(PyTypeError::new_err)
 }
 
-/// A JSON value as the Python object `json.loads` makes of it: Python's own decoder, not a
-/// second conversion (the way `bindings.rs` turns EnergyML JSON into dictionaries).
-fn to_python<'py>(py: Python<'py>, value: &serde_json::Value) -> PyResult<Bound<'py, PyAny>> {
-    py.import("json")?.call_method1("loads", (value.to_string(),))
+/// The JSON text of an arrival (`as_json`, written by the Rust library) as the Python
+/// object `json.loads` makes of it: Python's own decoder, not a second conversion (the way
+/// `bindings.rs` turns EnergyML JSON into dictionaries).
+fn to_python<'py>(py: Python<'py>, json: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("json")?.call_method1("loads", (json,))
 }
 
 /// A [`Destination`] that calls a Python callable with the dictionary of each arrival.
@@ -99,9 +100,9 @@ impl Destination for PyCallback {
     /// Takes the GIL, builds the dictionary, calls. A Python exception is returned as its
     /// text (the session then removes this destination and says so once), never raised here.
     fn deliver(&self, event: &Event) -> Result<(), String> {
-        let value = as_json(event);
+        let json = as_json(event).to_string();
         Python::attach(|py| {
-            let arrival = to_python(py, &value).map_err(|e| format!("cannot build the arrival: {e}"))?;
+            let arrival = to_python(py, &json).map_err(|e| format!("cannot build the arrival: {e}"))?;
             self.callable
                 .call1(py, (arrival,))
                 .map(|_| ())
@@ -239,7 +240,7 @@ impl PySubscription {
             })?),
         };
         match self.next_within(py, timeout)? {
-            Some(event) => Ok(Some(to_python(py, &as_json(&event))?)),
+            Some(event) => Ok(Some(to_python(py, &as_json(&event).to_string())?)),
             None => Ok(None),
         }
     }
@@ -251,7 +252,7 @@ impl PySubscription {
     /// The next arrival; blocks until one comes. `StopIteration` when the stream ended.
     fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         match self.next_within(py, None)? {
-            Some(event) => Ok(Some(to_python(py, &as_json(&event))?)),
+            Some(event) => Ok(Some(to_python(py, &as_json(&event).to_string())?)),
             None => Ok(None),
         }
     }

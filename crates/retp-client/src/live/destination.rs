@@ -68,6 +68,18 @@ fn message_name(delivery: &Delivery) -> Option<String> {
     Some(info.name.rsplit('.').next().unwrap_or(info.name).to_string())
 }
 
+/// One event as the JSON object a [`JsonLines`] destination writes, received now: the one
+/// way an arrival is put in JSON, for a front end (the Python bridge) as for the file.
+pub fn as_json(event: &Event) -> Value {
+    record(event, &received_now())
+}
+
+/// One event as the line a [`Console`] destination prints, without its newline: the one way
+/// an arrival is said in words, for a front end (the command line) as for the console.
+pub fn as_line(event: &Event) -> String {
+    line_of(event)
+}
+
 /// The record of one event: the JSON object of a JSON Lines destination.
 fn record(event: &Event, received: &str) -> Value {
     match event {

@@ -75,3 +75,8 @@ all-features = true
 name = "live"
 path = "tests/live.rs"
 required-features = ["live"]
+
+[[test]]
+name = "live_blocking"
+path = "tests/live_blocking.rs"
+required-features = ["live"]

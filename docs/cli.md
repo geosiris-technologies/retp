@@ -144,11 +144,22 @@ etp> exit
 | `info`, `ping` | what the session agreed; a `Ping` and the time its `Pong` took |
 | `ack [on\|off]`, `verbose [on\|off]` | acknowledgements, message tracing |
 | `dataspaces`, `resources`, `supported-types`, `get`, `array`, `download` | as the one-shot commands, minus the server options |
-| `watch <uri>`, `unwatch <uuid>`, `notifications [--wait S]` | store notifications (protocol 5) |
+| `subscribe <uri> [--to FILE\|console] [--format jsonl\|text] [--append]` | the changes of a context (StoreNotification, protocol 5) sent, as they arrive, to a file (one JSON line each) or to the console; commands go on meanwhile |
+| `subscriptions`, `unsubscribe <id>` | what this shell is subscribed to, where each goes and how many arrived; end one |
+| `watch <uri>`, `unwatch <uuid>`, `notifications [--wait S]` | store notifications read on demand: `notifications` collects what came |
 | `changes-since <dataspace> <time\|watermark>` | what was written and deleted since a time: the catch-up after a cut |
 | `channels`, `subscribe-channels`, `unsubscribe-channels`, `channel-data`, `streaming on\|off` | channels (protocols 21 and 1) |
 | `reconnect` | close this session and open a new one, login included |
 | `exit`, `quit` | close the session and leave |
+
+The shell's session listens on its own task (`retp_client::live`, see
+[Library usage](client.md)): what the server sends unasked - a subscription's
+changes, a fault, the authorization running out, the session closed - is
+printed or written as it arrives, while nothing is typed, and nothing polls.
+A server that offers no StoreNotification (protocol 5) refuses `subscribe` by
+name. Built with the feature `editor`, the shell has a line editor: history
+(kept in `~/.retp_history`), editing, and what arrives printed above the prompt
+instead of through it; without it, the shell reads plain lines.
 
 ETP URIs need no quotes in the shell: single quotes are kept, so
 `eml:///dataspace('demo')` is one word. A dataspace can be named by its path

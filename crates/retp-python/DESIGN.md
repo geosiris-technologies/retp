@@ -300,8 +300,10 @@ existing Rust and flagged where it is.
   `push::Report`.
 
 Not gaps, but worth recording: the REST transport (`Remote::Rest`) is available in
-Rust and refused here by name; subscriptions and channels need an events
-binding with a clear lifetime (who polls, and when).
+Rust and refused here by name. Subscriptions are bound (`Session.subscribe`):
+the session is a live one (`retp_client::live`), whose task receives what
+arrives and hands it to a destination - nobody polls. Channels would take the
+same road.
 
 ## 10. Open questions
 

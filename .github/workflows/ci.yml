@@ -74,9 +74,9 @@ jobs:
       - name: Install HDF5
         run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
       - name: Test with HDF5 and MCP enabled
-        run: cargo test --workspace -j 4 --features retp-cli/hdf5,retp-cli/mcp,retp-client/live -- --test-threads=4
+        run: cargo test --workspace -j 4 --features retp-cli/hdf5,retp-cli/mcp,retp-cli/editor,retp-client/live -- --test-threads=4
       - name: Clippy with HDF5 and MCP enabled
-        run: cargo clippy --workspace --all-targets --features retp-cli/hdf5,retp-cli/mcp,retp-client/live -- -D warnings
+        run: cargo clippy --workspace --all-targets --features retp-cli/hdf5,retp-cli/mcp,retp-cli/editor,retp-client/live -- -D warnings
 
   # What the CLI archives and the wheels ship: HDF5 built from its sources
   # (`hdf5-static`, CMake and a C compiler). Checked here so that a breakage

@@ -25,7 +25,11 @@ clap = { version = "4.6", features = ["derive"] }
 # Where the ETP crates' `log` lines go: stderr, through a logger of a few lines.
 log = "0.4"
 retp-proto = { workspace = true }
-retp-client = { workspace = true }
+# `live`: the shell's session, driven by a task of its own (subscriptions).
+retp-client = { workspace = true, features = ["live"] }
+# The shell's line editor (feature `editor`): history, editing, what arrives
+# printed above the prompt.
+rustyline = { version = "18", optional = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }
@@ -42,6 +46,9 @@ hdf5-static = ["hdf5", "energyml-storage/hdf5-static"]
 # `retp mcp`: the generic MCP tools of energyml-mcp over stdio, on one
 # dataspace. Off by default: it brings tokio and the MCP SDK.
 mcp = ["dep:energyml-mcp"]
+# The shell's line editor: history, editing, and what arrives printed above
+# the prompt. Off by default; without it the shell reads plain lines.
+editor = ["dep:rustyline"]
 
 [lints.rust]
 missing_docs = "warn"

@@ -353,6 +353,11 @@ impl<C: Clock> AsyncClient<C> {
         self.lock().engine.ask_acknowledge(on);
     }
 
+    /// Whether requests ask for an `Acknowledge`.
+    pub fn asks_acknowledge(&self) -> bool {
+        self.lock().engine.asks_acknowledge()
+    }
+
     /// The acknowledgements heard since the last call, oldest first.
     pub fn acknowledgements(&self) -> Vec<Acknowledged> {
         self.lock().engine.acknowledgements()

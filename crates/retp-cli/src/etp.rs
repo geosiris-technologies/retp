@@ -4,7 +4,7 @@
 //! Argument parsing and printing only: the probe, the session and the
 //! requests are `retp-client`'s.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,9 +32,13 @@ use retp_types::datatypes::object::Dataspace;
 
 // `retp mcp`, a child of this module: it reuses `Server` and `LoginArgs`,
 // which are private here.
+#[path = "editor.rs"]
+mod editor;
 #[cfg(feature = "mcp")]
 #[path = "mcp.rs"]
 mod mcp;
+#[path = "notify.rs"]
+mod notify;
 
 type Session = native::Remote;
 
@@ -259,6 +263,17 @@ impl Server {
     /// by the commands that write, so that a read-only errand announces
     /// nothing it will not do.
     fn open_for(&self, writing: bool) -> Result<Session> {
+        self.open_with(writing, false)
+    }
+
+    /// A session driven by a task of its own ([`retp_client::live`]): what
+    /// arrives unasked is pushed as it arrives, and nothing has to be read
+    /// between two commands - the shell's. Over REST, the REST client.
+    fn open_live(&self, writing: bool) -> Result<Session> {
+        self.open_with(writing, true)
+    }
+
+    fn open_with(&self, writing: bool, live: bool) -> Result<Session> {
         if self.rest {
             return self.open_rest();
         }
@@ -286,13 +301,29 @@ impl Server {
             (None, true) => native::fit_to_server(&endpoint, offer).0,
             _ => offer,
         };
-        let mut client = native::connect(Connect {
+        let connect = Connect {
             endpoint,
             offer,
             handlers,
             max_message: None,
-        })
-        .with_context(|| format!("opening a session with {}", self.url))?;
+        };
+        if live {
+            let mut settings = retp_client::live::LiveSettings::default();
+            if let Some(at_once) = self.at_once {
+                settings.at_once = at_once;
+            }
+            let session = retp_client::live::LiveSession::connect(connect, settings)
+                .with_context(|| format!("opening a session with {}", self.url))?;
+            session.client().ask_acknowledge(self.ack);
+            if let Some(seconds) = self.keepalive {
+                session
+                    .client()
+                    .set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
+            }
+            return Ok(native::Remote::Live(Box::new(session)));
+        }
+        let mut client =
+            native::connect(connect).with_context(|| format!("opening a session with {}", self.url))?;
         client.ask_acknowledge(self.ack);
         if let Some(seconds) = self.keepalive {
             client.set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
@@ -771,6 +802,14 @@ enum InSession {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// Subscribe to the changes of a context and send them, as they arrive, to a
+    /// file (one JSON line each) or the console: `subscribe <uri> --to changes.jsonl`.
+    /// The session keeps listening between commands; nothing has to be asked.
+    Subscribe(notify::SubscribeArgs),
+    /// The subscriptions of this shell: where each goes, and how many arrived.
+    Subscriptions,
+    /// End a subscription, by the id `subscribe` printed.
+    Unsubscribe(notify::UnsubscribeArgs),
     /// Ask the server to acknowledge each request, or not: `ack on`, `ack off`;
     /// alone, it toggles. Each acknowledgement is printed after the command.
     Ack {
@@ -1057,7 +1096,20 @@ fn one_shot(server: &Server, work: impl FnOnce(&mut Session) -> Result<bool>) ->
 
 /// Run one command of a shell in `session`. Reads only, so far: running one
 /// again after a lost connection is harmless.
-fn perform(session: &mut Session, command: &InSession, types: &[String]) -> Result<()> {
+/// What a shell keeps for its subscriptions between commands.
+struct Notifying {
+    subscriptions: notify::Subscriptions,
+    /// Where what arrives for the console goes: above the prompt with the
+    /// line editor, on stdout without it.
+    console: std::sync::Arc<dyn retp_client::live::Destination>,
+}
+
+fn perform(
+    session: &mut Session,
+    command: &InSession,
+    types: &[String],
+    notifying: &mut Notifying,
+) -> Result<()> {
     match command {
         InSession::Info => info(session),
         InSession::Ping => ping(session)?,
@@ -1100,6 +1152,14 @@ fn perform(session: &mut Session, command: &InSession, types: &[String]) -> Resu
         InSession::UnsubscribeChannels { ids } => unsubscribe_channels_cmd(session, ids)?,
         InSession::ChannelData { wait } => said_channel_data(session, *wait)?,
         InSession::Streaming { state } => streaming(session, state == "on")?,
+        InSession::Subscribe(args) => notify::subscribe(
+            session,
+            args,
+            &mut notifying.subscriptions,
+            notifying.console.clone(),
+        )?,
+        InSession::Subscriptions => notify::subscriptions(session, &notifying.subscriptions),
+        InSession::Unsubscribe(args) => notify::unsubscribe(session, args, &mut notifying.subscriptions)?,
         InSession::Download(_) => unreachable!("handled by the shell: it may open new sessions"),
         InSession::Verbose { .. } | InSession::Ack { .. } | InSession::Reconnect | InSession::Exit => {
             unreachable!("handled by the shell")
@@ -1185,30 +1245,6 @@ fn split_line(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// Print what arrived unasked and matters to whoever is at the keyboard.
-fn said_notices(session: &mut Session, interactive: bool) {
-    use retp_proto::connection::Event;
-    let mut said = false;
-    for event in session.unsolicited() {
-        let notice = match event {
-            Event::AuthorizationExpiring => "the server says the authorization runs out soon".to_string(),
-            Event::Fault(incident) => format!("the server sent what could not be taken: {incident}"),
-            Event::TimedOut { request, incident } => format!("request #{request} timed out: {incident}"),
-            Event::Closed { reason } => format!("the server closed the session: {reason}"),
-            _ => continue,
-        };
-        if !said && interactive {
-            eprintln!();
-        }
-        said = true;
-        eprintln!("notice: {notice}");
-    }
-    if said && interactive {
-        print!("etp> ");
-        std::io::stdout().flush().ok();
-    }
-}
-
 /// Print the acknowledgements the session heard.
 fn said_acknowledgements(session: &mut Session) {
     for ack in session.acknowledgements() {
@@ -1227,57 +1263,29 @@ fn said_acknowledgements(session: &mut Session) {
 fn shell(server: &Server) -> Result<ExitCode> {
     // A shell may write: its offer says so from the start, so that a `push`
     // typed later does not find a session that announced reads only.
-    let mut session = Some(server.open_for(true)?);
+    let interactive = std::io::stdin().is_terminal();
+    // The keyboard is read by the line editor (feature `editor`) or on a
+    // thread of its own; the session needs nobody meanwhile: a live session
+    // listens, keeps itself alive and pushes what arrives on its own task.
+    let mut input = editor::Input::new(interactive, history_file());
+    let mut notifying = Notifying {
+        subscriptions: notify::Subscriptions::new(),
+        console: input.console(),
+    };
+    let mut session = Some(server.open_live(true)?);
+    if let Some(open) = session.as_ref() {
+        heard_by_the_console(open, &notifying);
+    }
     // Survives a reconnection: the new session asks as the old one did.
     let acknowledging = AtomicBool::new(server.ack);
-    let interactive = std::io::stdin().is_terminal();
     if interactive {
         info(session.as_mut().expect("just opened"));
         eprintln!(
-            "commands: dataspaces, resources, get, supported-types, array, download, info, ping, ack, verbose, reconnect, exit \
-             - `help <command>` for its options"
+            "commands: dataspaces, resources, get, supported-types, array, download, subscribe, subscriptions, \
+             unsubscribe, info, ping, ack, verbose, reconnect, exit - `help <command>` for its options"
         );
     }
-    // The keyboard is read on a thread of its own, so that the session is
-    // listened to while nothing is typed: a WebSocket server whose pings go
-    // unanswered closes the connection (a server may do so after twenty seconds),
-    // and the keepalive Ping has to be sent by someone.
-    let (typed, lines) = std::sync::mpsc::channel::<std::io::Result<String>>();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if typed.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    loop {
-        if interactive {
-            print!("etp> ");
-            std::io::stdout().flush().ok();
-        }
-        let line = loop {
-            match lines.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(line) => break Some(line),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let Some(open) = session.as_mut() else { continue };
-                    match open.idle(std::time::Duration::from_millis(250)) {
-                        Ok(()) => said_notices(open, interactive),
-                        Err(error) => {
-                            eprintln!(
-                                "\nthe connection fell while idle ({error}); the next command opens a new session"
-                            );
-                            session = None;
-                            if interactive {
-                                print!("etp> ");
-                                std::io::stdout().flush().ok();
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        let Some(line) = line else { break };
+    while let Some(line) = input.read_line(if interactive { "etp> " } else { "" }) {
         let line = line?;
         if line.trim_start().starts_with('#') {
             continue;
@@ -1346,9 +1354,17 @@ fn shell(server: &Server) -> Result<ExitCode> {
         let kept = session.as_ref().and_then(retp_client::resume::kept_of);
         for attempt in 0..2 {
             if session.is_none() {
-                match server.open_for(true) {
+                match server.open_live(true) {
                     Ok(mut fresh) => {
                         said_catch_up(&fresh, kept.as_ref());
+                        if !notifying.subscriptions.is_empty() {
+                            eprintln!(
+                                "the {} subscription(s) of the old session ended with it: subscribe again",
+                                notifying.subscriptions.len()
+                            );
+                            notifying.subscriptions.clear();
+                        }
+                        heard_by_the_console(&fresh, &notifying);
                         let _ = fresh.ask_acknowledge(acknowledging.load(Ordering::Relaxed));
                         session = Some(fresh);
                     }
@@ -1362,7 +1378,7 @@ fn shell(server: &Server) -> Result<ExitCode> {
                 break;
             }
             let open = session.as_mut().expect("opened above");
-            let done = perform(open, &command, &server.types);
+            let done = perform(open, &command, &server.types, &mut notifying);
             said_acknowledgements(open);
             match done {
                 Ok(()) => break,
@@ -1392,6 +1408,21 @@ fn shell(server: &Server) -> Result<ExitCode> {
         open.close("retp shell: done")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where the shell keeps the history of its line editor: `~/.retp_history`.
+fn history_file() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".retp_history"))
+}
+
+/// What the session itself says - a fault, the authorization running out, the
+/// session closed - goes to the console as it happens, on a live session.
+fn heard_by_the_console(session: &Session, notifying: &Notifying) {
+    if let native::Remote::Live(live) = session {
+        live.route(retp_client::live::Filter::Session, notifying.console.clone());
+    }
 }
 
 fn dataspaces(session: &mut Session) -> Result<bool> {

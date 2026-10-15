@@ -494,20 +494,28 @@ impl Session {
         } else {
             offer
         };
-        let mut client = native::connect(Connect {
-            endpoint,
-            offer,
-            handlers,
-            max_message: None,
-        })?;
-        if let Some(seconds) = keepalive {
-            client.set_keepalive((seconds > 0).then(|| Duration::from_secs(seconds)));
-        }
+        // A live session: driven by a task of its own, so that what the server
+        // sends unasked (`Session.subscribe`) arrives while Python does
+        // something else, and nothing has to poll.
+        let mut settings = retp_client::live::LiveSettings::default();
         if let Some(at_once) = at_once {
-            client.set_at_once(at_once);
+            settings.at_once = at_once;
+        }
+        let live = retp_client::live::LiveSession::connect(
+            Connect {
+                endpoint,
+                offer,
+                handlers,
+                max_message: None,
+            },
+            settings,
+        )?;
+        if let Some(seconds) = keepalive {
+            live.client()
+                .set_keepalive((seconds > 0).then(|| Duration::from_secs(seconds)));
         }
         Ok(Session {
-            remote: Some(Remote::Etp(Box::new(client))),
+            remote: Some(Remote::Live(Box::new(live))),
             registry: Arc::new(energyml_schemas::all()),
             url,
             writing,
@@ -530,6 +538,14 @@ impl Session {
     /// unchecked certificate).
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    /// The live session, when this is one (an ETP WebSocket); `None` over REST.
+    pub fn live(&self) -> Option<&retp_client::live::LiveSession> {
+        match &self.remote {
+            Some(Remote::Live(live)) => Some(live),
+            _ => None,
+        }
     }
 
     fn remote(&mut self) -> Result<&mut Remote, Failure> {

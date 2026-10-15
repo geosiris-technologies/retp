@@ -57,7 +57,9 @@
 //! }
 //! ```
 
+mod blocking;
 mod task;
+mod watch;
 mod ws;
 
 pub mod destination;
@@ -69,7 +71,7 @@ use std::time::Duration;
 use retp_proto::probe::{self, HandshakeSettings};
 use retp_types::datatypes::Uuid;
 
-pub use destination::{Callback, Console, Destination, JsonLines, Queue};
+pub use destination::{Callback, Console, Destination, JsonLines, Queue, as_json, as_line};
 
 use crate::native::Connect;
 use crate::{AsyncClient, ClientError, SystemClock, TransportError};
@@ -111,6 +113,8 @@ pub struct LiveSettings {
     pub queue: usize,
     /// The keepalive period; `None` keeps the engine's default.
     pub keepalive: Option<Duration>,
+    /// How many requests a plural read keeps in flight (`Caller::at_once`).
+    pub at_once: usize,
 }
 
 impl Default for LiveSettings {
@@ -118,6 +122,7 @@ impl Default for LiveSettings {
         Self {
             queue: 1024,
             keepalive: None,
+            at_once: 4,
         }
     }
 }
@@ -129,6 +134,7 @@ pub struct LiveSession {
     routing: Arc<task::Routing>,
     shared: Arc<task::Shared>,
     threads: Option<task::Threads>,
+    at_once: usize,
 }
 
 impl LiveSession {
@@ -185,6 +191,7 @@ impl LiveSession {
             routing,
             shared,
             threads: Some(threads),
+            at_once: settings.at_once.max(1),
         };
         match task::block_on(session.client.opened()) {
             Ok(()) => Ok(session),

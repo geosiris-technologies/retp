@@ -21,6 +21,8 @@ everything at once, and it is created by a maintainer.
    pre-release version (`0.2.0-alpha.3`), `release-plz` does not move to the final
    version on its own: the version is set by hand in a pull request to `main` instead,
    with the `CHANGELOG.md` entries (one commit `chore: X.Y.Z`).
+   It may meanwhile propose the next pre-release (`chore: release vX.Y.Z-alpha.N+1`):
+   close that pull request without merging it when the final version is coming.
 3. **Create a GitHub release** (Releases > Draft a new release): a new tag `vX.Y.Z`, the
    workspace version of `Cargo.toml`, on `main`; title `vX.Y.Z`; notes ("Generate
    release notes" gives a start). Publish it.

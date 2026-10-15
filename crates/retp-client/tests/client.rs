@@ -2259,22 +2259,22 @@ fn plain_ws_to_a_remote_host_is_said() {
 /// the test to carry.
 #[derive(Clone, Default)]
 struct Outbox(
-    std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
-    std::rc::Rc<std::cell::Cell<bool>>,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
 );
 
 impl Outbox {
     fn take(&self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.0.borrow_mut())
+        std::mem::take(&mut self.0.lock().expect("the outbox lock"))
     }
 }
 
 impl Sink for Outbox {
     fn send(&mut self, message: &[u8]) -> Result<(), TransportError> {
-        if self.1.get() {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(TransportError::new("the socket refuses to send"));
         }
-        self.0.borrow_mut().push(message.to_vec());
+        self.0.lock().expect("the outbox lock").push(message.to_vec());
         Ok(())
     }
     fn close(&mut self) {}
@@ -2459,7 +2459,7 @@ fn requests_in_flight_are_answered_each_to_its_own() {
     assert!(first.as_mut().poll(&mut cx).is_pending());
     assert!(second.as_mut().poll(&mut cx).is_pending());
     assert_eq!(
-        harness.outbox.0.borrow().len(),
+        harness.outbox.0.lock().expect("the outbox lock").len(),
         2,
         "both requests are out before any answer"
     );
@@ -2553,7 +2553,7 @@ fn a_lost_socket_ends_every_request_in_flight() {
 #[test]
 fn a_request_the_socket_refused_is_known_unsent() {
     let harness = Harness::new(None, None).opened();
-    harness.outbox.1.set(true);
+    harness.outbox.1.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut client = harness.client.clone();
     match poll_once(asynchronous::list_resources(
         &mut client,

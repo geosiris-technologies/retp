@@ -65,6 +65,38 @@ Nothing in the protocol crate reads the clock: every call that needs the time
 takes it as an argument. Tests drive timeouts, keepalives and resumption
 without sleeping.
 
+## A live session: what arrives unasked, pushed as it arrives
+
+The blocking client reads the WebSocket only while a call runs: between two calls, a
+notification the server sends waits in the socket. With the feature `live`,
+`retp_client::live::LiveSession` drives the session from a task of its own, which sleeps
+until a message arrives, a request is to be sent, or the next deadline (the keepalive
+`Ping`, a response timeout) is due - nothing polls. Requests go from any thread through
+`session.client()`, an `AsyncClient` on which every operation of the crate runs
+(`session.block_on(...)` from synchronous code); what arrives unasked goes to the
+destinations routed for it, on a thread of their own, so a slow destination never delays an
+answer:
+
+```rust,no_run
+use std::sync::Arc;
+use retp_client::live::{Filter, JsonLines, LiveSession, LiveSettings};
+
+# fn run(connect: retp_client::native::Connect) -> Result<(), Box<dyn std::error::Error>> {
+let session = LiveSession::connect(connect, LiveSettings::default())?;
+// The notifications of protocol 5 go to a JSON Lines file, one line each.
+session.route(Filter::Protocol(5), Arc::new(JsonLines::create("notifications.jsonl")?));
+// ... subscribe, then keep sending requests: the notifications are written as they come.
+session.close("done")?;
+# Ok(())
+# }
+```
+
+The destinations are `JsonLines` (one JSON object per line), `Console` (one line in words),
+`Callback` (a function) and `Queue` (a bounded channel); a `Destination` of your own is a
+trait to implement. `Filter` routes a protocol, one subscription, or the session's own
+events (a fault, the authorization running out, the session closed). A full queue drops and
+counts (`LiveSession::dropped`), never blocks the session.
+
 ## wasm
 
 `cargo check --target wasm32-unknown-unknown` on the client is part of CI. The

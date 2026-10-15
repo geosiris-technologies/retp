@@ -140,7 +140,7 @@ impl ServerCertVerifier for AnyCertificate {
     }
 }
 
-fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
+pub(crate) fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -325,7 +325,7 @@ fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, TransportError> {
     }))
 }
 
-fn header(value: &str) -> Result<HeaderValue, TransportError> {
+pub(crate) fn header(value: &str) -> Result<HeaderValue, TransportError> {
     HeaderValue::from_str(value).map_err(|why| TransportError::new(format!("header value: {why}")))
 }
 

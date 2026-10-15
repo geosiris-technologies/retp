@@ -36,6 +36,8 @@ mod transport;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod download;
+#[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+pub mod live;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod login;
 pub mod memory;

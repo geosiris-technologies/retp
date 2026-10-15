@@ -1037,6 +1037,59 @@ impl Connection {
         step
     }
 
+    /// When [`Self::tick`] has something to do at the earliest, by the clock
+    /// it is given: a timeout running out, the authorization's warning or
+    /// expiry, the keepalive `Ping`. `None` when nothing is due - a closed
+    /// session, or an open one with no request out and no keepalive.
+    ///
+    /// For whoever drives the connection without a fixed interval: sleep
+    /// until this moment (or until a message comes), then `tick`. It moves
+    /// with every `receive`, `tick` and message sent, so it is asked again
+    /// after each. The conditions are those of `tick`, one by one; a moment
+    /// already past means *now*.
+    pub fn next_deadline(&self) -> Option<Micros> {
+        if self.state == State::Closed {
+            return None;
+        }
+        let ours = |name: &str, fallback: i64| self.offer.endpoint.long(name).unwrap_or(fallback) * SECOND;
+        let mut due: Option<Micros> = None;
+        let mut at = |moment: Micros| due = Some(due.map_or(moment, |d| d.min(moment)));
+
+        // `tick` acts once `now - since > period`: one microsecond after.
+        if self.side == Side::Server && self.session_requested_at.is_none() {
+            at(self.connected_at + ours(names::REQUEST_SESSION_TIMEOUT_PERIOD, 45) + 1);
+        }
+        if self.state != State::Open
+            && let Some(since) = self.session_requested_at
+        {
+            at(since + ours(names::SESSION_ESTABLISHMENT_TIMEOUT_PERIOD, 60) + 1);
+        }
+        let response_timeout = ours(names::RESPONSE_TIMEOUT_PERIOD, 300);
+        if let Some(oldest) = self.requests.values().min() {
+            at(oldest + response_timeout + 1);
+        }
+        let gap = ours(names::MULTIPART_MESSAGE_TIMEOUT_PERIOD, 60);
+        if let Some(oldest) = self.arriving.values().map(|a| a.last_part).min() {
+            at(oldest + gap + 1);
+        }
+        // `tick` acts once `now >=` these.
+        if let Some(expires) = self.expires_at {
+            at(expires);
+            if !self.warned_expiring {
+                at(expires - self.warn_before);
+            }
+        }
+        if let Some(period) = self.keepalive
+            && self.state == State::Open
+            && self
+                .keepalive_ping
+                .is_none_or(|id| !self.requests.contains_key(&id))
+        {
+            at(self.last_activity + period);
+        }
+        due
+    }
+
     /// Report the send queue: warn, then give up (§3.13.4).
     pub fn pressure(&mut self, queued: usize) -> Step {
         let mut step = Step::default();

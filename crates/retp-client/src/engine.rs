@@ -320,6 +320,13 @@ impl Engine {
         self.connection.watermark()
     }
 
+    /// When [`Self::tick`] has something to do at the earliest, by the clock
+    /// it is given; `None` when nothing is due. Asked again after every
+    /// `receive`, `tick` and request: it moves.
+    pub fn next_deadline(&self) -> Option<i64> {
+        self.connection.next_deadline()
+    }
+
     /// Say something when the session has been quiet this long, or never.
     pub fn set_keepalive(&mut self, period: Option<Duration>) {
         self.connection.set_keepalive(period);

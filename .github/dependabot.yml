@@ -2,6 +2,8 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
+    # Updates are integrated on dev, like any other change, and reach main with a release.
+    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -10,5 +12,6 @@ updates:
         update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: dev
     schedule:
       interval: weekly

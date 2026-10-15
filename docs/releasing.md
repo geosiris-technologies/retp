@@ -8,41 +8,56 @@ maintainer; every later release goes through the workflows.
 
 ## Making a release
 
-**A published GitHub release is what publishes**, everything at once:
+Two branches: `dev`, where changes are integrated, and `main`, which holds what was
+released. **Nothing is published by a push**: a published GitHub release publishes
+everything at once, and it is created by a maintainer.
 
-1. **Merge the release pull request.** `release-plz` keeps one open (opened by the
-   release bot, a GitHub App): it bumps the versions, the requirements between crates
-   and every `CHANGELOG.md`. Merging it publishes nothing: the repository variable
-   `RELEASE_PLZ_PUBLISH` is `release`.
-2. **Create a GitHub release** (Releases > Draft a new release): a new tag `vX.Y.Z`, the
-   workspace version the merge left in `Cargo.toml`, on `main`; title `vX.Y.Z`; notes
-   ("Generate release notes" gives a start). Publish it.
-3. Publishing it starts, each from the release:
+**A release** (`vX.Y.Z`), from `main`:
+
+1. **Merge `dev` into `main`** (a pull request `dev` → `main`).
+2. **Merge the release pull request.** `release-plz` keeps one open on `main` (opened by
+   the release bot, a GitHub App): it bumps the versions, the requirements between crates
+   and every `CHANGELOG.md`. Merging it publishes nothing. When `main` still carries a
+   pre-release version (`0.2.0-alpha.3`), `release-plz` does not move to the final
+   version on its own: the version is set by hand in a pull request to `main` instead,
+   with the `CHANGELOG.md` entries (one commit `chore: X.Y.Z`).
+3. **Create a GitHub release** (Releases > Draft a new release): a new tag `vX.Y.Z`, the
+   workspace version of `Cargo.toml`, on `main`; title `vX.Y.Z`; notes ("Generate
+   release notes" gives a start). Publish it.
+
+**A pre-release** (`vX.Y.Z-alpha.N`, `-beta.N`, `-rc.N`), from `dev`:
+
+1. **Set the version by hand on `dev`**: one commit `chore: X.Y.Z-alpha.N` that changes
+   the workspace version and the requirements between crates.
+2. **Create a GitHub release** on `dev` with the tag `vX.Y.Z-alpha.N`, and tick **"Set
+   as a pre-release"**. A release from `dev` that is not marked as a pre-release is
+   refused.
+
+Publishing a release or a pre-release starts, each from the release:
 
 | What | Where | Workflow |
 |---|---|---|
 | the crates (see the order below) | crates.io | `release-plz.yml`, which also tags each crate `<crate>-vX.Y.Z` |
 | the `retp` archives, one per target, with `SHA256SUMS` | attached to this release | `release-cli.yml` |
-| the `retp` image, tags `X.Y.Z`, `X.Y` and `latest` | `ghcr.io/geosiris-technologies/retp` | `docker.yml`, once `IMAGE_PUBLISH` is `true` |
+| the `retp` image: `X.Y.Z`, `X.Y` and `latest` for a release; `X.Y.Z-pre` and `dev` for a pre-release | `ghcr.io/geosiris-technologies/retp` | `docker.yml`, once `IMAGE_PUBLISH` is `true` |
 | the Python wheels and sdist | PyPI | `python.yml`, once `PYPI_PUBLISH` is `true` |
 | not published | | `retp-tests`, `etptypes` (for now), `retp-python` as a crate (it ships as wheels) |
 
 Each workflow first checks that the tag names the version of the manifests, and stops
 before uploading anything otherwise: a release created on a commit that is still at the
-previous version would publish the old code under the new name. A release marked as a
-pre-release publishes the same way but gives the image no `latest` and no `X.Y` tag; it
-does not change the version: a pre-release version (`0.2.0-alpha.1`) is set in
-`Cargo.toml` first.
+previous version would publish the old code under the new name.
 
 Between releases, every push to `main` that touches the crates publishes a development
 build of the wheels to TestPyPI (`X.Y.(Z+1).devN`, once `TESTPYPI_PUBLISH` is `true`),
-and the image `edge` (once `IMAGE_PUBLISH` is `true`).
+and the image `edge` (once `IMAGE_PUBLISH` is `true`). Neither is a release.
+
+Dependency updates (Dependabot) target `dev`, like any other change.
 
 The repository variables and secrets this relies on:
 
 | Name | Kind | Role |
 |---|---|---|
-| `RELEASE_PLZ_PUBLISH` | variable | `release`: publish crates on a release only; `true`: also on a merge to `main` or `dev`; unset: nothing |
+| `RELEASE_PLZ_PUBLISH` | variable | `release`: publish crates on a GitHub release, and keep the release pull request open; unset: nothing |
 | `IMAGE_PUBLISH` | variable | `true` pushes the image |
 | `PYPI_PUBLISH`, `TESTPYPI_PUBLISH` | variables | `true` uploads the wheels to PyPI, to TestPyPI |
 | `RELEASE_BOT_CLIENT_ID`, `RELEASE_BOT_PRIVATE_KEY` | variable, secret | the GitHub App that opens the release pull request, so that its checks run |
@@ -93,17 +108,11 @@ retp that needs an unreleased change of energyml-rust waits for that release.
 
 ## The publication switch
 
-The repository variable `RELEASE_PLZ_PUBLISH` chooses when crates.io is published
-to: `release` on a published GitHub release only; `true` also on every merge to
-`main` or `dev`; nothing while it is unset. A release's tag must name a version of the
-manifests, `vX.Y.Z` for the workspace version or `<crate>-vX.Y.Z`, and its commit must
-be on `main` or `dev`.
-
-With `true`, a merge publishes the crates and tags them with the workflow token, and a
-tag pushed with that token starts no workflow on its own: the `release` job of
-`release-plz.yml` then starts `release-cli.yml` and `docker.yml` itself
-(`workflow_dispatch` on the new `retp-cli-v*` tag). On a GitHub release it does not,
-since those workflows listen for the release themselves and would otherwise run twice.
+The repository variable `RELEASE_PLZ_PUBLISH` is the switch for crates.io: `release`
+publishes on a published GitHub release; unset (or any other value), nothing is
+published, which is how a new repository starts. A release's tag must name a version
+of the manifests, `vX.Y.Z` for the workspace version or `<crate>-vX.Y.Z`, and its
+commit must be on `main` (or on `dev` for a pre-release).
 
 ## What the builds contain
 

@@ -30,6 +30,12 @@ use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::ContextScopeKind;
 use retp_types::datatypes::object::Dataspace;
 
+// `retp mcp`, a child of this module: it reuses `Server` and `LoginArgs`,
+// which are private here.
+#[cfg(feature = "mcp")]
+#[path = "mcp.rs"]
+mod mcp;
+
 type Session = native::Remote;
 
 #[derive(Parser)]
@@ -519,6 +525,10 @@ enum EtpCommand {
     /// What the server says of itself before any connection
     /// (`/.well-known/etp-server-capabilities`).
     Probe(Server),
+    /// Serve the generic read-only MCP tools of energyml-mcp over stdio, on
+    /// one dataspace (builds with the `mcp` feature).
+    #[cfg(feature = "mcp")]
+    Mcp(mcp::McpArgs),
     /// Open a session, say what was agreed, ping, close.
     Connect(Server),
     /// The store's dataspaces (Dataspace, protocol 24).
@@ -794,6 +804,8 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
     }
     match args.command {
         EtpCommand::Probe(server) => probe(&server),
+        #[cfg(feature = "mcp")]
+        EtpCommand::Mcp(args) => mcp::run(args),
         EtpCommand::Connect(server) => one_shot(&server, |session| {
             info(session);
             ping(session)?;
@@ -2148,10 +2160,10 @@ fn write_array(file: &std::path::Path, array: &energyml_etp_store::pack::PackedA
     use energyml_storage::array::{ArrayData, ArrayMetadata};
     use energyml_storage::backend::ArrayBackend;
     let data = ArrayData {
-        metadata: ArrayMetadata {
-            dimensions: array.dimensions.iter().map(|d| *d as i64).collect(),
-            element_type: array.values.element_type().to_string(),
-        },
+        metadata: ArrayMetadata::new(
+            array.dimensions.iter().map(|d| *d as i64).collect(),
+            array.values.element_type().to_string(),
+        ),
         values: array.values.clone(),
     };
     energyml_storage::hdf5::Hdf5Backend

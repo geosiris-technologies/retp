@@ -1,31 +1,30 @@
 name: Release-plz
 
-# Opens and maintains a release pull request (version bumps, changelogs), and
-# publishes the crates to crates.io. Configuration: release-plz.toml.
+# Versions, changelogs and crates.io, the GitHub way: nothing is published by a push.
+#  - push to main: open (or update) the release pull request - the version bumps and
+#    the CHANGELOG entries, written from conventional commits. Merging it publishes
+#    nothing.
+#  - a published GitHub release `vX.Y.Z` (docs/releasing.md) publishes everything:
+#    the crates here, and, from the same release, the CLI archives (release-cli.yml),
+#    the image (docker.yml) and the Python wheels (python.yml). A final release is
+#    made on main; a pre-release `vX.Y.Z-alpha.N`, marked as a pre-release, on dev
+#    (its version is set by hand there).
 #
-# A published GitHub release `vX.Y.Z` is what publishes everything (docs/releasing.md):
-# the crates here, and, from the same release, the CLI archives (release-cli.yml), the
-# image (docker.yml) and the Python wheels (python.yml). Merging the release pull
-# request publishes nothing.
+# The repository variable RELEASE_PLZ_PUBLISH is the switch: 'release' publishes on a
+# GitHub release and opens the release pull request; unset (or anything else),
+# nothing. A release is checked first: its tag names a version of the manifests, and
+# its commit is on main (or on dev for a pre-release). The `crates-io` environment
+# accepts the branches main and dev and the tags `v*` and `*-v*`.
 #
-# The repository variable RELEASE_PLZ_PUBLISH chooses: 'release' publishes on a
-# release only (the setting to use); 'true' also publishes on a merge to main or dev;
-# unset, nothing is published and no release pull request is opened. A release is
-# checked first: its commit is on main or dev, and its tag names a version of the
-# manifests. The `crates-io` environment accepts the branches main and dev and the
-# tags `v*` and `*-v*`.
-#
-# Publication uses crates.io trusted publishing (OIDC): no token is stored. A push to
-# dev publishes a pre-release set by hand in Cargo.toml (only with 'true'), without a
-# release pull request, CLI binaries or image. A crate new to crates.io needs one
-# publication with an API token first (docs/releasing.md).
+# Publication uses crates.io trusted publishing (OIDC): no token is stored. A crate
+# new to crates.io needs one publication with an API token first (docs/releasing.md).
 #
 # release-plz works on a copy of this repository alone: every dependency, the
 # energyml crates included, comes from crates.io.
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -41,7 +40,7 @@ jobs:
   # Opens the release pull request (versions, changelogs, semver check).
   release-plz-pr:
     name: Release PR
-    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'release' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release') }}
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'release' && vars.RELEASE_PLZ_PUBLISH == 'release' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,38 +76,39 @@ jobs:
   release:
     name: Publish
     runs-on: ubuntu-latest
-    if: >-
-      ${{ (github.event_name != 'release' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && vars.RELEASE_PLZ_PUBLISH == 'true')
-       || (github.event_name == 'release' && (vars.RELEASE_PLZ_PUBLISH == 'true' || vars.RELEASE_PLZ_PUBLISH == 'release')) }}
+    # Only on a published GitHub release, once publishing is switched on.
+    if: ${{ github.event_name == 'release' && vars.RELEASE_PLZ_PUBLISH == 'release' }}
     environment: crates-io
     permissions:
       contents: write
       id-token: write # crates.io trusted publishing
-      actions: write # start the tag workflows below (workflow_dispatch), outside a release
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      # A GitHub release publishes what its tag names, from the history of main or dev
-      # only: `vX.Y.Z` (the workspace version) or `<crate>-vX.Y.Z`. Anything else is
-      # refused before a single crate leaves. This also catches a release created on a
-      # commit still at the previous version.
+      # A GitHub release publishes what its tag names: `vX.Y.Z` (the workspace version)
+      # or `<crate>-vX.Y.Z`. A final release comes from the history of main; a release
+      # marked as a pre-release from main or dev. Anything else is refused before a
+      # single crate leaves. This also catches a release created on a commit still at
+      # the previous version.
       - name: Check the release
-        if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           git fetch --quiet origin main
           git fetch --quiet origin dev 2>/dev/null || true
+          branches=main
+          if [ "$PRERELEASE" = true ]; then branches="main dev"; fi
           on_branch=no
-          for b in main dev; do
+          for b in $branches; do
             if git rev-parse -q --verify "origin/$b" >/dev/null && git merge-base --is-ancestor HEAD "origin/$b"; then
               on_branch=yes
             fi
           done
           if [ "$on_branch" != yes ]; then
-            echo "::error::release $TAG: its commit is on neither main nor dev"
+            echo "::error::release $TAG: its commit is not on $branches (a release from dev must be marked as a pre-release)"
             exit 1
           fi
           cargo metadata --no-deps --format-version 1 \
@@ -128,23 +128,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No CARGO_REGISTRY_TOKEN: the action exchanges the OIDC token for a
           # short-lived one (an empty value would be rejected, not ignored).
-
-      # Tags pushed with GITHUB_TOKEN start no workflow (push events), but
-      # workflow_dispatch started with GITHUB_TOKEN does run. So, on a merge that
-      # publishes (RELEASE_PLZ_PUBLISH=true), the release job itself starts the two
-      # workflows that listen for the new tag. No extra secret; the publish gates stay
-      # in those workflows (IMAGE_PUBLISH) and in this job (RELEASE_PLZ_PUBLISH).
-      - name: Start the tag workflows
-        # Not from dev: a pre-release must not become the `latest` image. Not on a GitHub
-        # release either: release-cli.yml, docker.yml and python.yml listen for the release
-        # itself and attach to it; starting them here too would build everything twice.
-        if: ${{ github.ref != 'refs/heads/dev' && github.event_name != 'release' && steps.rp.outputs.releases_created == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          RELEASES: ${{ steps.rp.outputs.releases }}
-        run: |
-          for tag in $(jq -r '.[].tag' <<< "$RELEASES" | grep '^retp-cli-v' || true); do
-            gh workflow run release-cli.yml --ref "$tag"
-            gh workflow run docker.yml --ref "$tag"
-          done

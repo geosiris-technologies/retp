@@ -58,7 +58,8 @@ jobs:
   # The HDF5 paths (`retp-cli/hdf5`), on a system HDF5. `--all-targets` does not
   # build the targets behind a feature that is off, so without this job nothing in
   # the CI compiles `hdf5`. Features are enabled through the workspace, never
-  # `-p <crate>`, so the build matches the full suite.
+  # `-p <crate>`, so the build matches the full suite. `retp mcp` (feature `mcp`)
+  # is tested and linted here too: the release archives ship it.
   hdf5:
     runs-on: ubuntu-latest
     steps:
@@ -69,10 +70,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install HDF5
         run: sudo apt-get update && sudo apt-get install -y libhdf5-dev
-      - name: Test with HDF5 enabled
-        run: cargo test --workspace -j 4 --features retp-cli/hdf5 -- --test-threads=4
-      - name: Clippy with HDF5 enabled
-        run: cargo clippy --workspace --all-targets --features retp-cli/hdf5 -- -D warnings
+      - name: Test with HDF5 and MCP enabled
+        run: cargo test --workspace -j 4 --features retp-cli/hdf5,retp-cli/mcp -- --test-threads=4
+      - name: Clippy with HDF5 and MCP enabled
+        run: cargo clippy --workspace --all-targets --features retp-cli/hdf5,retp-cli/mcp -- -D warnings
 
   # What the CLI archives and the wheels ship: HDF5 built from its sources
   # (`hdf5-static`, CMake and a C compiler). Checked here so that a breakage

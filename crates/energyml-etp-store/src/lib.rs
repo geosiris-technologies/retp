@@ -52,8 +52,16 @@ use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::{ContextScopeKind, Resource};
 use retp_types::datatypes::{AnyLogicalArrayType, ErrorInfo};
 
+/// Blocks and declarations of arrays, for the writer.
+mod blocks;
+/// The reading additions on a dataspace: what the server states (store times,
+/// edge kinds), contexts answered natively, objects as bytes, deletions.
+pub mod discovery;
 pub mod pack;
 pub mod push;
+/// The writing traits of `energyml-storage` on a dataspace: objects, arrays,
+/// transactions, and the dataspaces of the session.
+mod writer;
 
 /// What this store calls itself.
 pub const KIND: &str = "etp";
@@ -70,6 +78,12 @@ pub struct EtpStore<T: Transport, C: Clock> {
     mode: ReadMode,
     listing: Mutex<Option<Vec<Resource>>>,
     diagnostics: Mutex<Vec<Diagnostic>>,
+    /// The transaction `EnergymlWriter::begin` opened on the server, if any:
+    /// its `transactionUuid` and what was asked.
+    writer_transaction: Option<energyml_storage::Transaction>,
+    /// The form objects are written in (`EnergymlWriter::put_objects`): XML for
+    /// an ETP store, JSON for a Reservoir DDMS REST API, which refuses XML.
+    write_format: push::WriteFormat,
 }
 
 fn remote(why: impl std::fmt::Display) -> Error {
@@ -133,7 +147,17 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
             mode: ReadMode::Tolerant,
             listing: Mutex::new(None),
             diagnostics: Mutex::new(Vec::new()),
+            writer_transaction: None,
+            write_format: push::WriteFormat::Xml,
         }
+    }
+
+    /// The form objects are written in: XML by default (an ETP store), JSON for
+    /// a store that takes only the EnergyML JSON encoding (the Reservoir DDMS
+    /// REST API).
+    pub fn write_format(mut self, format: push::WriteFormat) -> Self {
+        self.write_format = format;
+        self
     }
 
     /// How objects are read (tolerant by default, like an EPC).
@@ -203,21 +227,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     }
 
     fn summary(&self, resource: &Resource) -> Option<ObjectSummary> {
-        let parsed = EtpUri::parse(&resource.uri).ok()?;
-        let qualified_type = qualified_type_of(&parsed)?;
-        let content_type = self
-            .registry
-            .by_qualified_type(&qualified_type)
-            .and_then(|entry| entry.info.content_type)
-            .unwrap_or_default()
-            .to_string();
-        Some(ObjectSummary {
-            uri: resource.uri.clone(),
-            uuid: parsed.uuid?,
-            qualified_type,
-            content_type,
-            locator: resource.uri.clone(),
-        })
+        self.summary_of(resource)
     }
 
     /// Read one object's bytes as the type its URI names - or, when this
@@ -233,10 +243,16 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     }
 
     /// Where an array lives, as DataArray names it.
+    ///
+    /// The ETP address when the location has one (`ArrayLocation::etp`), the
+    /// file field otherwise - where this store has always put the URI.
     fn identifier(location: &ArrayLocation) -> DataArrayIdentifier {
+        let (uri, path) = location
+            .etp_address()
+            .unwrap_or((location.file.as_str(), location.path_in_file.as_str()));
         DataArrayIdentifier {
-            uri: location.file.clone(),
-            path_in_resource: location.path_in_file.clone(),
+            uri: uri.to_string(),
+            path_in_resource: path.to_string(),
         }
     }
 
@@ -248,7 +264,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     }
 
     fn unresolved(location: &ArrayLocation) -> Option<Error> {
-        location.file.is_empty().then(|| {
+        (location.file.is_empty() && location.resource_uri.is_none()).then(|| {
             Self::external(
                 location,
                 ExternalDataReason::Backend(format!(
@@ -275,16 +291,21 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
                 error.code, error.message
             )));
         }
-        Ok(listed
-            .items
-            .into_iter()
-            .map(|d| Dataspace {
-                uri: d.uri,
-                name: d.path,
-                created: None,
-                last_changed: None,
-            })
-            .collect())
+        let mut out = Vec::with_capacity(listed.items.len());
+        for listed in &listed.items {
+            let (dataspace, left) = discovery::dataspace_from_etp_said(listed);
+            if !left.is_empty() {
+                self.record(Diagnostic::warning(
+                    &dataspace.uri,
+                    format!(
+                        "custom data of a form storage does not hold, left out: {}",
+                        left.join(", ")
+                    ),
+                ));
+            }
+            out.push(dataspace);
+        }
+        Ok(out)
     }
 
     async fn resources(&self) -> Result<Vec<ObjectSummary>> {
@@ -321,15 +342,11 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
                     reason: "not a data object URI".into(),
                 })?;
                 let object_version = EtpUri::parse(uri).ok().and_then(|u| u.object_version);
-                Ok(ObjectHeader {
-                    summary,
-                    title: Some(resource.name.clone()).filter(|t| !t.is_empty()),
-                    originator: None,
-                    creation: None,
-                    last_update: None,
-                    format: None,
-                    object_version,
-                    schema_version: None,
+                Ok({
+                    let mut header = ObjectHeader::new(summary);
+                    header.title = Some(resource.name.clone()).filter(|t| !t.is_empty());
+                    header.object_version = object_version;
+                    header
                 })
             })
             .collect()
@@ -468,10 +485,7 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
                 .map_err(|failure| {
                     Self::external(location, ExternalDataReason::Backend(failure.to_string()))
                 })?;
-                Ok(ArrayMetadata {
-                    dimensions: meta.dimensions,
-                    element_type: element_type(logical).to_string(),
-                })
+                Ok(discovery::array_metadata_from_etp(&meta, logical))
             }
             Err(error) if error.code == 11 => Err(Self::external(
                 location,
@@ -540,12 +554,44 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
             }
         };
         Ok(ArrayData {
-            metadata: ArrayMetadata {
-                dimensions: array.dimensions.iter().map(|d| *d as i64).collect(),
-                element_type: element_type(array.logical).to_string(),
-            },
+            metadata: ArrayMetadata::new(
+                array.dimensions.iter().map(|d| *d as i64).collect(),
+                element_type(array.logical).to_string(),
+            ),
             values,
         })
+    }
+
+    fn capabilities(&self) -> energyml_storage::capabilities::Capabilities {
+        self.etp_capabilities()
+    }
+
+    async fn get_raw(
+        &self,
+        uris: &[String],
+        format: energyml_storage::raw::RawFormat,
+    ) -> Vec<Result<energyml_storage::raw::RawObject>> {
+        self.raw_objects(uris, format)
+    }
+
+    async fn resources_in(
+        &self,
+        context: &energyml_storage::context::Context,
+    ) -> Result<energyml_storage::context::Found> {
+        self.native_resources_in(context)
+    }
+
+    /// One request instead of reading every object: what the storage trait
+    /// asks an ETP client to do.
+    async fn edges(&self, uris: &[String]) -> Result<Vec<energyml_storage::graph::Edge>> {
+        self.native_edges(uris)
+    }
+
+    async fn deleted_resources(
+        &self,
+        filter: &energyml_storage::context::DeletedFilter,
+    ) -> Result<Vec<energyml_storage::context::DeletedResource>> {
+        self.deleted(filter)
     }
 
     fn diagnostics(&self) -> Vec<Diagnostic> {

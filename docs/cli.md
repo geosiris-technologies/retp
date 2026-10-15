@@ -26,6 +26,7 @@ is not compiled for wasm.
 | `create-dataspace`, `delete-dataspace` | create a dataspace; delete one **and everything in it** | the dataspace |
 | `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions | every island; the exit code says whether all went |
 | `shell <url>` | **one** session, then commands one per line | what each command prints |
+| `mcp <url>` | an MCP server over stdio, on one dataspace (feature `mcp`); see [MCP server](mcp.md) | nothing on stdout but the MCP protocol; logs on stderr |
 
 Every command also takes the server options, the login options and
 `-v` / `--verbose`. The exit code is 0 when everything asked for came back, 1
@@ -33,6 +34,14 @@ when something is missing, 2 when the command failed.
 
 Reading arrays into HDF5 files (`download-epc`, `push`) needs a build with HDF5
 support. TODO(verify): the feature name in the extracted binary.
+
+## As MCP tools for an assistant
+
+`retp mcp <url> --dataspace <name>` serves one dataspace of the server as
+read-only MCP tools, over stdio, for an MCP client such as an AI assistant.
+It is built with the feature `mcp` (the release archives have it). The
+tokens and passwords are never accepted as arguments: they come from the
+environment. Everything else is in [MCP server](mcp.md).
 
 ## Server options
 

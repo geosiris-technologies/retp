@@ -178,10 +178,22 @@ pub enum WriteFormat {
 }
 
 impl WriteFormat {
-    fn name(self) -> &'static str {
+    /// The word ETP uses for it (`DataObject.format`).
+    pub(crate) fn name(self) -> &'static str {
         match self {
             WriteFormat::Xml => "xml",
             WriteFormat::Json => "json",
+        }
+    }
+
+    /// The object written in this form - the one place an object becomes the
+    /// bytes it leaves in, for `push` and for the writer (`writer.rs`).
+    pub(crate) fn write(self, object: &dyn DynObject) -> std::result::Result<String, String> {
+        match self {
+            WriteFormat::Xml => to_part(object, XmlWriteOptions::default()).map_err(|why| why.to_string()),
+            WriteFormat::Json => {
+                energyml_core::json::write_string(object.as_reflect(), false).map_err(|why| why.to_string())
+            }
         }
     }
 }
@@ -404,12 +416,12 @@ pub fn well_known_kinds(
             continue;
         }
         for kind in chain {
-            let key = kind.uuid.to_ascii_lowercase();
-            if !done.insert(key.clone()) {
+            let kind_uuid = kind.uuid.to_ascii_lowercase();
+            if !done.insert(kind_uuid.clone()) {
                 continue;
             }
             // The same shape as the reference that named it.
-            let uri = to.replace(&uuid, &key);
+            let uri = to.replace(&uuid, &kind_uuid);
             let xml = kind_xml(&kind);
             let object = match registry.read_xml(
                 "application/x-eml+xml;version=2.3;type=PropertyKind",
@@ -426,21 +438,19 @@ pub fn well_known_kinds(
             let edges = kind
                 .parent
                 .as_deref()
-                .filter(|parent| !parent.eq_ignore_ascii_case(&key))
-                .map(|parent| energyml_storage::graph::Edge {
-                    from: uri.clone(),
-                    to: to.replace(&uuid, &parent.to_ascii_lowercase()),
-                    path: "Parent".into(),
+                .filter(|parent| !parent.eq_ignore_ascii_case(&kind_uuid))
+                .map(|parent| {
+                    energyml_storage::graph::Edge::new(
+                        uri.clone(),
+                        to.replace(&uuid, &parent.to_ascii_lowercase()),
+                        "Parent",
+                    )
                 })
                 .into_iter()
                 .collect();
-            let summary = ObjectSummary {
-                uri,
-                uuid: key,
-                qualified_type: "eml23.PropertyKind".into(),
-                content_type: "application/x-eml+xml;version=2.3;type=PropertyKind".into(),
-                locator: "PropertyKindDictionary_v2.3".into(),
-            };
+            let summary = ObjectSummary::new(uri, kind_uuid, "eml23.PropertyKind")
+                .with_content_type("application/x-eml+xml;version=2.3;type=PropertyKind")
+                .with_locator("PropertyKindDictionary_v2.3");
             found.kinds.push((summary, object, edges));
         }
     }
@@ -691,8 +701,11 @@ pub async fn push<K: Caller>(
     if let Some(only) = only {
         resources.retain(|one| only.iter().any(|uri| uri == &one.uri));
     }
+    // The references as the objects write them, not the edges the source
+    // states: an ETP server's edges join objects it holds, so a reference that
+    // leaves the source - what `dangling` reports - is in the objects only.
     let mut graph = source
-        .graph(&[])
+        .derived_graph(&[])
         .await
         .map_err(|why| not_sent(format!("the source's graph could not be read: {why}")))?;
     let uris: Vec<String> = resources.iter().map(|one| one.uri.clone()).collect();
@@ -736,14 +749,7 @@ pub async fn push<K: Caller>(
                 continue;
             }
         };
-        let written = match format {
-            WriteFormat::Xml => {
-                to_part(object.as_ref(), XmlWriteOptions::default()).map_err(|why| why.to_string())
-            }
-            WriteFormat::Json => {
-                energyml_core::json::write_string(object.as_reflect(), false).map_err(|why| why.to_string())
-            }
-        };
+        let written = format.write(object.as_ref());
         let xml = match written {
             Ok(text) => text.into_bytes(),
             Err(why) => {
@@ -1050,7 +1056,7 @@ async fn send_island<K: Caller>(
             })?;
             writes.push((
                 id.clone(),
-                to_wire(data).map_err(|why| Stop::Refused(format!("{uri}: {why}")))?,
+                to_wire(&data).map_err(|why| Stop::Refused(format!("{uri}: {why}")))?,
             ));
         }
     }
@@ -1113,7 +1119,8 @@ fn owner_of(
 /// An array as storage holds it, as the wire carries it: the logical type
 /// says what the numbers are, the transport is one §13.2.2.1 allows for it,
 /// and the values are widened into it where the wire has no narrower box.
-fn to_wire(data: ArrayData) -> Result<Array, String> {
+/// The one conversion: `push` and the writer (`writer.rs`) both call it.
+pub(crate) fn to_wire(data: &ArrayData) -> Result<Array, String> {
     use AnyArrayType as T;
     use AnyLogicalArrayType as L;
     let dimensions: Vec<u64> = data
@@ -1122,39 +1129,39 @@ fn to_wire(data: ArrayData) -> Result<Array, String> {
         .iter()
         .map(|d| (*d).max(0) as u64)
         .collect();
-    let (values, logical, transport) = match data.values {
-        ArrayValues::F64(v) => (Wire::Doubles(v), L::ArrayOfDouble64Le, T::ArrayOfDouble),
-        ArrayValues::F32(v) => (Wire::Floats(v), L::ArrayOfFloat32Le, T::ArrayOfFloat),
-        ArrayValues::I64(v) => (Wire::Longs(v), L::ArrayOfInt64Le, T::ArrayOfLong),
-        ArrayValues::I32(v) => (Wire::Ints(v), L::ArrayOfInt32Le, T::ArrayOfInt),
+    let (values, logical, transport) = match &data.values {
+        ArrayValues::F64(v) => (Wire::Doubles(v.clone()), L::ArrayOfDouble64Le, T::ArrayOfDouble),
+        ArrayValues::F32(v) => (Wire::Floats(v.clone()), L::ArrayOfFloat32Le, T::ArrayOfFloat),
+        ArrayValues::I64(v) => (Wire::Longs(v.clone()), L::ArrayOfInt64Le, T::ArrayOfLong),
+        ArrayValues::I32(v) => (Wire::Ints(v.clone()), L::ArrayOfInt32Le, T::ArrayOfInt),
         ArrayValues::I16(v) => (
-            Wire::Ints(v.into_iter().map(i32::from).collect()),
+            Wire::Ints(v.iter().map(|x| i32::from(*x)).collect()),
             L::ArrayOfInt16Le,
             T::ArrayOfInt,
         ),
         ArrayValues::I8(v) => (
-            Wire::Ints(v.into_iter().map(i32::from).collect()),
+            Wire::Ints(v.iter().map(|x| i32::from(*x)).collect()),
             L::ArrayOfInt8,
             T::ArrayOfInt,
         ),
         ArrayValues::U8(v) => (
-            Wire::Ints(v.into_iter().map(i32::from).collect()),
+            Wire::Ints(v.iter().map(|x| i32::from(*x)).collect()),
             L::ArrayOfUInt8,
             T::ArrayOfInt,
         ),
         ArrayValues::U16(v) => (
-            Wire::Ints(v.into_iter().map(i32::from).collect()),
+            Wire::Ints(v.iter().map(|x| i32::from(*x)).collect()),
             L::ArrayOfUInt16Le,
             T::ArrayOfInt,
         ),
         ArrayValues::U32(v) => (
-            Wire::Longs(v.into_iter().map(i64::from).collect()),
+            Wire::Longs(v.iter().map(|x| i64::from(*x)).collect()),
             L::ArrayOfUInt32Le,
             T::ArrayOfLong,
         ),
         // Bit for bit: the reader undoes it with `as u64`.
         ArrayValues::U64(v) => (
-            Wire::Longs(v.into_iter().map(|x| x as i64).collect()),
+            Wire::Longs(v.iter().map(|x| *x as i64).collect()),
             L::ArrayOfUInt64Le,
             T::ArrayOfLong,
         ),
@@ -1192,21 +1199,11 @@ mod tests {
     use energyml_storage::graph::Edge;
 
     fn summary(uri: &str) -> ObjectSummary {
-        ObjectSummary {
-            uri: uri.into(),
-            uuid: uri.into(),
-            qualified_type: String::new(),
-            content_type: String::new(),
-            locator: String::new(),
-        }
+        ObjectSummary::new(uri, uri, String::new())
     }
 
     fn edge(from: &str, to: &str) -> Edge {
-        Edge {
-            from: from.into(),
-            to: to.into(),
-            path: String::new(),
-        }
+        Edge::new(from, to, String::new())
     }
 
     fn graph(edges: Vec<Edge>) -> Graph {
@@ -1429,13 +1426,11 @@ mod tests {
     fn an_array_hangs_from_its_proxy_or_from_its_object() {
         let space = "eml:///dataspace('there')";
         let object = "eml:///dataspace('there')/resqml20.obj_PointSetRepresentation(p)";
-        let proxy = ObjectSummary {
-            uri: "eml:///eml20.obj_EpcExternalPartReference(X1)".into(),
-            uuid: "X1".into(),
-            qualified_type: "eml20.obj_EpcExternalPartReference".into(),
-            content_type: String::new(),
-            locator: String::new(),
-        };
+        let proxy = ObjectSummary::new(
+            "eml:///eml20.obj_EpcExternalPartReference(X1)",
+            "X1",
+            "eml20.obj_EpcExternalPartReference",
+        );
         let through = ArrayLocation {
             proxy_uuid: Some("x1".into()),
             path_in_file: "/points".into(),
@@ -1477,13 +1472,10 @@ mod tests {
         for values in cases {
             let element_type = values.element_type();
             let data = ArrayData {
-                metadata: energyml_storage::array::ArrayMetadata {
-                    dimensions: vec![1],
-                    element_type: element_type.to_string(),
-                },
+                metadata: energyml_storage::array::ArrayMetadata::new(vec![1], element_type.to_string()),
                 values: values.clone(),
             };
-            let wire = to_wire(data).unwrap();
+            let wire = to_wire(&data).unwrap();
             assert!(
                 allowed_transports(wire.logical).contains(&wire.transport),
                 "{element_type}: {:?} as {:?}",

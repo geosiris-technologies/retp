@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0-alpha.3"
+version = "0.2.0-alpha.4"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -41,12 +41,12 @@ debug = "line-tables-only"
 tracing = "0.1"
 energyml-log = { version = "0.2.0" }
 energyml-core = { version = "0.2.0" }
-retp-proto = { path = "crates/retp-proto", version = "0.2.0-alpha.3" }
-retp-avro = { path = "crates/retp-avro", version = "0.2.0-alpha.3" }
-retp-client = { path = "crates/retp-client", version = "0.2.0-alpha.3" }
-energyml-etp-store = { path = "crates/energyml-etp-store", version = "0.2.0-alpha.3" }
-retp-derive = { path = "crates/retp-derive", version = "0.2.0-alpha.3" }
-retp-types = { path = "crates/generated/retp-types", version = "0.2.0-alpha.3" }
+retp-proto = { path = "crates/retp-proto", version = "0.2.0-alpha.4" }
+retp-avro = { path = "crates/retp-avro", version = "0.2.0-alpha.4" }
+retp-client = { path = "crates/retp-client", version = "0.2.0-alpha.4" }
+energyml-etp-store = { path = "crates/energyml-etp-store", version = "0.2.0-alpha.4" }
+retp-derive = { path = "crates/retp-derive", version = "0.2.0-alpha.4" }
+retp-types = { path = "crates/generated/retp-types", version = "0.2.0-alpha.4" }
 energyml-derive = { version = "0.2.0" }
 energyml-storage = { version = "0.2.0" }
 energyml-schemas = { version = "0.2.0" }

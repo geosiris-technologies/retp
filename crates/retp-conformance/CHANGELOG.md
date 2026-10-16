@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/geosiris-technologies/retp/compare/retp-conformance-v0.2.0...retp-conformance-v0.3.0) - 2026-10-16
+
+### Added
+
+- *(cli)* a catalogue of servers, named, their secrets by reference
+
+### Other
+
+- *(deps)* energyml 0.3.0
+
 ## [0.2.0](https://github.com/geosiris-technologies/retp/compare/5248f7e...retp-conformance-v0.2.0) - 2026-10-15
 
 ### Added

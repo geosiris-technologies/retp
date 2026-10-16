@@ -31,6 +31,8 @@ energyml-eml-2-0 = { version = "0.3.0" }
 energyml-resqml-2-0-1 = { version = "0.3.0" }
 energyml-eml-2-3 = { version = "0.3.0" }
 energyml-resqml-2-2 = { version = "0.3.0" }
+# The registry of the by-value containment tests (tests/containment.rs): WITSML 2.1.
+energyml-schemas = { workspace = true, features = ["all"] }
 # By path only, no `version`: cargo publish resolves a versioned dev-dependency on the
 # registry (docs/releasing.md).
 retp-avro = { path = "../retp-avro" }

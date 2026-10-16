@@ -332,8 +332,8 @@ fn file_error(path: &str, error: &std::io::Error) -> SecretError {
     }
 }
 
-/// The mode of a file other users can read, in octal; `None` when it is private
-/// - and always `None` off Unix, where the check is not made (TODO(verify): the
+/// The mode of a file other users can read, in octal; `None` when it is private,
+/// and always `None` off Unix, where the check is not made (TODO(verify): the
 /// Windows ACL check the design leaves open).
 #[cfg(unix)]
 fn too_open(metadata: &std::fs::Metadata) -> Option<String> {

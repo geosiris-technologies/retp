@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing::field::{Field, Visit};
+use tracing::subscriber::Interest;
+use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::prelude::*;
 
 use retp_client::arrays::{ArrayProgress, ArrayValues, array_metadata, budget as array_budget, read_arrays};
 use retp_client::download::{Download, Progress, download_resumable};
@@ -60,30 +65,70 @@ pub struct EtpArgs {
 /// `verbose on` in a shell.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// The ETP crates' log lines, on stderr: a warning always - what a server
-/// got wrong and the client tolerated -, the rest when verbose. Other
-/// crates' (rustls') only when they warn.
+/// The ETP crates' events, on stderr: a warning always - what a server got
+/// wrong and the client tolerated -, the rest when verbose. Other crates'
+/// (rustls') only when they warn.
+///
+/// Only the event's text is printed, not the structured fields the crates
+/// add. Everything is decided in `on_event`: `VERBOSE` changes while the
+/// program runs, so no callsite may cache a verdict on it.
 struct Stderr;
 
-impl log::Log for Stderr {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Warn
-            || (VERBOSE.load(Ordering::Relaxed) && metadata.target().starts_with("energyml"))
-    }
+/// The text of an event, and - for a `log` record carried over the bridge,
+/// whose own target is `log` - the target it was written with.
+#[derive(Default)]
+struct Text {
+    message: String,
+    log_target: Option<String>,
+}
 
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            let level = match record.level() {
-                log::Level::Error => "error",
-                log::Level::Warn => "warning",
-                log::Level::Info => "info",
-                log::Level::Debug | log::Level::Trace => "debug",
-            };
-            eprintln!("{level}: {}", record.args());
+impl Visit for Text {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "message" => self.message = value.to_owned(),
+            "log.target" => self.log_target = Some(value.to_owned()),
+            _ => {}
         }
     }
 
-    fn flush(&self) {}
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for Stderr {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+        // Never `never`: it would be cached, and `verbose on` could not undo it.
+        Interest::sometimes()
+    }
+
+    fn on_event(&self, event: &Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let level = *event.metadata().level();
+        let verbose = VERBOSE.load(Ordering::Relaxed);
+        if level > Level::WARN && !verbose {
+            return;
+        }
+        let mut text = Text::default();
+        event.record(&mut text);
+        if level > Level::WARN {
+            let target = text
+                .log_target
+                .as_deref()
+                .unwrap_or_else(|| event.metadata().target());
+            if !(target.starts_with("retp") || target.starts_with("energyml")) {
+                return;
+            }
+        }
+        let level = match level {
+            Level::ERROR => "error",
+            Level::WARN => "warning",
+            Level::INFO => "info",
+            _ => "debug",
+        };
+        eprintln!("{level}: {}", text.message);
+    }
 }
 
 /// Where the server is, and how to be let in.
@@ -838,9 +883,9 @@ struct Line {
 
 pub fn run(args: EtpArgs) -> Result<ExitCode> {
     VERBOSE.store(args.verbose, Ordering::Relaxed);
-    if log::set_logger(&Stderr).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
-    }
+    // Once: the subscriber, and the `log` bridge with it (`try_init` installs
+    // both). Already installed (a second run in one process) is not an error.
+    let _ = tracing_subscriber::registry().with(Stderr).try_init();
     match args.command {
         EtpCommand::Probe(server) => probe(&server),
         #[cfg(feature = "mcp")]

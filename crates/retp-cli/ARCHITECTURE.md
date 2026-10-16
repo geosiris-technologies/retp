@@ -13,7 +13,7 @@ Related decision: [ADR 0001](../../docs/adr/0001-client-architecture.md).
 - **The shell uses the one-shot commands' argument definitions** (the same `clap` structures), so an option exists in both or in neither.
 - **Writing arrays needs HDF5, and says so.** The `hdf5` feature (the C library at build time) is off by default; without it `download-epc` refuses to write arrays and names the feature rather than writing an incomplete package.
 - **Reads are the default; anything that writes is explicit.** The project's own tests of writes run only against a test double, never against a third-party server.
-- **The `log` lines of the ETP crates go to stderr** through a logger of a few lines.
+- **The ETP crates' `tracing` events go to stderr** through a layer of a few lines: warnings always, the rest of the `retp*` and `energyml*` targets with `--verbose`; only the text is printed, not the fields. The layer also installs the `log` to `tracing` bridge, for the dependencies (rustls) that still write with `log`.
 
 ## Tests
 

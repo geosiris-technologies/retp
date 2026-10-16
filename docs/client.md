@@ -55,7 +55,11 @@ code (`Offer::with_types`, `with_formats`, `with_capability`,
 ## Tolerance
 
 A server's mistakes whose meaning is not in doubt are taken as meant and logged
-as warnings through the `log` facade (the application chooses where they go).
+as `tracing` warnings (the application installs the subscriber and chooses where
+they go). Each event keeps its text and adds structured fields - `peer`,
+`etp_message`, `message_id`, `correlation_id`, `code`, `error`, `bytes` - so a
+server's journal can be filtered and joined without parsing prose. No field ever
+carries a credential or the body of an object or an array.
 A mistake that would make the two ends disagree refuses the session and says
 why. A strict tolerance refuses both.
 

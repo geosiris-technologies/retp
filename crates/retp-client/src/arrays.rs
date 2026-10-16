@@ -145,7 +145,7 @@ pub fn reading_type(
     }
     match (logical_of(transport), tolerance) {
         (Some(meant), Tolerance::Tolerant) => {
-            log::warn!(
+            tracing::warn!(
                 target: "retp_proto",
                 "{path}: the store says {logical:?} carried as {transport:?}, which §13.2.2.1 does not allow; read as {meant:?}"
             );

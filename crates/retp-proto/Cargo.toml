@@ -19,9 +19,12 @@ retp-avro = { workspace = true }
 retp-types = { workspace = true }
 serde_json = "1.0"
 base64 = "0.22"
-# The deviations a tolerant negotiation accepts are logged: `log` is the
+# The deviations a tolerant negotiation accepts are logged: `tracing` is the
 # facade, and the application chooses where it goes.
-log = "0.4"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
 
 # docs.rs builds on Linux with no native HDF5: every feature builds there.
 [package.metadata.docs.rs]

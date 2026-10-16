@@ -19,7 +19,7 @@ retp-proto = { workspace = true }
 retp-avro = { workspace = true }
 retp-types = { workspace = true }
 # What a tolerant client takes as meant is logged.
-log = "0.4"
+tracing = { workspace = true }
 # The REST transport (`rest.rs`) reads JSON and base64 in a front end as natively:
 # both are pure Rust, and wasm takes them.
 serde_json = "1.0"

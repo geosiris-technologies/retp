@@ -320,7 +320,17 @@ impl Wire {
             message_flags: flags.0,
         };
         let bytes = frame(&header, extension, body);
-        log::debug!(target: "retp_proto", "sent {} ({} bytes)", super::describe(&header), bytes.len());
+        tracing::debug!(
+            target: "retp_proto",
+            etp_message = %super::describe(&header),
+            protocol = header.protocol,
+            message_id = header.message_id,
+            correlation_id = header.correlation_id,
+            bytes = bytes.len(),
+            "sent {} ({} bytes)",
+            super::describe(&header),
+            bytes.len()
+        );
         Ok(Outgoing { header, bytes })
     }
 

@@ -433,8 +433,9 @@ impl<H: Http> RestClient<H> {
         }
         if !edges.is_empty() && !self.said_no_kind {
             self.said_no_kind = true;
-            log::warn!(
+            tracing::warn!(
                 target: "retp_proto",
+                url = %self.base,
                 "{}: the REST graph does not say whether a relationship is primary or secondary; each edge is given as Primary, its reference path in customData",
                 self.base
             );

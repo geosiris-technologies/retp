@@ -55,7 +55,17 @@ impl Wire {
         };
         let rest = &bytes[bytes.len() - input.remaining()..];
         let flags = Flags(header.message_flags);
-        log::debug!(target: "retp_proto", "received {} ({} bytes)", super::describe(&header), bytes.len());
+        tracing::debug!(
+            target: "retp_proto",
+            etp_message = %super::describe(&header),
+            protocol = header.protocol,
+            message_id = header.message_id,
+            correlation_id = header.correlation_id,
+            bytes = bytes.len(),
+            "received {} ({} bytes)",
+            super::describe(&header),
+            bytes.len()
+        );
 
         // §3.7.2.2 §3.b: immediately, before any other processing - so the
         // Ack precedes even an exception about this very message. Never for
@@ -79,7 +89,16 @@ impl Wire {
                     }
                     None => String::new(),
                 };
-                log::warn!(target: "retp_proto", "a {} could not be taken: {incident}{said}", super::describe(&header));
+                tracing::warn!(
+                    target: "retp_proto",
+                    etp_message = %super::describe(&header),
+                    message_id = header.message_id,
+                    correlation_id = header.correlation_id,
+                    code = incident.code(),
+                    error = incident.name(),
+                    "a {} could not be taken: {incident}{said}",
+                    super::describe(&header)
+                );
                 // Numbered -1 - as a server met in the field does -, it is attached to nothing;
                 // but with one request of ours out, it can only be about that
                 // one. Tolerant, it ends that request with what it says,
@@ -90,8 +109,10 @@ impl Wire {
                 if let (Tolerance::Tolerant, true, Some(request), Some(Exception::Single(error))) =
                     (self.config.tolerance, header.correlation_id < 0, only, &decoded)
                 {
-                    log::warn!(
+                    tracing::warn!(
                         target: "retp_proto",
+                        message_id = header.message_id,
+                        correlation_id = header.correlation_id,
                         "taken as the answer to request #{request}, the only one out"
                     );
                     self.abandon(request);
@@ -106,7 +127,16 @@ impl Wire {
                 received.fault = Some(incident);
             }
             Err(incident) => {
-                log::warn!(target: "retp_proto", "refused {}: {incident}", super::describe(&header));
+                tracing::warn!(
+                    target: "retp_proto",
+                    etp_message = %super::describe(&header),
+                    message_id = header.message_id,
+                    correlation_id = header.correlation_id,
+                    code = incident.code(),
+                    error = incident.name(),
+                    "refused {}: {incident}",
+                    super::describe(&header)
+                );
                 received.replies.push(self.exception(&header, &incident));
                 if self.awaiting.contains_key(&header.correlation_id) {
                     self.abandon(header.correlation_id);
@@ -279,8 +309,11 @@ impl Wire {
                     }
                     // The data is there: it is the object, and the blobId
                     // announces nothing that will come.
-                    log::warn!(
+                    tracing::warn!(
                         target: "retp_proto",
+                        etp_message = %super::describe(header),
+                        message_id = header.message_id,
+                        correlation_id = header.correlation_id,
                         "{}: a data object carries a blobId and its data too (§3.7.3.2 §1.b); the data is taken, the blobId ignored",
                         super::describe(header)
                     );

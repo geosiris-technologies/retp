@@ -467,11 +467,17 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
         Ok((_, capabilities)) => {
             let (offer, widened) = offer.widened_to(&capabilities.supported_data_objects);
             for deviation in &widened.deviations {
-                log::warn!(target: "retp_proto", "{}: {deviation}", capabilities.application_name);
+                tracing::warn!(
+                    target: "retp_proto",
+                    peer = %capabilities.application_name,
+                    "{}: {deviation}",
+                    capabilities.application_name
+                );
             }
             if !widened.added.is_empty() {
-                log::info!(
+                tracing::info!(
                     target: "retp_proto",
+                    peer = %capabilities.application_name,
                     "the server supports {} as well: asked for too",
                     widened.added.join(", ")
                 );
@@ -479,7 +485,7 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
             (offer, Fitted::Widened(widened))
         }
         Err(why) => {
-            log::info!(
+            tracing::info!(
                 target: "retp_proto",
                 "the server's data object types are not known before the session ({why}): the offer is left as it is"
             );

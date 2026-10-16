@@ -1053,22 +1053,31 @@ fn the_next_deadline_is_when_tick_acts_and_none_when_nothing_is_due() {
     assert_eq!(client.next_deadline(), None);
 }
 
-/// Every line logged in this test binary - `log` has one logger per process.
+/// Every line logged in this test binary - one global subscriber per process.
 static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 struct Capture;
 
-impl log::Log for Capture {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
+/// Reads the `message` field of an event: the text, whatever the other fields.
+struct Text(String);
+
+impl tracing::field::Visit for Text {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
     }
-    fn log(&self, record: &log::Record) {
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut text = Text(String::new());
+        event.record(&mut text);
         LOGGED
             .lock()
             .unwrap()
-            .push(format!("{} {}", record.level(), record.args()));
+            .push(format!("{} {}", event.metadata().level(), text.0));
     }
-    fn flush(&self) {}
 }
 
 /// Tolerated is not unseen: what a tolerant connection takes as meant reaches
@@ -1076,9 +1085,9 @@ impl log::Log for Capture {
 /// with the session.
 #[test]
 fn deviations_reach_the_log() {
-    if log::set_logger(&Capture).is_ok() {
-        log::set_max_level(log::LevelFilter::Trace);
-    }
+    use tracing_subscriber::layer::SubscriberExt;
+    // One global subscriber per process: already installed is fine.
+    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture));
     let mut client = client();
     let start = client.start(T0);
     let request_id = start.send[0].header.message_id;

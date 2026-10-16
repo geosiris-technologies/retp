@@ -164,7 +164,7 @@ fn dispatch(
             }))
             .unwrap_or_else(|_| Err("the destination panicked".to_string()));
             if let Err(why) = delivered {
-                log::warn!(target: "retp_client", "a live destination failed and is removed: {why}");
+                tracing::warn!(target: "retp_client", error = %why, "a live destination failed and is removed: {why}");
                 gone.insert(id);
                 if let Some(protocol) = routing.remove(id) {
                     client.unsubscribe(protocol);

@@ -82,7 +82,7 @@ impl Blocking for LiveSession {
     /// `CloseSession`, the threads joined; a failure to close is logged, not returned.
     fn end(self, reason: &str) {
         if let Err(why) = self.close(reason) {
-            log::warn!(target: "retp_client", "closing the live session: {why:?}");
+            tracing::warn!(target: "retp_client", reason = ?why, "closing the live session: {why:?}");
         }
     }
 }

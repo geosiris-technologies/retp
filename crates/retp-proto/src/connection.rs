@@ -903,10 +903,10 @@ impl Connection {
         // does with the session: tolerated is not unseen.
         let peer = &negotiated.peer_application.0;
         for deviation in &negotiated.deviations {
-            log::warn!(target: "retp_proto", "{peer}: {deviation}");
+            tracing::warn!(target: "retp_proto", peer = %peer, "{peer}: {deviation}");
         }
         for problem in &problems {
-            log::warn!(target: "retp_proto", "{peer}: capability {problem}");
+            tracing::warn!(target: "retp_proto", peer = %peer, "{peer}: capability {problem}");
         }
         self.negotiated = Some(negotiated);
         self.state = State::Open;
@@ -1028,7 +1028,7 @@ impl Connection {
             let out = self.ping(now);
             self.requests.insert(out.header.message_id, now);
             self.keepalive_ping = Some(out.header.message_id);
-            log::debug!(target: "retp_proto", "keepalive: quiet for {} s", period / SECOND);
+            tracing::debug!(target: "retp_proto", message_id = out.header.message_id, "keepalive: quiet for {} s", period / SECOND);
             step.send.push(out);
         }
         if !step.send.is_empty() {

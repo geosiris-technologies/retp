@@ -4,8 +4,10 @@
 # server, or check it against the specification.
 #
 #   docker run --rm ghcr.io/geosiris-technologies/retp probe wss://etp.example.com
-#   docker run --rm -e ETP_TOKEN ghcr.io/geosiris-technologies/retp-conformance wss://etp.example.com
-#     (TODO(verify): flags of the conformance binary)
+#   docker run --rm -e ETP_TOKEN -v "$PWD:/work" --entrypoint retp-conformance \
+#     ghcr.io/geosiris-technologies/retp wss://etp.example.com --out report.md
+#
+# `retp` is built with `hdf5` and `mcp` (`retp mcp` needs `docker run -i`). See docs/docker.md.
 #
 # Built by `.github/workflows/docker.yml` only.
 #
@@ -23,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry/index,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/registry/cache,sharing=locked \
     set -eu; \
     cargo build --release --locked -p retp-cli -p retp-conformance \
-      --features retp-cli/hdf5; \
+      --features retp-cli/hdf5,retp-cli/mcp; \
     mkdir /out; \
     cp target/release/retp target/release/retp-conformance /out/
 

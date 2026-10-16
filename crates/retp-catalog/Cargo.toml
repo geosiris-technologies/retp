@@ -1,0 +1,51 @@
+[package]
+name = "retp-catalog"
+description = "A catalogue of ETP servers for the retp command line: named entries, secrets by reference and never by value."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["etp", "energyml", "catalog", "credentials", "cli"]
+categories = ["command-line-utilities", "config"]
+readme = "README.md"
+homepage = "https://www.geosiris.com"
+documentation = "https://docs.rs/retp-catalog"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
+# One test binary (`tests/main.rs`, one `mod` line per file).
+autotests = false
+
+[dependencies]
+# `Choice`, `Login`, `Endpoint`, `ServerProfile`, `CertificateCheck`: the catalogue
+# fills what the client already knows how to use, it decides nothing about a login.
+# The client does not depend on this crate, never the other way round.
+retp-client = { workspace = true }
+retp-proto = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+# `state/last.json`, the record `server test` leaves.
+serde_json = "1.0"
+# What the catalogue does is logged (`tracing`, as the rest of retp), a
+# reference's name at most, never a value.
+tracing = { workspace = true }
+
+# Native only (the crate is empty on wasm32): the parts that read files and folders.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `server.toml` and the configuration file.
+toml = "1.1"
+# Where the configuration file lives on each OS.
+directories = "6.0"
+
+[dev-dependencies]
+# The leak test captures every event, with all its fields.
+tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+[lints.rust]
+missing_docs = "warn"
+
+# docs.rs builds on Linux with no native HDF5: nothing here needs one.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]

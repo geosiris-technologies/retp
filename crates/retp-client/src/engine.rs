@@ -320,6 +320,13 @@ impl Engine {
         self.connection.watermark()
     }
 
+    /// When [`Self::tick`] has something to do at the earliest, by the clock
+    /// it is given; `None` when nothing is due. Asked again after every
+    /// `receive`, `tick` and request: it moves.
+    pub fn next_deadline(&self) -> Option<i64> {
+        self.connection.next_deadline()
+    }
+
     /// Say something when the session has been quiet this long, or never.
     pub fn set_keepalive(&mut self, period: Option<Duration>) {
         self.connection.set_keepalive(period);
@@ -403,7 +410,14 @@ impl Engine {
             {
                 let (name, sent) = self.awaiting_ack.remove(&message).unwrap_or(("a message", now));
                 let after = Duration::from_micros((now - sent).max(0) as u64);
-                log::debug!(target: "retp_proto", "{name} #{message} acknowledged after {} ms", after.as_millis());
+                tracing::debug!(
+                    target: "retp_proto",
+                    etp_message = %name,
+                    message_id = message,
+                    elapsed_ms = after.as_millis() as u64,
+                    "{name} #{message} acknowledged after {} ms",
+                    after.as_millis()
+                );
                 self.acknowledged.push(Acknowledged {
                     message_id: message,
                     name,

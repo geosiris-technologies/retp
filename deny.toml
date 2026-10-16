@@ -32,6 +32,10 @@ allow = [
     # `hdf5-static` feature of the CLI archives and the wheels). With all-features
     # on, the graph holds it as soon as `retp-cli` has that feature.
     "HDF5",
+    # The Boost licence (permissive, OSI approved, compatible with Apache-2.0), of
+    # `clipboard-win` and `error-code`: what rustyline needs on Windows, behind the
+    # `editor` feature of `retp-cli` (the shell's line editor).
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 # TODO(verify): run `cargo deny check licenses` on the tree with `hdf5-static` and add any

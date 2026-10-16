@@ -55,7 +55,11 @@ code (`Offer::with_types`, `with_formats`, `with_capability`,
 ## Tolerance
 
 A server's mistakes whose meaning is not in doubt are taken as meant and logged
-as warnings through the `log` facade (the application chooses where they go).
+as `tracing` warnings (the application installs the subscriber and chooses where
+they go). Each event keeps its text and adds structured fields - `peer`,
+`etp_message`, `message_id`, `correlation_id`, `code`, `error`, `bytes` - so a
+server's journal can be filtered and joined without parsing prose. No field ever
+carries a credential or the body of an object or an array.
 A mistake that would make the two ends disagree refuses the session and says
 why. A strict tolerance refuses both.
 
@@ -64,6 +68,38 @@ why. A strict tolerance refuses both.
 Nothing in the protocol crate reads the clock: every call that needs the time
 takes it as an argument. Tests drive timeouts, keepalives and resumption
 without sleeping.
+
+## A live session: what arrives unasked, pushed as it arrives
+
+The blocking client reads the WebSocket only while a call runs: between two calls, a
+notification the server sends waits in the socket. With the feature `live`,
+`retp_client::live::LiveSession` drives the session from a task of its own, which sleeps
+until a message arrives, a request is to be sent, or the next deadline (the keepalive
+`Ping`, a response timeout) is due - nothing polls. Requests go from any thread through
+`session.client()`, an `AsyncClient` on which every operation of the crate runs
+(`session.block_on(...)` from synchronous code); what arrives unasked goes to the
+destinations routed for it, on a thread of their own, so a slow destination never delays an
+answer:
+
+```rust,no_run
+use std::sync::Arc;
+use retp_client::live::{Filter, JsonLines, LiveSession, LiveSettings};
+
+# fn run(connect: retp_client::native::Connect) -> Result<(), Box<dyn std::error::Error>> {
+let session = LiveSession::connect(connect, LiveSettings::default())?;
+// The notifications of protocol 5 go to a JSON Lines file, one line each.
+session.route(Filter::Protocol(5), Arc::new(JsonLines::create("notifications.jsonl")?));
+// ... subscribe, then keep sending requests: the notifications are written as they come.
+session.close("done")?;
+# Ok(())
+# }
+```
+
+The destinations are `JsonLines` (one JSON object per line), `Console` (one line in words),
+`Callback` (a function) and `Queue` (a bounded channel); a `Destination` of your own is a
+trait to implement. `Filter` routes a protocol, one subscription, or the session's own
+events (a fault, the authorization running out, the session closed). A full queue drops and
+counts (`LiveSession::dropped`), never blocks the session.
 
 ## wasm
 

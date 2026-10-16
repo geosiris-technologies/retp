@@ -28,3 +28,5 @@ pub mod session;
 // other member, through feature unification. maturin turns `python` on.
 #[cfg(feature = "python")]
 pub mod bindings;
+#[cfg(feature = "python")]
+pub mod notifications;

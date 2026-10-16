@@ -11,9 +11,8 @@
 //! calls `lost`, and the sink is `ws.send`. Nothing here knows JavaScript:
 //! the glue lives in the WebAssembly front end, and all of this is tested natively.
 
-use std::cell::RefCell;
 use std::future::{Future, poll_fn};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 
 use retp_avro::EtpMessage;
@@ -26,9 +25,22 @@ use crate::caller::Caller;
 use crate::engine::Engine;
 use crate::{Acknowledged, ClientError, Clock, TransportError};
 
+/// `Send` on a native target, where the client is driven by a task of its
+/// own and called from other threads ([`crate::live`]); nothing in a browser,
+/// whose socket is a JavaScript object that never leaves its thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+/// `Send` on a native target; nothing in a browser.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
+
 /// Where the client puts what it sends: one whole WebSocket message at a
 /// time.
-pub trait Sink {
+pub trait Sink: MaybeSend {
     /// Send one message.
     fn send(&mut self, message: &[u8]) -> Result<(), TransportError>;
 
@@ -69,14 +81,24 @@ impl Shared {
 }
 
 /// An ETP client driven from outside. Cheap to clone: the clones are the
-/// same client.
+/// same client. On a native target it is `Send` and `Sync` when its clock
+/// is: one thread feeds it what arrives, others call it.
 #[derive(Clone)]
 pub struct AsyncClient<C: Clock> {
-    shared: Rc<RefCell<Shared>>,
+    shared: Arc<Mutex<Shared>>,
     clock: C,
 }
 
 impl<C: Clock> AsyncClient<C> {
+    /// The shared state. A thread that panicked while holding it left the
+    /// engine as it was at its last complete step: it is taken back rather
+    /// than the panic spread to every caller.
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Start a session: the `RequestSession` goes to `sink` at once. The
     /// session is open when [`AsyncClient::opened`] says so; meanwhile,
     /// whoever holds the socket feeds [`AsyncClient::received`].
@@ -89,21 +111,21 @@ impl<C: Clock> AsyncClient<C> {
     ) -> Result<Self, ClientError> {
         let engine = Engine::start(offer, handlers, credentials, clock.now())?;
         let client = Self {
-            shared: Rc::new(RefCell::new(Shared {
+            shared: Arc::new(Mutex::new(Shared {
                 engine,
                 sink,
                 waiting: Vec::new(),
             })),
             clock,
         };
-        client.shared.borrow_mut().flush();
+        client.lock().flush();
         Ok(client)
     }
 
     /// Over when the session is open - or could not be, and why.
     pub fn opened(&self) -> impl Future<Output = Result<(), ClientError>> + '_ {
         poll_fn(|cx| {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             match shared.engine.opened() {
                 Some(opened) => Poll::Ready(opened),
                 None => {
@@ -117,7 +139,7 @@ impl<C: Clock> AsyncClient<C> {
     /// A message arrived on the socket.
     pub fn received(&self, message: &[u8]) {
         let now = self.clock.now();
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock();
         shared.engine.receive(message, now);
         shared.flush();
         shared.wake();
@@ -126,16 +148,30 @@ impl<C: Clock> AsyncClient<C> {
     /// Time passed: what is due - a timeout, the keepalive `Ping` - happens.
     pub fn tick(&self) {
         let now = self.clock.now();
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock();
         shared.engine.tick(now);
         shared.flush();
         shared.wake();
     }
 
+    /// When [`Self::tick`] must be called at the latest, by this client's
+    /// clock: a timeout running out, the keepalive `Ping`. `None` when
+    /// nothing is due. Whoever drives the client sleeps until then (or until
+    /// a message comes) instead of ticking at a fixed interval, and asks
+    /// again after each `received`, `tick` and request.
+    pub fn next_deadline(&self) -> Option<i64> {
+        self.lock().engine.next_deadline()
+    }
+
+    /// Say something when the session has been quiet this long, or never.
+    pub fn set_keepalive(&self, period: Option<std::time::Duration>) {
+        self.lock().engine.set_keepalive(period);
+    }
+
     /// The socket closed, or failed: every request still out ends
     /// [`ClientError::Interrupted`].
     pub fn lost(&self, why: TransportError) {
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock();
         shared.engine.lost(why, &[]);
         shared.wake();
     }
@@ -143,7 +179,7 @@ impl<C: Clock> AsyncClient<C> {
     /// Send a request, and gather every message of its answer.
     pub async fn call<M: EtpMessage>(&self, request: &M) -> Result<Vec<Delivery>, ClientError> {
         let id = {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             let id = shared.engine.request(request, self.clock.now())?;
             shared.flush();
             id
@@ -158,7 +194,7 @@ impl<C: Clock> AsyncClient<C> {
         parts: &[P],
     ) -> Result<Vec<Delivery>, ClientError> {
         let id = {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             let id = shared.engine.request_parts(first, parts, self.clock.now())?;
             shared.flush();
             id
@@ -169,7 +205,7 @@ impl<C: Clock> AsyncClient<C> {
     /// Send a message that expects no answer - a `StartStreaming` - onto
     /// the sink at once.
     pub fn tell<M: EtpMessage>(&self, message: &M) -> Result<(), ClientError> {
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock();
         shared.engine.tell(message)?;
         shared.flush();
         Ok(())
@@ -178,7 +214,7 @@ impl<C: Clock> AsyncClient<C> {
     /// A `Ping`; over when its `Pong` arrives.
     pub async fn ping(&self) -> Result<(), ClientError> {
         let id = {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             let id = shared.engine.ping(self.clock.now())?;
             shared.flush();
             id
@@ -188,7 +224,7 @@ impl<C: Clock> AsyncClient<C> {
 
     fn answer(&self, id: i64) -> impl Future<Output = Result<Vec<Delivery>, ClientError>> + '_ {
         poll_fn(move |cx| {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             match shared.engine.take_answer(id) {
                 Some(answer) => Poll::Ready(answer),
                 None => {
@@ -201,7 +237,7 @@ impl<C: Clock> AsyncClient<C> {
 
     /// End the session: `CloseSession`, then the sink is closed.
     pub fn close(&self, reason: &str) {
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock();
         shared.engine.close(reason);
         shared.flush();
     }
@@ -222,7 +258,7 @@ impl<C: Clock> AsyncClient<C> {
         loop {
             while pending.len() < window && next < requests.len() {
                 let sent = {
-                    let mut shared = self.shared.borrow_mut();
+                    let mut shared = self.lock();
                     let sent = shared.engine.request(&requests[next], self.clock.now());
                     shared.flush();
                     sent
@@ -238,7 +274,7 @@ impl<C: Clock> AsyncClient<C> {
             }
             // Wait until any of the pending is answered.
             let answered = poll_fn(|cx| {
-                let mut shared = self.shared.borrow_mut();
+                let mut shared = self.lock();
                 let mut done = Vec::new();
                 for (index, id) in &pending {
                     if let Some(answer) = shared.engine.take_answer(*id) {
@@ -267,24 +303,24 @@ impl<C: Clock> AsyncClient<C> {
     /// Keep what the peer sends on its own for `protocol` apart, for
     /// [`Self::events`] and [`Self::next_events`].
     pub fn subscribe(&self, protocol: i32) {
-        self.shared.borrow_mut().engine.subscribe(protocol);
+        self.lock().engine.subscribe(protocol);
     }
 
     pub fn unsubscribe(&self, protocol: i32) {
-        self.shared.borrow_mut().engine.unsubscribe(protocol);
+        self.lock().engine.unsubscribe(protocol);
     }
 
     /// What arrived for a subscribed protocol since the last take; empty
     /// when nothing did.
     pub fn events(&self, protocol: i32) -> Vec<Event> {
-        self.shared.borrow_mut().engine.take_events(protocol)
+        self.lock().engine.take_events(protocol)
     }
 
     /// The next messages of a subscribed protocol - over when at least one
     /// is there. A stream is read by awaiting this again and again.
     pub fn next_events(&self, protocol: i32) -> impl Future<Output = Vec<Event>> + '_ {
         poll_fn(move |cx| {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock();
             if shared.engine.has_events(protocol) {
                 Poll::Ready(shared.engine.take_events(protocol))
             } else {
@@ -300,8 +336,7 @@ impl<C: Clock> AsyncClient<C> {
     ///
     /// Before [`AsyncClient::opened`] has said the session is open.
     pub fn negotiated(&self) -> Negotiated {
-        self.shared
-            .borrow()
+        self.lock()
             .engine
             .negotiated()
             .expect("asked once the session is open")
@@ -310,27 +345,32 @@ impl<C: Clock> AsyncClient<C> {
 
     /// How this client takes the server's faults.
     pub fn tolerance(&self) -> Tolerance {
-        self.shared.borrow().engine.tolerance()
+        self.lock().engine.tolerance()
     }
 
     /// Ask for an `Acknowledge` with every request from now on (§3.5.4.2).
     pub fn ask_acknowledge(&self, on: bool) {
-        self.shared.borrow_mut().engine.ask_acknowledge(on);
+        self.lock().engine.ask_acknowledge(on);
+    }
+
+    /// Whether requests ask for an `Acknowledge`.
+    pub fn asks_acknowledge(&self) -> bool {
+        self.lock().engine.asks_acknowledge()
     }
 
     /// The acknowledgements heard since the last call, oldest first.
     pub fn acknowledgements(&self) -> Vec<Acknowledged> {
-        self.shared.borrow_mut().engine.acknowledgements()
+        self.lock().engine.acknowledgements()
     }
 
     /// What arrived unasked since the last call: notifications, faults.
     pub fn unsolicited(&self) -> Vec<Event> {
-        self.shared.borrow_mut().engine.unsolicited()
+        self.lock().engine.unsolicited()
     }
 
     /// The last `currentDateTime` heard from the server.
     pub fn watermark(&self) -> Option<i64> {
-        self.shared.borrow().engine.watermark()
+        self.lock().engine.watermark()
     }
 }
 

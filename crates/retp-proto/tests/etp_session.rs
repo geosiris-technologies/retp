@@ -993,22 +993,91 @@ fn a_client_keeps_a_quiet_session_alive_and_a_server_does_not() {
     assert!(!is_ping(&client.tick(T0 + 5000 * S)));
 }
 
-/// Every line logged in this test binary - `log` has one logger per process.
+/// `next_deadline` names the moment `tick` acts: nothing a microsecond
+/// before, the act at it. Whoever drives a connection can then sleep until
+/// it instead of ticking at a fixed interval.
+#[test]
+fn the_next_deadline_is_when_tick_acts_and_none_when_nothing_is_due() {
+    let is_ping = |step: &Step| {
+        step.send
+            .iter()
+            .any(|o| (o.header.protocol, o.header.message_type) == (0, 8))
+    };
+    let (mut client, mut server) = opened();
+
+    // A quiet server, no keepalive, nothing asked: nothing to wake up for.
+    assert_eq!(server.next_deadline(), None);
+
+    // The client's keepalive.
+    let ping_at = client.next_deadline().expect("a client keeps its session alive");
+    assert!(!is_ping(&client.tick(ping_at - 1)), "not a microsecond before");
+    let ping = client.tick(ping_at);
+    assert!(is_ping(&ping), "at the deadline");
+    let pong = server.receive(&ping.send[0].bytes, ping_at);
+    client.receive(&pong.send[0].bytes, ping_at);
+
+    // A request out: its response timeout is due before a second keepalive
+    // only once the keepalive has gone out and is itself waiting.
+    let asked_at = ping_at + 1000;
+    client
+        .request(
+            &GetResources {
+                context: Default::default(),
+                ..Default::default()
+            },
+            asked_at,
+        )
+        .unwrap();
+    let keepalive_at = client.next_deadline().unwrap();
+    assert!(keepalive_at > asked_at, "activity puts the keepalive off");
+    let second = client.tick(keepalive_at);
+    assert!(is_ping(&second));
+    // The keepalive's Ping is never answered: the request's timeout and the
+    // Ping's are what is left, and the earlier is the request's.
+    let timeout_at = client.next_deadline().unwrap();
+    assert!(
+        client.tick(timeout_at - 1).events.is_empty(),
+        "no timeout a microsecond before"
+    );
+    let late = client.tick(timeout_at);
+    assert!(
+        late.events.iter().any(|e| matches!(e, Event::TimedOut { .. })),
+        "{:?}",
+        late.events
+    );
+
+    // A closed session has nothing due.
+    let closing = client.close("done");
+    exchange(&mut client, &mut server, closing, timeout_at);
+    assert_eq!(client.state(), retp_proto::connection::State::Closed);
+    assert_eq!(client.next_deadline(), None);
+}
+
+/// Every line logged in this test binary - one global subscriber per process.
 static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 struct Capture;
 
-impl log::Log for Capture {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
+/// Reads the `message` field of an event: the text, whatever the other fields.
+struct Text(String);
+
+impl tracing::field::Visit for Text {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
     }
-    fn log(&self, record: &log::Record) {
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut text = Text(String::new());
+        event.record(&mut text);
         LOGGED
             .lock()
             .unwrap()
-            .push(format!("{} {}", record.level(), record.args()));
+            .push(format!("{} {}", event.metadata().level(), text.0));
     }
-    fn flush(&self) {}
 }
 
 /// Tolerated is not unseen: what a tolerant connection takes as meant reaches
@@ -1016,9 +1085,9 @@ impl log::Log for Capture {
 /// with the session.
 #[test]
 fn deviations_reach_the_log() {
-    if log::set_logger(&Capture).is_ok() {
-        log::set_max_level(log::LevelFilter::Trace);
-    }
+    use tracing_subscriber::layer::SubscriberExt;
+    // One global subscriber per process: already installed is fine.
+    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture));
     let mut client = client();
     let start = client.start(T0);
     let request_id = start.send[0].header.message_id;
@@ -1701,6 +1770,47 @@ fn sample_capabilities() -> ServerCapabilities {
             ),
         ]),
     }
+}
+
+#[test]
+fn an_offer_publishes_capabilities_a_client_reads_back() {
+    // What a server serves at `.well-known`, read by the probe a client runs:
+    // the same offer, both ways.
+    let offer = Offer::new("a store", "3.1", Uuid([7; 16]))
+        .with_types(["resqml20.*", "eml20.*"])
+        .unwrap()
+        .with_capability(names::MAX_WEBSOCKET_MESSAGE_PAYLOAD_SIZE, Value::Long(1 << 20))
+        .unwrap()
+        .protocol(ProtocolOffer::v12(3, Role::Store))
+        .unwrap()
+        .protocol(ProtocolOffer::v12(4, Role::Store))
+        .unwrap();
+    let published = offer.server_capabilities();
+    let read = probe::parse_server_capabilities(&published.to_avro(), Some("avro/binary")).unwrap();
+    assert_eq!(read, published);
+    assert_eq!(read.application_name, "a store");
+    assert_eq!(read.supported_encodings, ["binary"]);
+    assert_eq!(read.supported_formats, offer.formats);
+    let roles: Vec<(i32, &str)> = read
+        .supported_protocols
+        .iter()
+        .map(|p| (p.protocol, p.role.as_str()))
+        .collect();
+    assert_eq!(
+        roles,
+        [(3, "store"), (4, "store")],
+        "each protocol in the role the server plays"
+    );
+    let types: Vec<&str> = read
+        .supported_data_objects
+        .iter()
+        .map(|d| d.qualified_type.as_str())
+        .collect();
+    assert_eq!(types, ["resqml20.*", "eml20.*"]);
+    assert!(
+        read.endpoint_capabilities
+            .contains_key(names::MAX_WEBSOCKET_MESSAGE_PAYLOAD_SIZE)
+    );
 }
 
 #[test]

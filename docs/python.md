@@ -183,10 +183,32 @@ argument.
 A call never returns an empty result to mean "not supported" or "not found":
 plural reads return `(found, errors)` so that nothing is silently missing.
 
+## Notifications
+
+`Session.subscribe(uri, ...)` subscribes to the changes of a context
+(StoreNotification) and sends them, as they arrive, where `to` says: a path (one
+JSON line each), a callable (called with a dict, on a thread of its own), or
+nothing - then iterate the subscription. The session goes on answering requests
+meanwhile, and nothing polls: it is driven by a task of its own.
+
+```python
+with retp.connect(url, token=token) as session:
+    with session.subscribe("eml:///dataspace('demo')") as changes:
+        for change in changes:          # or changes.get(timeout=5.0)
+            print(change["message"], change["body"])
+
+    session.subscribe("eml:///dataspace('demo')", to="changes.jsonl")
+    session.subscribe("eml:///dataspace('demo')", to=lambda change: print(change["message"]))
+```
+
+A server that offers no StoreNotification refuses by name (`NotSent`). Each
+change is the JSON object the Rust library writes (`retp_client::live::as_json`):
+`received`, `protocol`, `message`, `subscription`, `body`.
+
 ## What is not there yet
 
 Deleting objects and dataspaces, creating dataspaces, explicit transactions,
-supported-type listing, notifications and channels, the logins of the command
+supported-type listing, channels, the logins of the command
 line (the bridge takes a token), the REST transport, downloading a dataspace as
 an EPC, and writing arrays. The Rust library has most of them; each is a small
 binding. The list of what Rust must grow first is in the crate's `DESIGN.md`.

@@ -21,6 +21,8 @@ everything at once, and it is created by a maintainer.
    pre-release version (`0.2.0-alpha.3`), `release-plz` does not move to the final
    version on its own: the version is set by hand in a pull request to `main` instead,
    with the `CHANGELOG.md` entries (one commit `chore: X.Y.Z`).
+   It may meanwhile propose the next pre-release (`chore: release vX.Y.Z-alpha.N+1`):
+   close that pull request without merging it when the final version is coming.
 3. **Create a GitHub release** (Releases > Draft a new release): a new tag `vX.Y.Z`, the
    workspace version of `Cargo.toml`, on `main`; title `vX.Y.Z`; notes ("Generate
    release notes" gives a start). Publish it.
@@ -96,8 +98,13 @@ not yet published. Do not add a `version` to one.
 | 3 | `retp-types` |
 | 4 | `retp-proto`, `etptypes` |
 | 5 | `retp-client` |
-| 6 | `energyml-etp-store` |
+| 6 | `energyml-etp-store`, `retp-catalog` |
 | 7 | `retp-cli`, `retp-conformance` |
+
+`retp-catalog` is new in 0.3. Its name was reserved on crates.io with an empty
+0.0.1, published by a maintainer, so that trusted publishing could be configured
+before the first release with content; the workflow publishes it from 0.3.0 on,
+before `retp-cli` and `retp-conformance`, which depend on it.
 
 `retp-tests` is never published.
 `etptypes` is not published for now: crates.io keeps its 1.x versions for the

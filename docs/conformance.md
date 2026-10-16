@@ -45,6 +45,7 @@ already lists is never written into.
 
 | Option | Effect |
 |---|---|
+| `--server <NAME>`, `-s`, or `@NAME` first | a server of the [catalogue](cli.md#server-catalogue) instead of the URL and the login options |
 | `--rest` | check an OSDU Reservoir DDMS REST API; wire-only rules answer `NotApplicable` |
 | `--insecure` | do not verify the certificate |
 | `--tls-fallback` | verify it; if it fails, report `tls.chain` as failed and run the rest unverified |

@@ -4,13 +4,19 @@
 //! Argument parsing and printing only: the probe, the session and the
 //! requests are `retp-client`'s.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing::field::{Field, Visit};
+use tracing::subscriber::Interest;
+use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::prelude::*;
 
 use retp_client::arrays::{ArrayProgress, ArrayValues, array_metadata, budget as array_budget, read_arrays};
 use retp_client::download::{Download, Progress, download_resumable};
@@ -32,9 +38,17 @@ use retp_types::datatypes::object::Dataspace;
 
 // `retp mcp`, a child of this module: it reuses `Server` and `LoginArgs`,
 // which are private here.
+#[path = "editor.rs"]
+mod editor;
+// `retp server`, `retp catalog` and the catalogue's side of `Server`: a child, since it
+// reads `Server` and `LoginArgs`, which are private here.
+#[path = "catalog_cli.rs"]
+mod catalog_cli;
 #[cfg(feature = "mcp")]
 #[path = "mcp.rs"]
 mod mcp;
+#[path = "notify.rs"]
+mod notify;
 
 type Session = native::Remote;
 
@@ -48,6 +62,9 @@ pub struct EtpArgs {
     /// Say more: what the ETP crates log below a warning.
     #[arg(long, short, global = true)]
     verbose: bool,
+    /// Confirm, without asking, a write to a protected catalogue server (for a script).
+    #[arg(long, global = true)]
+    yes: bool,
     #[command(subcommand)]
     command: EtpCommand,
 }
@@ -56,30 +73,70 @@ pub struct EtpArgs {
 /// `verbose on` in a shell.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// The ETP crates' log lines, on stderr: a warning always - what a server
-/// got wrong and the client tolerated -, the rest when verbose. Other
-/// crates' (rustls') only when they warn.
+/// The ETP crates' events, on stderr: a warning always - what a server got
+/// wrong and the client tolerated -, the rest when verbose. Other crates'
+/// (rustls') only when they warn.
+///
+/// Only the event's text is printed, not the structured fields the crates
+/// add. Everything is decided in `on_event`: `VERBOSE` changes while the
+/// program runs, so no callsite may cache a verdict on it.
 struct Stderr;
 
-impl log::Log for Stderr {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Warn
-            || (VERBOSE.load(Ordering::Relaxed) && metadata.target().starts_with("energyml"))
-    }
+/// The text of an event, and - for a `log` record carried over the bridge,
+/// whose own target is `log` - the target it was written with.
+#[derive(Default)]
+struct Text {
+    message: String,
+    log_target: Option<String>,
+}
 
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            let level = match record.level() {
-                log::Level::Error => "error",
-                log::Level::Warn => "warning",
-                log::Level::Info => "info",
-                log::Level::Debug | log::Level::Trace => "debug",
-            };
-            eprintln!("{level}: {}", record.args());
+impl Visit for Text {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "message" => self.message = value.to_owned(),
+            "log.target" => self.log_target = Some(value.to_owned()),
+            _ => {}
         }
     }
 
-    fn flush(&self) {}
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for Stderr {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+        // Never `never`: it would be cached, and `verbose on` could not undo it.
+        Interest::sometimes()
+    }
+
+    fn on_event(&self, event: &Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let level = *event.metadata().level();
+        let verbose = VERBOSE.load(Ordering::Relaxed);
+        if level > Level::WARN && !verbose {
+            return;
+        }
+        let mut text = Text::default();
+        event.record(&mut text);
+        if level > Level::WARN {
+            let target = text
+                .log_target
+                .as_deref()
+                .unwrap_or_else(|| event.metadata().target());
+            if !(target.starts_with("retp") || target.starts_with("energyml")) {
+                return;
+            }
+        }
+        let level = match level {
+            Level::ERROR => "error",
+            Level::WARN => "warning",
+            Level::INFO => "info",
+            _ => "debug",
+        };
+        eprintln!("{level}: {}", text.message);
+    }
 }
 
 /// Where the server is, and how to be let in.
@@ -134,6 +191,23 @@ struct Server {
     /// 4 by default; `1` sends them one after the other.
     #[arg(long, alias = "parallel", value_name = "N")]
     at_once: Option<usize>,
+    /// A server of the catalogue (`retp server list`) instead of a URL: its URL, partition,
+    /// login and options come from its entry. `retp NAME COMMAND` and `retp @NAME COMMAND`
+    /// mean the same. Read before the arguments are parsed, so this field is never set.
+    #[arg(long, short = 's', alias = "serveur", value_name = "NAME")]
+    #[allow(dead_code)]
+    server: Option<String>,
+    /// Set by the catalogue's rewrite of the command line; not for hand use. The credentials
+    /// of an entry go to its own URLs only, whatever is given here.
+    #[arg(long = "catalog-entry", hide = true, value_name = "NAME")]
+    catalog_entry: Option<String>,
+    /// After the command has succeeded, save this connection in the catalogue as NAME: its URL
+    /// and options, and a **reference** for each secret, never a value.
+    #[arg(long, value_name = "NAME")]
+    save_as: Option<String>,
+    /// With `--save-as`: replace a server of that name.
+    #[arg(long)]
+    force: bool,
 }
 
 /// How to log in - one way at a time. Secrets are better given through the
@@ -181,10 +255,9 @@ fn from_env(name: &str) -> Option<String> {
 }
 
 impl LoginArgs {
-    /// Which login the options ask for - the choice only; getting the
-    /// credentials is the library's.
-    fn login(&self) -> Result<Option<Login>> {
-        let choice = Choice {
+    /// The options as the library's `Choice`.
+    fn choice(&self) -> Choice {
+        Choice {
             token: self.token.clone(),
             user: self.user.clone(),
             password: self.password.clone(),
@@ -194,8 +267,13 @@ impl LoginArgs {
             client_id: self.client_id.clone(),
             client_secret: self.client_secret.clone(),
             oauth_scope: self.oauth_scope.clone(),
-        };
-        Ok(choice.login(from_env)?)
+        }
+    }
+
+    /// Which login the options ask for - the choice only; getting the
+    /// credentials is the library's.
+    fn login(&self) -> Result<Option<Login>> {
+        Ok(self.choice().login(from_env)?)
     }
 }
 
@@ -211,6 +289,11 @@ impl Server {
 
     /// The server, with the credentials obtained and the warnings said.
     fn endpoint(&self) -> Result<Endpoint> {
+        // A catalogue server: its secrets read, its login done, its warnings said, and the
+        // ambient `ETP_*` variables ignored (retp-catalog).
+        if let Some(endpoint) = catalog_cli::endpoint(self)? {
+            return Ok(endpoint);
+        }
         let certificates = if self.insecure {
             CertificateCheck::Skip
         } else {
@@ -259,6 +342,17 @@ impl Server {
     /// by the commands that write, so that a read-only errand announces
     /// nothing it will not do.
     fn open_for(&self, writing: bool) -> Result<Session> {
+        self.open_with(writing, false)
+    }
+
+    /// A session driven by a task of its own ([`retp_client::live`]): what
+    /// arrives unasked is pushed as it arrives, and nothing has to be read
+    /// between two commands - the shell's. Over REST, the REST client.
+    fn open_live(&self, writing: bool) -> Result<Session> {
+        self.open_with(writing, true)
+    }
+
+    fn open_with(&self, writing: bool, live: bool) -> Result<Session> {
         if self.rest {
             return self.open_rest();
         }
@@ -286,13 +380,29 @@ impl Server {
             (None, true) => native::fit_to_server(&endpoint, offer).0,
             _ => offer,
         };
-        let mut client = native::connect(Connect {
+        let connect = Connect {
             endpoint,
             offer,
             handlers,
             max_message: None,
-        })
-        .with_context(|| format!("opening a session with {}", self.url))?;
+        };
+        if live {
+            let mut settings = retp_client::live::LiveSettings::default();
+            if let Some(at_once) = self.at_once {
+                settings.at_once = at_once;
+            }
+            let session = retp_client::live::LiveSession::connect(connect, settings)
+                .with_context(|| format!("opening a session with {}", self.url))?;
+            session.client().ask_acknowledge(self.ack);
+            if let Some(seconds) = self.keepalive {
+                session
+                    .client()
+                    .set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
+            }
+            return Ok(native::Remote::Live(Box::new(session)));
+        }
+        let mut client =
+            native::connect(connect).with_context(|| format!("opening a session with {}", self.url))?;
         client.ask_acknowledge(self.ack);
         if let Some(seconds) = self.keepalive {
             client.set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
@@ -612,8 +722,23 @@ enum EtpCommand {
     },
     /// Open one session, then read commands one per line - `dataspaces`,
     /// `resources`, `get`, `supported-types`, `download`, `info`, `ping`,
-    /// `verbose`, `reconnect`, `exit`. From a terminal, or from a file piped in.
+    /// `verbose`, `reconnect`, `connect`, `exit`. From a terminal, or from a file piped in.
     Shell(Server),
+    /// The catalogue of servers: choose its folder (`retp catalog init`).
+    Catalog {
+        #[command(subcommand)]
+        command: catalog_cli::CatalogCommand,
+    },
+    /// The servers of the catalogue: add, list, show, remove, test, default.
+    #[command(name = "server")]
+    Servers {
+        #[command(subcommand)]
+        command: catalog_cli::ServerCommand,
+    },
+    /// `retp NAME [COMMAND]`: a server of the catalogue. The command line is rewritten before
+    /// it is parsed; this is what is left when no such server exists.
+    #[command(external_subcommand)]
+    Named(Vec<OsString>),
 }
 
 /// What `create-dataspace` takes.
@@ -771,6 +896,14 @@ enum InSession {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// Subscribe to the changes of a context and send them, as they arrive, to a
+    /// file (one JSON line each) or the console: `subscribe <uri> --to changes.jsonl`.
+    /// The session keeps listening between commands; nothing has to be asked.
+    Subscribe(notify::SubscribeArgs),
+    /// The subscriptions of this shell: where each goes, and how many arrived.
+    Subscriptions,
+    /// End a subscription, by the id `subscribe` printed.
+    Unsubscribe(notify::UnsubscribeArgs),
     /// Ask the server to acknowledge each request, or not: `ack on`, `ack off`;
     /// alone, it toggles. Each acknowledgement is printed after the command.
     Ack {
@@ -782,8 +915,15 @@ enum InSession {
         #[arg(value_parser = ["on", "off"])]
         state: Option<String>,
     },
-    /// Close this session and open a new one - login included.
+    /// Close this session and open a new one on the same server - login included (a
+    /// catalogue server's references are read again).
     Reconnect,
+    /// Change server without leaving: close this session and open one on a server of the
+    /// catalogue. The new session is opened first, so a refusal leaves this one open.
+    Connect {
+        /// The name or an alias.
+        name: String,
+    },
     /// Close the session and leave.
     #[command(alias = "quit")]
     Exit,
@@ -799,10 +939,22 @@ struct Line {
 
 pub fn run(args: EtpArgs) -> Result<ExitCode> {
     VERBOSE.store(args.verbose, Ordering::Relaxed);
-    if log::set_logger(&Stderr).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
-    }
-    match args.command {
+    // Once: the subscriber, and the `log` bridge with it (`try_init` installs
+    // both). Already installed (a second run in one process) is not an error.
+    let _ = tracing_subscriber::registry().with(Stderr).try_init();
+    let yes = args.yes;
+    // Before anything runs: a write to a protected server asks first, and what `--save-as`
+    // would refuse is refused now, not after a long command.
+    let plan = match server_of(&args.command) {
+        Some(server) => {
+            if let Some(command) = writing_name(&args.command) {
+                catalog_cli::guard_write(server, command, yes, true)?;
+            }
+            catalog_cli::plan_save(server)?
+        }
+        None => None,
+    };
+    let outcome = match args.command {
         EtpCommand::Probe(server) => probe(&server),
         #[cfg(feature = "mcp")]
         EtpCommand::Mcp(args) => mcp::run(args),
@@ -850,8 +1002,52 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
             };
             one_shot_writing(&server, |session| push_epc(session, &args))
         }
-        EtpCommand::Shell(server) => shell(&server),
+        EtpCommand::Shell(server) => shell(server, yes),
+        EtpCommand::Catalog { command } => catalog_cli::run_catalog(command),
+        EtpCommand::Servers { command } => catalog_cli::run_servers(command),
+        EtpCommand::Named(words) => Err(catalog_cli::unknown(&words)),
+    };
+    catalog_cli::finish_save(plan, &outcome)?;
+    outcome
+}
+
+/// The server a command talks to, if it talks to one.
+fn server_of(command: &EtpCommand) -> Option<&Server> {
+    match command {
+        EtpCommand::Probe(server)
+        | EtpCommand::Connect(server)
+        | EtpCommand::Dataspaces(server)
+        | EtpCommand::Shell(server) => Some(server),
+        EtpCommand::Resources { server, .. }
+        | EtpCommand::Get { server, .. }
+        | EtpCommand::SupportedTypes { server, .. }
+        | EtpCommand::Array { server, .. }
+        | EtpCommand::Prefetch { server, .. }
+        | EtpCommand::DownloadEpc { server, .. }
+        | EtpCommand::Download { server, .. }
+        | EtpCommand::CreateDataspace { server, .. }
+        | EtpCommand::DeleteDataspace { server, .. }
+        | EtpCommand::Push { server, .. } => Some(server),
+        #[cfg(feature = "mcp")]
+        EtpCommand::Mcp(args) => Some(&args.server),
+        EtpCommand::Catalog { .. } | EtpCommand::Servers { .. } | EtpCommand::Named(_) => None,
     }
+}
+
+/// The name of a command that writes to the server.
+fn writing_name(command: &EtpCommand) -> Option<&'static str> {
+    match command {
+        EtpCommand::CreateDataspace { .. } => Some("create-dataspace"),
+        EtpCommand::DeleteDataspace { .. } => Some("delete-dataspace"),
+        EtpCommand::Push { .. } => Some("push"),
+        _ => None,
+    }
+}
+
+/// The command line, with a catalogue server (`retp azure`, `--server azure`, `@azure`)
+/// turned into the URL and options clap parses.
+pub fn expanded_args() -> Result<Vec<OsString>> {
+    catalog_cli::expand_args()
 }
 
 /// [`one_shot`], on a session whose offer says it writes.
@@ -1057,7 +1253,20 @@ fn one_shot(server: &Server, work: impl FnOnce(&mut Session) -> Result<bool>) ->
 
 /// Run one command of a shell in `session`. Reads only, so far: running one
 /// again after a lost connection is harmless.
-fn perform(session: &mut Session, command: &InSession, types: &[String]) -> Result<()> {
+/// What a shell keeps for its subscriptions between commands.
+struct Notifying {
+    subscriptions: notify::Subscriptions,
+    /// Where what arrives for the console goes: above the prompt with the
+    /// line editor, on stdout without it.
+    console: std::sync::Arc<dyn retp_client::live::Destination>,
+}
+
+fn perform(
+    session: &mut Session,
+    command: &InSession,
+    types: &[String],
+    notifying: &mut Notifying,
+) -> Result<()> {
     match command {
         InSession::Info => info(session),
         InSession::Ping => ping(session)?,
@@ -1100,8 +1309,20 @@ fn perform(session: &mut Session, command: &InSession, types: &[String]) -> Resu
         InSession::UnsubscribeChannels { ids } => unsubscribe_channels_cmd(session, ids)?,
         InSession::ChannelData { wait } => said_channel_data(session, *wait)?,
         InSession::Streaming { state } => streaming(session, state == "on")?,
+        InSession::Subscribe(args) => notify::subscribe(
+            session,
+            args,
+            &mut notifying.subscriptions,
+            notifying.console.clone(),
+        )?,
+        InSession::Subscriptions => notify::subscriptions(session, &notifying.subscriptions),
+        InSession::Unsubscribe(args) => notify::unsubscribe(session, args, &mut notifying.subscriptions)?,
         InSession::Download(_) => unreachable!("handled by the shell: it may open new sessions"),
-        InSession::Verbose { .. } | InSession::Ack { .. } | InSession::Reconnect | InSession::Exit => {
+        InSession::Verbose { .. }
+        | InSession::Ack { .. }
+        | InSession::Reconnect
+        | InSession::Connect { .. }
+        | InSession::Exit => {
             unreachable!("handled by the shell")
         }
     }
@@ -1185,30 +1406,6 @@ fn split_line(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// Print what arrived unasked and matters to whoever is at the keyboard.
-fn said_notices(session: &mut Session, interactive: bool) {
-    use retp_proto::connection::Event;
-    let mut said = false;
-    for event in session.unsolicited() {
-        let notice = match event {
-            Event::AuthorizationExpiring => "the server says the authorization runs out soon".to_string(),
-            Event::Fault(incident) => format!("the server sent what could not be taken: {incident}"),
-            Event::TimedOut { request, incident } => format!("request #{request} timed out: {incident}"),
-            Event::Closed { reason } => format!("the server closed the session: {reason}"),
-            _ => continue,
-        };
-        if !said && interactive {
-            eprintln!();
-        }
-        said = true;
-        eprintln!("notice: {notice}");
-    }
-    if said && interactive {
-        print!("etp> ");
-        std::io::stdout().flush().ok();
-    }
-}
-
 /// Print the acknowledgements the session heard.
 fn said_acknowledgements(session: &mut Session) {
     for ack in session.acknowledgements() {
@@ -1224,60 +1421,36 @@ fn said_acknowledgements(session: &mut Session) {
 /// One session, many commands. A lost connection is said, a new session is
 /// opened - login included - and the command runs again, once: every command
 /// here is a read.
-fn shell(server: &Server) -> Result<ExitCode> {
+fn shell(mut server: Server, yes: bool) -> Result<ExitCode> {
     // A shell may write: its offer says so from the start, so that a `push`
     // typed later does not find a session that announced reads only.
-    let mut session = Some(server.open_for(true)?);
+    let interactive = std::io::stdin().is_terminal();
+    // The keyboard is read by the line editor (feature `editor`) or on a
+    // thread of its own; the session needs nobody meanwhile: a live session
+    // listens, keeps itself alive and pushes what arrives on its own task.
+    let mut input = editor::Input::new(interactive, history_file(&server));
+    let mut notifying = Notifying {
+        subscriptions: notify::Subscriptions::new(),
+        console: input.console(),
+    };
+    let mut session = Some(server.open_live(true)?);
+    if let Some(open) = session.as_ref() {
+        heard_by_the_console(open, &notifying);
+    }
     // Survives a reconnection: the new session asks as the old one did.
     let acknowledging = AtomicBool::new(server.ack);
-    let interactive = std::io::stdin().is_terminal();
     if interactive {
         info(session.as_mut().expect("just opened"));
         eprintln!(
-            "commands: dataspaces, resources, get, supported-types, array, download, info, ping, ack, verbose, reconnect, exit \
-             - `help <command>` for its options"
+            "commands: dataspaces, resources, get, supported-types, array, download, subscribe, subscriptions, \
+             unsubscribe, info, ping, ack, verbose, reconnect, connect, exit - `help <command>` for its options"
         );
     }
-    // The keyboard is read on a thread of its own, so that the session is
-    // listened to while nothing is typed: a WebSocket server whose pings go
-    // unanswered closes the connection (a server may do so after twenty seconds),
-    // and the keepalive Ping has to be sent by someone.
-    let (typed, lines) = std::sync::mpsc::channel::<std::io::Result<String>>();
-    std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            if typed.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    loop {
-        if interactive {
-            print!("etp> ");
-            std::io::stdout().flush().ok();
-        }
-        let line = loop {
-            match lines.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(line) => break Some(line),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let Some(open) = session.as_mut() else { continue };
-                    match open.idle(std::time::Duration::from_millis(250)) {
-                        Ok(()) => said_notices(open, interactive),
-                        Err(error) => {
-                            eprintln!(
-                                "\nthe connection fell while idle ({error}); the next command opens a new session"
-                            );
-                            session = None;
-                            if interactive {
-                                print!("etp> ");
-                                std::io::stdout().flush().ok();
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        let Some(line) = line else { break };
+    while let Some(line) = input.read_line(&if interactive {
+        catalog_cli::prompt(&server)
+    } else {
+        String::new()
+    }) {
         let line = line?;
         if line.trim_start().starts_with('#') {
             continue;
@@ -1328,10 +1501,39 @@ fn shell(server: &Server) -> Result<ExitCode> {
                     let _ = old.close("retp shell: reconnecting");
                 }
             }
+            InSession::Connect { name } => {
+                // The new session is opened before the old one is closed: a refusal leaves the
+                // shell where it was.
+                let opened = catalog_cli::server_named(name)
+                    .and_then(|next| next.open_live(true).map(|fresh| (next, fresh)));
+                match opened {
+                    Ok((next, mut fresh)) => {
+                        if let Some(old) = session.take() {
+                            let _ = old.close("retp shell: changing server");
+                        }
+                        if !notifying.subscriptions.is_empty() {
+                            eprintln!(
+                                "the {} subscription(s) of the old session ended with it: subscribe again",
+                                notifying.subscriptions.len()
+                            );
+                            notifying.subscriptions.clear();
+                        }
+                        heard_by_the_console(&fresh, &notifying);
+                        let _ = fresh.ask_acknowledge(acknowledging.load(Ordering::Relaxed));
+                        server = next;
+                        session = Some(fresh);
+                        if interactive && let Some(open) = session.as_mut() {
+                            info(open);
+                        }
+                    }
+                    Err(error) => eprintln!("error: {error:#}"),
+                }
+                continue;
+            }
             InSession::Download(args) => {
                 // The download reconnects by itself, and leaves its last
                 // session to the shell.
-                if let Err(error) = download_to(server, &mut session, args) {
+                if let Err(error) = download_to(&server, &mut session, args) {
                     eprintln!("error: {error:#}");
                 }
                 if let Some(open) = session.as_mut() {
@@ -1341,14 +1543,35 @@ fn shell(server: &Server) -> Result<ExitCode> {
             }
             _ => {}
         }
+        // A write to a protected catalogue server: only `--yes` confirms in a shell, whose
+        // input is the command stream.
+        if !replays(&command) {
+            let what = match &command {
+                InSession::Push(_) => "push",
+                InSession::CreateDataspace(_) => "create-dataspace",
+                _ => "delete-dataspace",
+            };
+            if let Err(error) = catalog_cli::guard_write(&server, what, yes, false) {
+                eprintln!("error: {error:#}");
+                continue;
+            }
+        }
         // What this session knows, kept **before** the command that may cost
         // it: once the socket is gone its watermark cannot be read any more.
         let kept = session.as_ref().and_then(retp_client::resume::kept_of);
         for attempt in 0..2 {
             if session.is_none() {
-                match server.open_for(true) {
+                match server.open_live(true) {
                     Ok(mut fresh) => {
                         said_catch_up(&fresh, kept.as_ref());
+                        if !notifying.subscriptions.is_empty() {
+                            eprintln!(
+                                "the {} subscription(s) of the old session ended with it: subscribe again",
+                                notifying.subscriptions.len()
+                            );
+                            notifying.subscriptions.clear();
+                        }
+                        heard_by_the_console(&fresh, &notifying);
                         let _ = fresh.ask_acknowledge(acknowledging.load(Ordering::Relaxed));
                         session = Some(fresh);
                     }
@@ -1362,7 +1585,7 @@ fn shell(server: &Server) -> Result<ExitCode> {
                 break;
             }
             let open = session.as_mut().expect("opened above");
-            let done = perform(open, &command, &server.types);
+            let done = perform(open, &command, &server.types, &mut notifying);
             said_acknowledgements(open);
             match done {
                 Ok(()) => break,
@@ -1392,6 +1615,24 @@ fn shell(server: &Server) -> Result<ExitCode> {
         open.close("retp shell: done")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where the shell keeps the history of its line editor: the server's own `state/history` for a
+/// catalogue server (the one it was started on), `~/.retp_history` otherwise.
+fn history_file(server: &Server) -> Option<PathBuf> {
+    catalog_cli::history_path(server).or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".retp_history"))
+    })
+}
+
+/// What the session itself says - a fault, the authorization running out, the
+/// session closed - goes to the console as it happens, on a live session.
+fn heard_by_the_console(session: &Session, notifying: &Notifying) {
+    if let native::Remote::Live(live) = session {
+        live.route(retp_client::live::Filter::Session, notifying.console.clone());
+    }
 }
 
 fn dataspaces(session: &mut Session) -> Result<bool> {

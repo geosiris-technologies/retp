@@ -27,6 +27,8 @@ is not compiled for wasm.
 | `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions | every island; the exit code says whether all went |
 | `shell <url>` | **one** session, then commands one per line | what each command prints |
 | `mcp <url>` | an MCP server over stdio, on one dataspace (feature `mcp`); see [MCP server](mcp.md) | nothing on stdout but the MCP protocol; logs on stderr |
+| `server add\|list\|show\|remove\|test\|default` | the [server catalogue](#server-catalogue): servers by name, secrets by reference | one line per server; a verdict per step |
+| `catalog init [folder]` | choose the folder of the catalogue | where it is |
 
 Every command also takes the server options, the login options and
 `-v` / `--verbose`. The exit code is 0 when everything asked for came back, 1
@@ -58,6 +60,9 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 | `--type <qualified type>` | a data object type to ask for, repeatable (`--type 'resqml20.*'`) |
 | `--offer <file.json>` | what the client announces, from a file |
 | `--at-once <N>` | requests of one operation in flight at the same time; 4 by default |
+| `--server <NAME>`, `-s` | a server of the [catalogue](#server-catalogue) instead of the URL (`--serveur` is a hidden alias) |
+| `--save-as <NAME>` | after the command has succeeded, save this connection in the catalogue; add `--force` to replace one |
+| `--yes` | confirm, without asking, a write to a protected catalogue server |
 
 ## Logging in
 
@@ -88,6 +93,118 @@ retp connect wss://etp.example.com/etp
 export ETP_PASSWORD=PASSWORD
 retp connect wss://etp.example.com/etp --user USER --insecure
 ```
+
+## Server catalogue
+
+A server you talk to every day can be kept under a name: `retp azure` instead of the URL,
+the partition, the tenant and the way to log in. The catalogue never holds a secret, only a
+reference to one.
+
+```sh
+retp catalog init ~/retp-servers          # choose the folder (asked on a terminal; required in a script)
+retp server add                           # a guided form, on a terminal
+retp server add azure-test wss://adme.example.com/api/reservoir-ddms-etp/v2/ \
+    --auth azure --tenant 00000000-0000-0000-0000-000000000000 --client-id APP_ID \
+    --scope 'api://APP_ID/.default' --client-secret-from env:RETP_AZURE_TEST_SECRET \
+    --partition opendes --alias az
+
+retp server test azure-test               # definition, references, /.well-known, login, session
+retp azure                                # a shell on it
+retp azure dataspaces                     # a command on it
+retp @azure dataspaces                    # the same; @ always means the server
+retp --server azure dataspaces            # the same; -s is short
+retp shell azure                          # the shell, by name
+```
+
+**The folder.** `config.toml` in the OS's configuration folder (`RETP_CONFIG` names another
+file) holds the catalogue folder and the default server; `RETP_CATALOG` names the folder
+instead. In it, one folder per server: `server.toml`, the definition, which can be shared
+(no secret in it), and `state/`, local (the record of `server test`, the history of the
+shell; `retp catalog init` writes a `.gitignore` for it).
+
+**A secret is a reference**: `env:NAME` (an environment variable) or `file:PATH` (a file;
+`~` and `${HOME}` are expanded). A file loses one final line ending, is read at each
+connection, and on Unix is refused beyond mode `0600`. `keyring:`, `cmd:` and `prompt` are
+not available yet and are refused by name. A literal value for `password`, `token`,
+`client_secret` or `secret` in `server.toml` is refused, naming the key and the line and
+never the value. `retp server show` says whether each reference resolves, never what it
+holds.
+
+```toml
+schema = 1
+description = "ADME test tenant"
+alias = ["az"]
+
+[server]
+etp_url = "wss://adme.example.com/api/reservoir-ddms-etp/v2/"
+rest_url = "https://adme.example.com/api/reservoir-ddms/v2"
+transport = "etp"          # which one a command uses unless told otherwise
+partition = "opendes"
+tls = "verify"             # or "skip" (--insecure), said again at every connection
+handshake = "native"       # or "browser" (--as-browser)
+protected = false          # true: a command that writes asks for confirmation
+
+[auth]
+method = "azure"           # none, basic, bearer, oauth-password, oauth-client, azure, cognito
+tenant = "00000000-0000-0000-0000-000000000000"
+client_id = "11111111-1111-1111-1111-111111111111"
+scope = "api://11111111-1111-1111-1111-111111111111/.default"
+client_secret = { env = "RETP_AZURE_TEST_SECRET" }
+
+[headers]                  # extra request headers (see below)
+x-trace = "on"
+x-api-key = { env = "RETP_AZURE_TEST_KEY" }
+
+[defaults]                 # for a dataspace created on this server: not secrets
+legal_tags = ["opendes-public-usa-dataset-1"]
+owners = ["data.default.owners@opendes.example.com"]
+viewers = ["data.default.viewers@opendes.example.com"]
+```
+
+The methods are the ones of [Logging in](#logging-in); the catalogue fills the same
+`Choice` and the client decides. Over a catalogue server **the ambient `ETP_*` variables are
+ignored**, so that the `ETP_TOKEN` set for one server never goes to another; an entry that
+wants one says so (`token = { env = "ETP_TOKEN" }`). The login options (`--password`...)
+are refused with a catalogue server, and so is a URL.
+
+**Extra headers** are written as a literal for a header that carries nothing secret, or as a
+reference; a literal is refused for a name that looks secret (`authorization`, `cookie`,
+anything with `key`, `token`, `secret` or `password`). `retp-client` has no way to send
+extra headers yet, so a connection to an entry that defines some is refused by name
+instead of being made without them. **Write defaults** (`legal_tags`, `owners`,
+`viewers`) become `--custom legaltags=...`, `owners=...`, `viewers=...` on
+`create-dataspace`, unless the line gives its own.
+
+**Naming.** A name is lowercase letters, digits, `.`, `_` and `-` (it becomes a folder
+name). Aliases share the namespace. A built-in command always wins: a server cannot be
+named like one (the commands are read from the parser), and `retp @name` always means the
+server. `retp dataspces` answers with the commands and servers that look like the word.
+
+**The default server.** `retp server default azure` lets `retp dataspaces` run on it
+(`server: azure (default)` is said on stderr). It is never used by a command that writes:
+`push`, `create-dataspace` and `delete-dataspace` need a server named on the line.
+
+**Protected servers.** With `protected = true`, a command that writes to the server asks
+for its name typed at a terminal, or `--yes`; otherwise it is refused. In a shell only
+`--yes` confirms.
+
+**Saving what worked.** `retp connect URL --user U --token-url X --save-as azure-test`
+saves the connection after the command succeeded. A secret that came from an `ETP_*`
+variable is saved as a reference to that variable (shared with every other server: the
+output says so); one that came from the command line is **not saved**, and the entry
+points at a variable named after it, with the advice to define it. A name already taken is
+refused before the command runs, unless `--force`.
+
+**The guided form.** `retp server add` with no argument, on a terminal, asks for the
+method, the URLs, the method's fields (a secret as a reference, never a value), extra
+headers, the partition, the write defaults, `protected`, then probes `/.well-known`
+before saving. With arguments the same fields come from the options, and a script is
+never asked: when the input is not a terminal and a field is missing, the command refuses
+and names it.
+
+`retp-conformance --server NAME` and `retp mcp --server NAME` take a catalogue server the
+same way. What `retp server test` records (`state/last.json`) and prints has the entry's
+secrets removed from any answer a server repeats; this is a guard, not a proof.
 
 ## Examples
 
@@ -144,11 +261,23 @@ etp> exit
 | `info`, `ping` | what the session agreed; a `Ping` and the time its `Pong` took |
 | `ack [on\|off]`, `verbose [on\|off]` | acknowledgements, message tracing |
 | `dataspaces`, `resources`, `supported-types`, `get`, `array`, `download` | as the one-shot commands, minus the server options |
-| `watch <uri>`, `unwatch <uuid>`, `notifications [--wait S]` | store notifications (protocol 5) |
+| `subscribe <uri> [--to FILE\|console] [--format jsonl\|text] [--append]` | the changes of a context (StoreNotification, protocol 5) sent, as they arrive, to a file (one JSON line each) or to the console; commands go on meanwhile |
+| `subscriptions`, `unsubscribe <id>` | what this shell is subscribed to, where each goes and how many arrived; end one |
+| `watch <uri>`, `unwatch <uuid>`, `notifications [--wait S]` | store notifications read on demand: `notifications` collects what came |
 | `changes-since <dataspace> <time\|watermark>` | what was written and deleted since a time: the catch-up after a cut |
 | `channels`, `subscribe-channels`, `unsubscribe-channels`, `channel-data`, `streaming on\|off` | channels (protocols 21 and 1) |
-| `reconnect` | close this session and open a new one, login included |
+| `reconnect` | close this session and open a new one on the same server, login included (a catalogue server's references are read again) |
+| `connect <name>` | change to another server of the catalogue without leaving; the new session is opened before the old one is closed |
 | `exit`, `quit` | close the session and leave |
+
+The shell's session listens on its own task (`retp_client::live`, see
+[Library usage](client.md)): what the server sends unasked - a subscription's
+changes, a fault, the authorization running out, the session closed - is
+printed or written as it arrives, while nothing is typed, and nothing polls.
+A server that offers no StoreNotification (protocol 5) refuses `subscribe` by
+name. Built with the feature `editor`, the shell has a line editor: history
+(kept in `~/.retp_history`), editing, and what arrives printed above the prompt
+instead of through it; without it, the shell reads plain lines.
 
 ETP URIs need no quotes in the shell: single quotes are kept, so
 `eml:///dataspace('demo')` is one word. A dataspace can be named by its path

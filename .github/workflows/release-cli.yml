@@ -59,18 +59,19 @@ jobs:
           # `features: hdf5-static` builds HDF5 from its sources and links it in (CMake is on
           # every runner image): the archive writes the arrays of `download-epc` on a machine
           # without HDF5. A target without it still downloads a dataspace and refuses by name
-          # to write an array (FeatureNotEnabled). Every archive carries `retp mcp` (feature `mcp`).
+          # to write an array (FeatureNotEnabled). Every archive carries `retp mcp` (feature `mcp`) and
+          # the shell's line editor (feature `editor`).
           # TODO(verify): HDF5 for the musl targets (built with cross).
           # TODO(verify): the ARM runner label (ubuntu-24.04-arm) is available to this repository.
           # TODO(verify): ring and the HDF5 backend on Windows arm64.
-          - { target: x86_64-unknown-linux-gnu,   os: ubuntu-22.04,     features: "hdf5-static,mcp", ext: tar.gz }
-          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-24.04-arm, features: "hdf5-static,mcp", ext: tar.gz }
-          - { target: x86_64-unknown-linux-musl,  os: ubuntu-22.04,     features: mcp,         ext: tar.gz, musl: true }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04,     features: mcp,         ext: tar.gz, musl: true }
-          - { target: aarch64-apple-darwin,       os: macos-latest,     features: "hdf5-static,mcp", ext: tar.gz }
-          - { target: x86_64-apple-darwin,        os: macos-latest,     features: "hdf5-static,mcp", ext: tar.gz }
-          - { target: x86_64-pc-windows-msvc,     os: windows-latest,   features: "hdf5-static,mcp", ext: zip }
-          - { target: aarch64-pc-windows-msvc,    os: windows-latest,   features: "hdf5-static,mcp", ext: zip }
+          - { target: x86_64-unknown-linux-gnu,   os: ubuntu-22.04,     features: "hdf5-static,mcp,editor", ext: tar.gz }
+          - { target: aarch64-unknown-linux-gnu,  os: ubuntu-24.04-arm, features: "hdf5-static,mcp,editor", ext: tar.gz }
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-22.04,     features: "mcp,editor", ext: tar.gz, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04,     features: "mcp,editor", ext: tar.gz, musl: true }
+          - { target: aarch64-apple-darwin,       os: macos-latest,     features: "hdf5-static,mcp,editor", ext: tar.gz }
+          - { target: x86_64-apple-darwin,        os: macos-latest,     features: "hdf5-static,mcp,editor", ext: tar.gz }
+          - { target: x86_64-pc-windows-msvc,     os: windows-latest,   features: "hdf5-static,mcp,editor", ext: zip }
+          - { target: aarch64-pc-windows-msvc,    os: windows-latest,   features: "hdf5-static,mcp,editor", ext: zip }
           # FreeBSD x86_64 is best-effort in the plan (via `cross`) and is not built here.
     steps:
       - uses: actions/checkout@v7

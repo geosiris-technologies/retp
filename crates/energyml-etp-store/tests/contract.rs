@@ -460,6 +460,7 @@ fn the_scripted_session_announces_what_the_groups_assume() {
     // Unstated by the session: the default of ETP 1.2 section 9.2.3.
     assert_eq!(announced.deletions_kept_for, Some(86_400), "{announced:?}");
     assert!(announced.contained_objects, "{announced:?}");
+    assert!(announced.prune_contained, "{announced:?}");
 }
 
 #[test]

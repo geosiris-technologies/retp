@@ -8,6 +8,7 @@
 //! `retp_conformance::checks::run`, and the report to stdout, or to
 //! a file as Markdown or JSON.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -28,6 +29,15 @@ struct Args {
     /// The server's WebSocket URL: `wss://host[:port]/path` - or, with
     /// `--rest`, its REST API's: `https://host/api/reservoir-ddms/v2`.
     url: String,
+    /// A server of the catalogue (`retp server list`) instead of the URL and the login options.
+    /// Read before the arguments are parsed, so this field is never set. `@NAME` as the first
+    /// argument means the same. The login options are refused with it.
+    #[arg(long, short = 's', alias = "serveur", value_name = "NAME")]
+    #[allow(dead_code)]
+    server: Option<String>,
+    /// Set by the catalogue's rewrite of the command line; not for hand use.
+    #[arg(long = "catalog-entry", hide = true, value_name = "NAME")]
+    catalog_entry: Option<String>,
     /// Check OSDU's Reservoir DDMS through its REST API instead of the ETP
     /// WebSocket: the same checks where the API has a counterpart; what only
     /// the wire has (`.well-known`, acknowledgements, message headers, the
@@ -113,7 +123,7 @@ struct Args {
 }
 
 fn main() -> Result<ExitCode> {
-    let args = Args::parse();
+    let args = Args::parse_from(expanded_args()?);
     let mut report = Report {
         url: args.url.clone(),
         ..Default::default()
@@ -123,23 +133,38 @@ fn main() -> Result<ExitCode> {
     // The login is chosen as `energyml etp` chooses it (`login::Choice`), and
     // a token is asked for before anything else: a refusal there is not the
     // ETP server's, and the report says so instead of failing a check.
-    let choice = Choice {
-        token: args.token.clone(),
-        user: args.user.clone(),
-        password: args.password.clone(),
-        token_url: args.token_url.clone(),
-        azure_tenant: args.azure_tenant.clone(),
-        cognito_region: args.cognito_region.clone(),
-        client_id: args.client_id.clone(),
-        client_secret: args.client_secret.clone(),
-        oauth_scope: args.oauth_scope.clone(),
+    let resolved = match &args.catalog_entry {
+        Some(name) => Some(resolve_entry(name, &args)?),
+        None => None,
     };
-    let login = choice
-        .login(|name| std::env::var(name).ok())
-        .map_err(|why| anyhow::anyhow!("{why}"))?;
+    let login = match &resolved {
+        // A catalogue server: the ambient `ETP_*` variables are ignored.
+        Some(resolved) => resolved.login().cloned(),
+        None => {
+            let choice = Choice {
+                token: args.token.clone(),
+                user: args.user.clone(),
+                password: args.password.clone(),
+                token_url: args.token_url.clone(),
+                azure_tenant: args.azure_tenant.clone(),
+                cognito_region: args.cognito_region.clone(),
+                client_id: args.client_id.clone(),
+                client_secret: args.client_secret.clone(),
+                oauth_scope: args.oauth_scope.clone(),
+            };
+            choice
+                .login(|name| std::env::var(name).ok())
+                .map_err(|why| anyhow::anyhow!("{why}"))?
+        }
+    };
     let credentials: Option<Credentials> = match login.map(|login| login.obtain()).transpose() {
         Ok(obtained) => obtained.map(|o| o.credentials),
         Err(why) => {
+            // What a server answers may repeat what it was sent: the entry's secrets are removed.
+            let why = match &resolved {
+                Some(resolved) => resolved.redact(&why.to_string()),
+                None => why.to_string(),
+            };
             report.notes.push(format!("No token could be obtained from the authorization server, so the server itself was not reached: {why}"));
             report.findings.push(Finding {
                 id: "login.token",
@@ -147,7 +172,7 @@ fn main() -> Result<ExitCode> {
                 rule: "The credentials the server's authorization server hands out are obtained before connecting",
                 protocol: None,
                 verdict: Verdict::NotChecked,
-                said: format!("{why}"),
+                said: why,
             });
             return finish(&report, args.out.as_deref(), args.json.as_deref());
         }
@@ -665,4 +690,54 @@ fn write_reports(
         None => {}
     }
     Ok(())
+}
+
+/// The command line, with `--server NAME` or `@NAME` turned into the entry's URL and options.
+/// `retp-conformance` has one command: the URL is its first positional.
+fn expanded_args() -> Result<Vec<OsString>> {
+    use retp_catalog::{Accepts, Grammar, Reserved};
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let opened = retp_catalog::open_default();
+    let grammar = Grammar {
+        subcommands: false,
+        commands: Reserved::default(),
+        without_server: Vec::new(),
+        writing: Vec::new(),
+        default_command: String::new(),
+        create_command: String::new(),
+        accepts: Accepts {
+            as_browser: false,
+            keepalive: false,
+            at_once: false,
+            types: true,
+            offer: false,
+        },
+        // `--tls-fallback` checks the certificate first: the entry's `skip` does not turn it off.
+        excludes_insecure: vec!["--tls-fallback".to_string()],
+    };
+    Ok(retp_catalog::expand(&argv, &opened, &grammar)?.argv)
+}
+
+/// The catalogue entry `name`, its secrets read. The URL, partition and `--insecure` are the
+/// command line's (the rewrite put the entry's there, and the line wins).
+fn resolve_entry(name: &str, args: &Args) -> Result<retp_catalog::Resolved> {
+    let catalog = retp_catalog::open_default()?;
+    let found = catalog.find(name)?;
+    let overrides = retp_catalog::Overrides {
+        url: Some(args.url.clone()),
+        rest: Some(args.rest),
+        partition: args.partition.clone(),
+        insecure: args.insecure,
+        as_browser: false,
+    };
+    let resolved = found
+        .entry
+        .resolve(found.name, &retp_catalog::OsSecrets::new(), &overrides)?;
+    if !resolved.headers().is_empty() {
+        anyhow::bail!(
+            "server `{}` defines extra headers, and retp-client has no way to send them yet",
+            found.name
+        );
+    }
+    Ok(resolved)
 }

@@ -140,7 +140,7 @@ impl ServerCertVerifier for AnyCertificate {
     }
 }
 
-fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
+pub(crate) fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -325,7 +325,7 @@ fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, TransportError> {
     }))
 }
 
-fn header(value: &str) -> Result<HeaderValue, TransportError> {
+pub(crate) fn header(value: &str) -> Result<HeaderValue, TransportError> {
     HeaderValue::from_str(value).map_err(|why| TransportError::new(format!("header value: {why}")))
 }
 
@@ -467,11 +467,17 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
         Ok((_, capabilities)) => {
             let (offer, widened) = offer.widened_to(&capabilities.supported_data_objects);
             for deviation in &widened.deviations {
-                log::warn!(target: "retp_proto", "{}: {deviation}", capabilities.application_name);
+                tracing::warn!(
+                    target: "retp_proto",
+                    peer = %capabilities.application_name,
+                    "{}: {deviation}",
+                    capabilities.application_name
+                );
             }
             if !widened.added.is_empty() {
-                log::info!(
+                tracing::info!(
                     target: "retp_proto",
+                    peer = %capabilities.application_name,
                     "the server supports {} as well: asked for too",
                     widened.added.join(", ")
                 );
@@ -479,7 +485,7 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
             (offer, Fitted::Widened(widened))
         }
         Err(why) => {
-            log::info!(
+            tracing::info!(
                 target: "retp_proto",
                 "the server's data object types are not known before the session ({why}): the offer is left as it is"
             );
@@ -623,6 +629,10 @@ pub enum Remote {
     Etp(Box<Client<WebSocketTransport, SystemClock>>),
     /// The Reservoir DDMS REST API.
     Rest(Box<RestClient<UreqHttp>>),
+    /// ETP over a WebSocket, driven by a task of its own: what arrives unasked
+    /// is pushed to destinations as it arrives ([`crate::live`]).
+    #[cfg(feature = "live")]
+    Live(Box<crate::live::LiveSession>),
 }
 
 impl Remote {
@@ -640,6 +650,12 @@ impl Remote {
     pub fn ping(&mut self) -> Result<Duration, ClientError> {
         match self {
             Remote::Etp(client) => client.ping(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => {
+                let started = std::time::Instant::now();
+                live.block_on(live.client().ping())?;
+                Ok(started.elapsed())
+            }
             Remote::Rest(rest) => {
                 let started = std::time::Instant::now();
                 crate::caller::run(rest.alive())?;
@@ -652,6 +668,8 @@ impl Remote {
     pub fn health(&mut self) -> Option<Result<String, ClientError>> {
         match self {
             Remote::Etp(_) => None,
+            #[cfg(feature = "live")]
+            Remote::Live(_) => None,
             Remote::Rest(rest) => Some(crate::caller::run(rest.alive())),
         }
     }
@@ -662,7 +680,7 @@ impl Remote {
     pub fn prefetch(&mut self, uris: &[String], arrays: bool) -> Result<crate::rest::Prefetch, ClientError> {
         match self {
             Remote::Rest(rest) => crate::caller::run(rest.prefetch(uris, arrays)),
-            Remote::Etp(_) => Err(ClientError::Invalid(retp_proto::wire::EtpError::ENOTSUPPORTED.with_detail(
+            _ => Err(ClientError::Invalid(retp_proto::wire::EtpError::ENOTSUPPORTED.with_detail(
                 "a prefetch is the Reservoir DDMS REST API's own: use --rest, or ask the objects and their arrays one request at a time",
             ))),
         }
@@ -672,7 +690,8 @@ impl Remote {
     pub fn idle(&mut self, wait: Duration) -> Result<(), ClientError> {
         match self {
             Remote::Etp(client) => client.idle(wait),
-            Remote::Rest(_) => {
+            // A live session listens on its own task: waiting is only time passing.
+            _ => {
                 std::thread::sleep(wait);
                 Ok(())
             }
@@ -686,6 +705,11 @@ impl Remote {
                 client.ask_acknowledge(on);
                 Ok(())
             }
+            #[cfg(feature = "live")]
+            Remote::Live(live) => {
+                live.client().ask_acknowledge(on);
+                Ok(())
+            }
             Remote::Rest(_) if !on => Ok(()),
             Remote::Rest(_) => Err(ClientError::Invalid(
                 retp_proto::wire::EtpError::ENOTSUPPORTED
@@ -696,13 +720,20 @@ impl Remote {
 
     /// Whether requests ask for an `Acknowledge`.
     pub fn asks_acknowledge(&self) -> bool {
-        matches!(self, Remote::Etp(client) if client.asks_acknowledge())
+        match self {
+            Remote::Etp(client) => client.asks_acknowledge(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().asks_acknowledge(),
+            Remote::Rest(_) => false,
+        }
     }
 
     /// The acknowledgements heard since the last call - none over REST.
     pub fn acknowledgements(&mut self) -> Vec<crate::Acknowledged> {
         match self {
             Remote::Etp(client) => client.acknowledgements(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().acknowledgements(),
             Remote::Rest(_) => Vec::new(),
         }
     }
@@ -711,6 +742,8 @@ impl Remote {
     pub fn unsolicited(&mut self) -> Vec<retp_proto::connection::Event> {
         match self {
             Remote::Etp(client) => client.unsolicited(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().unsolicited(),
             Remote::Rest(_) => Vec::new(),
         }
     }
@@ -720,6 +753,8 @@ impl Remote {
     pub fn watermark(&self) -> Option<i64> {
         match self {
             Remote::Etp(client) => client.watermark(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().watermark(),
             Remote::Rest(_) => None,
         }
     }
@@ -733,14 +768,24 @@ impl Remote {
     ) -> Result<Vec<retp_proto::connection::Event>, ClientError> {
         match self {
             Remote::Etp(client) => client.events(protocol, wait),
+            // A live session hands over what it keeps at once: whoever wants
+            // to wait routes a destination instead.
+            #[cfg(feature = "live")]
+            Remote::Live(live) => {
+                let _ = wait;
+                Ok(live.client().events(protocol))
+            }
             Remote::Rest(_) => Ok(Vec::new()),
         }
     }
 
     /// Keep a quiet session alive; a REST client has no session.
     pub fn set_keepalive(&mut self, period: Option<Duration>) {
-        if let Remote::Etp(client) = self {
-            client.set_keepalive(period);
+        match self {
+            Remote::Etp(client) => client.set_keepalive(period),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().set_keepalive(period),
+            Remote::Rest(_) => {}
         }
     }
 
@@ -748,6 +793,8 @@ impl Remote {
     pub fn close(self, reason: &str) -> Result<(), ClientError> {
         match self {
             Remote::Etp(client) => client.close(reason),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.close(reason),
             Remote::Rest(_) => Ok(()),
         }
     }
@@ -760,6 +807,8 @@ impl crate::Caller for Remote {
     ) -> Result<Vec<retp_proto::wire::Delivery>, ClientError> {
         match self {
             Remote::Etp(client) => crate::Caller::call(client.as_mut(), request).await,
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::call(live.as_mut(), request).await,
             Remote::Rest(rest) => crate::Caller::call(rest.as_mut(), request).await,
         }
     }
@@ -770,6 +819,8 @@ impl crate::Caller for Remote {
     ) -> Vec<Result<Vec<retp_proto::wire::Delivery>, ClientError>> {
         match self {
             Remote::Etp(client) => crate::Caller::call_all(client.as_mut(), requests).await,
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::call_all(live.as_mut(), requests).await,
             Remote::Rest(rest) => crate::Caller::call_all(rest.as_mut(), requests).await,
         }
     }
@@ -777,6 +828,8 @@ impl crate::Caller for Remote {
     fn at_once(&self) -> usize {
         match self {
             Remote::Etp(client) => crate::Caller::at_once(client.as_ref()),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::at_once(live.as_ref()),
             Remote::Rest(rest) => crate::Caller::at_once(rest.as_ref()),
         }
     }
@@ -784,25 +837,35 @@ impl crate::Caller for Remote {
     async fn tell<M: EtpMessage>(&mut self, message: &M) -> Result<(), ClientError> {
         match self {
             Remote::Etp(client) => crate::Caller::tell(client.as_mut(), message).await,
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::tell(live.as_mut(), message).await,
             Remote::Rest(rest) => crate::Caller::tell(rest.as_mut(), message).await,
         }
     }
 
     fn subscribe(&mut self, protocol: i32) {
-        if let Remote::Etp(client) = self {
-            client.subscribe(protocol);
+        match self {
+            Remote::Etp(client) => client.subscribe(protocol),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().subscribe(protocol),
+            Remote::Rest(_) => {}
         }
     }
 
     fn unsubscribe(&mut self, protocol: i32) {
-        if let Remote::Etp(client) = self {
-            client.unsubscribe(protocol);
+        match self {
+            Remote::Etp(client) => client.unsubscribe(protocol),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().unsubscribe(protocol),
+            Remote::Rest(_) => {}
         }
     }
 
     async fn events(&mut self, protocol: i32) -> Result<Vec<retp_proto::connection::Event>, ClientError> {
         match self {
             Remote::Etp(client) => crate::Caller::events(client.as_mut(), protocol).await,
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::events(live.as_mut(), protocol).await,
             Remote::Rest(rest) => crate::Caller::events(rest.as_mut(), protocol).await,
         }
     }
@@ -810,6 +873,8 @@ impl crate::Caller for Remote {
     fn watermark(&self) -> Option<i64> {
         match self {
             Remote::Etp(client) => client.watermark(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().watermark(),
             Remote::Rest(_) => None,
         }
     }
@@ -817,6 +882,8 @@ impl crate::Caller for Remote {
     fn negotiated(&self) -> retp_proto::negotiate::Negotiated {
         match self {
             Remote::Etp(client) => crate::Caller::negotiated(client.as_ref()),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::negotiated(live.as_ref()),
             Remote::Rest(rest) => crate::Caller::negotiated(rest.as_ref()),
         }
     }
@@ -824,6 +891,8 @@ impl crate::Caller for Remote {
     fn tolerance(&self) -> retp_proto::wire::Tolerance {
         match self {
             Remote::Etp(client) => client.tolerance(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => crate::Caller::tolerance(live.as_ref()),
             Remote::Rest(rest) => crate::Caller::tolerance(rest.as_ref()),
         }
     }

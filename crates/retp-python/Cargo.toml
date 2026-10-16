@@ -29,7 +29,8 @@ crate-type = ["cdylib", "rlib"]
 # the EnergyML workshops are `energyml-rust`'s wheel, not this one.
 # `tests/scope.rs` reads this table and goes red if something else shows up.
 [dependencies]
-retp-client = { workspace = true }
+# `live`: a session driven by a task of its own (`Session.subscribe`).
+retp-client = { workspace = true, features = ["live"] }
 retp-proto = { workspace = true }
 retp-types = { workspace = true }
 energyml-etp-store = { workspace = true }

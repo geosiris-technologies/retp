@@ -93,7 +93,7 @@ create_exception!(
 );
 
 /// A failure of the session layer becomes the exception of its kind.
-fn failed(failure: Failure) -> PyErr {
+pub(crate) fn failed(failure: Failure) -> PyErr {
     let Failure { kind, message, code } = failure;
     let error = match kind {
         Kind::BadArgument => return PyValueError::new_err(message),
@@ -250,6 +250,23 @@ impl PySession {
     fn shared(&self) -> MutexGuard<'_, Session> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Run `f` on the live session; refused by name on any other (REST).
+    pub(crate) fn with_live<R>(
+        &self,
+        f: impl FnOnce(&retp_client::live::LiveSession) -> R,
+    ) -> Result<R, Failure> {
+        let session = self.shared();
+        match session.live() {
+            Some(live) => Ok(f(live)),
+            None => Err(Failure {
+                kind: crate::session::Kind::Unsupported,
+                message: "subscribe needs an ETP WebSocket session: the REST API sends no notifications"
+                    .to_string(),
+                code: None,
+            }),
+        }
+    }
 }
 
 #[pymethods]
@@ -276,6 +293,33 @@ impl PySession {
     /// A Ping and its Pong; the round trip in seconds.
     fn ping(&mut self, py: Python<'_>) -> PyResult<f64> {
         py.detach(|| self.session().ping()).map_err(failed)
+    }
+
+    /// Subscribe to the changes of `uri` (StoreNotification). `to` is where they go as they
+    /// arrive: a path (one JSON line each), a callable (called with a dict), or nothing - then
+    /// iterate the returned subscription. Requests go on meanwhile.
+    #[pyo3(signature = (uri, *, depth = 1, scope = "targetsOrSelf", types = None, with_data = false, to = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn subscribe(
+        slf: Py<Self>,
+        py: Python<'_>,
+        uri: &str,
+        depth: i32,
+        scope: &str,
+        types: Option<Vec<String>>,
+        with_data: bool,
+        to: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<crate::notifications::PySubscription> {
+        crate::notifications::subscribe(
+            py,
+            &slf,
+            uri,
+            depth,
+            scope,
+            types.unwrap_or_default(),
+            with_data,
+            to,
+        )
     }
 
     /// End the session. Closing twice does nothing.
@@ -529,6 +573,7 @@ fn connect(
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add_class::<PySession>()?;
+    module.add_class::<crate::notifications::PySubscription>()?;
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add("RetpError", py.get_type::<RetpError>())?;
     module.add("Unsupported", py.get_type::<Unsupported>())?;

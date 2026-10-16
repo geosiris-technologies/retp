@@ -25,12 +25,14 @@ jobs:
       - name: Refuse hand edits of generated code and of the schemas
         env:
           ACTOR: ${{ github.event.pull_request.user.login }}
-          # TODO(verify): the login of the synchronisation bot, once it exists.
-          SYNC_BOT: ${{ vars.SYNC_BOT_LOGIN || 'geosiris-sync[bot]' }}
+          # The login of the regeneration robot, a GitHub App (`<app-slug>[bot]`), set
+          # as the repository variable REGENERATION_BOT. Unset, no pull request may
+          # change generated code or the schemas: the guard fails closed.
+          SYNC_BOT: ${{ vars.REGENERATION_BOT }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "$ACTOR" = "$SYNC_BOT" ]; then
+          if [ -n "$SYNC_BOT" ] && [ "$ACTOR" = "$SYNC_BOT" ]; then
             echo "Synchronised by $SYNC_BOT: accepted."
             exit 0
           fi

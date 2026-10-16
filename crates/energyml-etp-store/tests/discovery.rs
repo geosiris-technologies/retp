@@ -35,6 +35,7 @@ use energyml_etp_store::discovery::{
     summary_from_resource,
 };
 use energyml_storage::array::ArrayLocation;
+use energyml_storage::capabilities::StoreTimes;
 use energyml_storage::context::{Context, DeletedFilter, Navigable, Scope};
 use energyml_storage::error::Error;
 use energyml_storage::graph::EdgeKind;
@@ -822,7 +823,9 @@ fn the_capabilities_are_what_the_session_agreed() {
     assert!(capabilities.several_dataspaces);
     assert!(capabilities.subarrays);
     assert!(capabilities.uninitialized_arrays);
-    assert!(capabilities.store_times);
+    // ETP 1.2 announces no capability for the store times: a client does not
+    // know, and does not guess.
+    assert_eq!(capabilities.store_times, StoreTimes::Unknown);
     assert!(capabilities.edge_kinds);
     assert!(capabilities.native_context);
     assert!(!capabilities.changes);
@@ -833,7 +836,11 @@ fn the_capabilities_are_what_the_session_agreed() {
     );
     assert!(
         capabilities.contained_objects,
-        "Store (4) agreed: containment is the server's"
+        "Discovery (3) and Store (4) agreed: the server lists and serves what it holds by value"
+    );
+    assert!(
+        capabilities.prune_contained,
+        "Store (4) agreed: pruning travels as asked"
     );
     assert_eq!(capabilities.raw_formats, [RawFormat::Xml]);
 }
@@ -849,13 +856,26 @@ fn a_protocol_not_agreed_is_a_capability_not_offered() {
     assert!(!capabilities.uninitialized_arrays);
     assert!(capabilities.raw_formats.is_empty(), "no Store, no bytes to read");
     assert!(capabilities.native_context);
+    assert!(
+        !capabilities.contained_objects,
+        "no Store: contained objects are not served"
+    );
+    assert!(!capabilities.prune_contained, "no Store: nothing is pruned");
 
     // No Discovery: nothing it carries.
     let (store, _) = session(&[4, 9], &["xml"], None, false, script());
     let capabilities = store.capabilities();
     assert!(!capabilities.native_context);
-    assert!(!capabilities.store_times);
+    assert_eq!(capabilities.store_times, StoreTimes::Unknown);
     assert!(!capabilities.edge_kinds);
+    assert!(
+        !capabilities.contained_objects,
+        "no Discovery: contained objects are not listed"
+    );
+    assert!(
+        capabilities.prune_contained,
+        "Store (4) agreed: pruning travels as asked"
+    );
     assert!(capabilities.writes);
 }
 

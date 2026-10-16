@@ -390,10 +390,9 @@ pub fn error_code_of(error: &Error) -> EtpError {
         Error::UnknownType(_) => EtpError::EDATAOBJECTTYPE_NOTSUPPORTED,
         Error::Package(_) | Error::Xml(_) | Error::Core(_) => EtpError::EINVALID_OBJECT,
         Error::Unsupported { .. } => EtpError::ENOTSUPPORTED,
-        // TODO(verify): at the next release of energyml-storage, `Error::UnstatedKind`
-        // (a request by relationship kind that met an edge whose kind nobody states)
-        // answers `ENOTSUPPORTED` here, like `Unsupported`; the published version
-        // this crate builds on has no such variant yet, so it takes the `_` arm.
+        // A request by relationship kind that met an edge whose kind nobody
+        // states is refused by name, like any other `Unsupported`.
+        Error::UnstatedKind { .. } => EtpError::ENOTSUPPORTED,
         Error::Transaction { .. } => EtpError::EINVALID_STATE,
         Error::ExternalData { reason, .. } => match reason {
             ExternalDataReason::FeatureNotEnabled { .. } => EtpError::ENOTSUPPORTED,

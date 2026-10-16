@@ -30,7 +30,7 @@
 use std::collections::HashSet;
 
 use energyml_core::identifiers::EtpUri;
-use energyml_storage::capabilities::Capabilities;
+use energyml_storage::capabilities::{Capabilities, StoreTimes};
 use energyml_storage::context::{Context, DeletedFilter, DeletedResource, Found, Scope, is_dataspace_uri};
 use energyml_storage::error::{Diagnostic, Error, Result};
 use energyml_storage::graph::Edge;
@@ -126,15 +126,21 @@ pub fn resources_request(context: &Context, include_edges: bool) -> Result<GetRe
 /// - `subarrays`, `uninitialized_arrays`: DataArray (9) agreed; ETP 1.2 13
 ///   defines `PutDataSubarrays` and `PutUninitializedDataArrays` as messages
 ///   of the protocol and states no optional message there.
-/// - `store_times`, `edge_kinds`, `native_context`: Discovery (3) agreed - the
-///   times and kinds are fields of its records and `GetResources` is the
-///   native context.
+/// - `store_times`: unknown. ETP 1.2 announces no capability for
+///   `storeCreated` and `storeLastWrite`, so a client cannot know whether the
+///   server keeps them, and does not guess: what each record states is read as
+///   it is.
+/// - `edge_kinds`, `native_context`: Discovery (3) agreed - the kinds are
+///   fields of its records and `GetResources` is the native context.
 /// - `deletions_kept_for`: the server's `ChangeRetentionPeriod` when it stated
 ///   one, its default otherwise: 86 400 s (ETP 1.2 §9.2.3, p. 192, "Default:
 ///   86,400", minimum the same), stores "MUST support retention of tombstones"
 ///   (§8.2.1). Discovery (3) agreed.
-/// - `contained_objects`: Store (4) agreed - containment is the server's to
-///   know; `prune_contained` travels as asked.
+/// - `contained_objects`: Discovery (3) **and** Store (4) agreed - the server
+///   lists the objects it holds by value in `GetResources` and serves them by
+///   `GetDataObjects`. `TODO(verify)`: which real servers list them; the
+///   capability says the session can, not that the server does.
+/// - `prune_contained`: Store (4) agreed - `prune_contained` travels as asked.
 /// - `raw_formats`: the formats agreed for the session, those storage knows
 ///   (`xml`, `json`), when Store (4) was agreed. `TODO(verify)`: which JSON
 ///   the server means by `json` (the RDDMS convention or another).
@@ -152,7 +158,7 @@ pub fn capabilities_of(negotiated: &Negotiated) -> Capabilities {
     capabilities.several_dataspaces = agreed(DATASPACE);
     capabilities.subarrays = agreed(DATA_ARRAY);
     capabilities.uninitialized_arrays = agreed(DATA_ARRAY);
-    capabilities.store_times = agreed(DISCOVERY);
+    capabilities.store_times = StoreTimes::Unknown;
     capabilities.edge_kinds = agreed(DISCOVERY);
     capabilities.native_context = agreed(DISCOVERY);
     if agreed(DISCOVERY) {
@@ -164,7 +170,8 @@ pub fn capabilities_of(negotiated: &Negotiated) -> Capabilities {
             .and_then(|seconds| u64::try_from(seconds).ok());
         capabilities.deletions_kept_for = Some(stated.unwrap_or(DEFAULT_CHANGE_RETENTION));
     }
-    capabilities.contained_objects = agreed(STORE);
+    capabilities.contained_objects = agreed(DISCOVERY) && agreed(STORE);
+    capabilities.prune_contained = agreed(STORE);
     if agreed(STORE) {
         for format in &negotiated.formats {
             if let Some(raw) = RawFormat::from_etp(format)

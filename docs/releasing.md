@@ -101,9 +101,10 @@ not yet published. Do not add a `version` to one.
 | 6 | `energyml-etp-store`, `retp-catalog` |
 | 7 | `retp-cli`, `retp-conformance` |
 
-`retp-catalog` is new in 0.3: it is marked `publish = false` in `release-plz.toml`
-until its first publication (see above), and `retp-cli` and `retp-conformance`,
-which depend on it, can be published only after it.
+`retp-catalog` is new in 0.3. Its name was reserved on crates.io with an empty
+0.0.1, published by a maintainer, so that trusted publishing could be configured
+before the first release with content; the workflow publishes it from 0.3.0 on,
+before `retp-cli` and `retp-conformance`, which depend on it.
 
 `retp-tests` is never published.
 `etptypes` is not published for now: crates.io keeps its 1.x versions for the

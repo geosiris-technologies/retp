@@ -87,11 +87,7 @@ pub fn list(rows: &[Listed]) -> String {
     }
     let width = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{:<width$}  {:<16}  {:<8}  URL",
-        "NAME", "AUTH", "SECRETS"
-    );
+    let _ = writeln!(out, "{:<width$}  {:<16}  {:<8}  URL", "NAME", "AUTH", "SECRETS");
     for row in rows {
         let mut name = row.name.clone();
         if row.is_default {

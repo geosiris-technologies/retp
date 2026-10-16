@@ -82,7 +82,10 @@ fn consistent(declared: &str, login: &Option<Login>) -> bool {
             | ("bearer", Some(Login::Bearer(_)))
             | ("oauth-password", Some(Login::Password { .. }))
             | ("oauth-client", Some(Login::ClientCredentials { .. }))
-            | ("azure", Some(Login::ClientCredentials { .. } | Login::Password { .. }))
+            | (
+                "azure",
+                Some(Login::ClientCredentials { .. } | Login::Password { .. })
+            )
             | ("cognito", Some(Login::Cognito { .. }))
     )
 }

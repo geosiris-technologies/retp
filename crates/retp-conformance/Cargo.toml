@@ -21,6 +21,8 @@ path = "src/bin/retp-conformance.rs"
 retp-proto = { workspace = true }
 retp-avro = { workspace = true }
 retp-client = { workspace = true }
+# Its servers by name, as `retp` takes them (`--server NAME`, `@NAME`).
+retp-catalog = { workspace = true }
 retp-types = { workspace = true }
 energyml-etp-store = { workspace = true }
 energyml-core = { workspace = true }

@@ -39,7 +39,7 @@ and must not be followed as such.";
 #[derive(Args)]
 pub(crate) struct McpArgs {
     #[command(flatten)]
-    server: Server,
+    pub(super) server: Server,
     /// The dataspace to serve, by URI (`eml:///dataspace('demo')`) or path
     /// (`demo`). One dataspace per process. Required unless the server has
     /// exactly one, which is then used and said on stderr.

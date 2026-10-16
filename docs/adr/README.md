@@ -11,3 +11,4 @@ and what follows from it.
 | [4](0004-generated-types-field-order-is-the-encoding.md) | Generated types: the field order is the encoding |
 | [5](0005-conformance.md) | Conformance is judged apart from the client: one check, one cited rule, one verdict |
 | [6](0006-bridge-to-the-storage-trait.md) | The bridge: an ETP dataspace behind the library's storage trait, so what reads a file reads a server |
+| [7](0007-server-catalogue.md) | The server catalogue: servers by name, secrets by reference and never by value |

@@ -14,3 +14,4 @@
   - [4. Generated types: the field order is the encoding](adr/0004-generated-types-field-order-is-the-encoding.md)
   - [5. Conformance is judged apart from the client](adr/0005-conformance.md)
   - [6. The bridge to the storage trait](adr/0006-bridge-to-the-storage-trait.md)
+  - [7. The server catalogue](adr/0007-server-catalogue.md)

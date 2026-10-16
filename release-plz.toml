@@ -32,3 +32,11 @@ name = "retp-python"
 publish = false
 release = false
 changelog_update = false
+
+# New in 0.3: not on crates.io yet. Its first publication is done once by a maintainer
+# with a short-lived token (after retp-proto and retp-client of the same version), then
+# trusted publishing is configured on crates.io and this entry is removed. retp-cli
+# depends on it: retp-cli is published after it.
+[[package]]
+name = "retp-catalog"
+publish = false

@@ -30,6 +30,8 @@ tracing-subscriber = { workspace = true, features = ["tracing-log"] }
 retp-proto = { workspace = true }
 # `live`: the shell's session, driven by a task of its own (subscriptions).
 retp-client = { workspace = true, features = ["live"] }
+# The catalogue of servers (`retp azure`, `retp server ...`).
+retp-catalog = { workspace = true }
 # The shell's line editor (feature `editor`): history, editing, what arrives
 # printed above the prompt.
 rustyline = { version = "18", optional = true }

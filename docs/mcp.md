@@ -29,7 +29,8 @@ cargo install retp-cli --features mcp
 
 It takes the options of any `retp` command that opens a session (the server's
 URL, `--partition`, `--insecure`, `--user`, `--token-url`, ...; see
-[Command line](cli.md)), plus:
+[Command line](cli.md)), or a server of the [catalogue](cli.md#server-catalogue)
+by its name (`retp mcp --server azure`), plus:
 
 | Option | Meaning |
 |---|---|

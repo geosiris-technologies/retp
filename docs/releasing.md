@@ -98,8 +98,12 @@ not yet published. Do not add a `version` to one.
 | 3 | `retp-types` |
 | 4 | `retp-proto`, `etptypes` |
 | 5 | `retp-client` |
-| 6 | `energyml-etp-store` |
+| 6 | `energyml-etp-store`, `retp-catalog` |
 | 7 | `retp-cli`, `retp-conformance` |
+
+`retp-catalog` is new in 0.3: it is marked `publish = false` in `release-plz.toml`
+until its first publication (see above), and `retp-cli` and `retp-conformance`,
+which depend on it, can be published only after it.
 
 `retp-tests` is never published.
 `etptypes` is not published for now: crates.io keeps its 1.x versions for the

@@ -84,6 +84,20 @@ The variables are `ETP_TOKEN`, `ETP_USER`, `ETP_PASSWORD` and
 `--token-url`, `--azure-tenant`, `--cognito-region`, `--oauth-scope`,
 `--partition`) are ordinary arguments.
 
+A [server catalogue](cli.md#server-catalogue) works in a container too: mount
+its folder read-only and name it with `RETP_CATALOG`. Its `server.toml` files hold
+references, never secrets; an `env:` reference is passed with `-e NAME`, a `file:`
+one is a file mounted beside it.
+
+```sh
+docker run --rm -v "$HOME/retp-servers:/servers:ro" -e RETP_CATALOG=/servers \
+    -e RETP_AZURE_TEST_SECRET $IMG azure-test dataspaces
+```
+
+A catalogue mounted read-only cannot record what `retp server test` observed, and
+the shell keeps its history in `~/.retp_history` instead of the server's `state/`;
+`server add` and `--save-as` need it writable.
+
 ## The conformance checker
 
 The image holds `retp-conformance` too. The entry point is `retp`, so name the

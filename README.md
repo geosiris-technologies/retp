@@ -23,6 +23,7 @@ decode, hold a session, talk to a server, and check one.
 | `retp-types` | the ETP v1.2 messages and data types, generated from the Avro schemas (the field order **is** the encoding) |
 | `retp-proto` | the wire and the session, for a client and a server alike; no transport |
 | `retp-client` | a client: a transport under the connection, the native WebSocket, reads and writes. Compiles to wasm without its native transport |
+| `retp-catalog` | the catalogue of servers of the `retp` command: servers by name, their secrets by reference and never by value |
 | `energyml-etp-store` | the bridge: an ETP dataspace behind energyml-rust's `EnergymlStorage`, so that code which reads a file reads a server |
 | `retp-conformance` | checks a server against what the specification makes mandatory, and writes the report a provider can act on |
 | `retp-cli` | the `retp` command |

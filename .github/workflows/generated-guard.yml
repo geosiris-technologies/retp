@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: read
+  # Which merged pull request each commit came from (the promotion of dev to main).
+  pull-requests: read
 
 jobs:
   guard:
@@ -31,6 +33,8 @@ jobs:
           SYNC_BOT: ${{ vars.REGENERATION_BOT }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           if [ -n "$SYNC_BOT" ] && [ "$ACTOR" = "$SYNC_BOT" ]; then
             echo "Synchronised by $SYNC_BOT: accepted."
@@ -54,6 +58,30 @@ jobs:
           if [ -z "$kept" ]; then
             echo "Only release metadata (changelogs, versions) changed: accepted."
             exit 0
+          fi
+          # A pull request that promotes what was already merged (dev into main)
+          # carries the bot's commits under another author. Accepted when every
+          # commit touching these files came from a merged pull request opened by
+          # the bot - asked of GitHub, never read from a commit's author line,
+          # which anyone can write. One hand commit on them, and it is refused.
+          if [ -n "$SYNC_BOT" ]; then
+            commits=$(git log --format=%H "$from..$HEAD" -- $kept)
+            from_the_bot=true
+            for c in $commits; do
+              by=$(gh api "repos/$REPO/commits/$c/pulls" \
+                --jq "[.[] | select(.merged_at != null and .user.login == \"$SYNC_BOT\")] | length" \
+                2>/dev/null || true)
+              # Anything but a count above zero - none, or an API that failed - refuses.
+              case "$by" in
+                '' | 0 | *[!0-9]*)
+                  echo "$c changes generated files and comes from no merged pull request of $SYNC_BOT"
+                  from_the_bot=false ;;
+              esac
+            done
+            if [ -n "$commits" ] && [ "$from_the_bot" = true ]; then
+              echo "Generated files changed only by commits merged from $SYNC_BOT's pull requests: accepted."
+              exit 0
+            fi
           fi
           echo "::error::crates/generated/ and rc/etp-1.2/ are not edited by hand."
           echo "Open an issue describing the problem; it is fixed in the generator"

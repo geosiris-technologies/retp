@@ -1,17 +1,11 @@
 //! What `retp.connect` refuses before any socket is opened, and what it says.
 
-use retp_python::session::{ConnectOptions, Kind, parse_scope, refuse_unless_writing};
+use retp_python::session::{ConnectOptions, Kind, Session, parse_scope, refuse_unless_writing};
 
 fn options(url: &str) -> ConnectOptions {
     ConnectOptions {
         url: url.to_string(),
-        token: None,
-        partition: None,
-        insecure: false,
-        writing: false,
-        types: Vec::new(),
-        keepalive_seconds: None,
-        at_once: None,
+        ..ConnectOptions::default()
     }
 }
 
@@ -24,12 +18,98 @@ fn a_websocket_url_is_accepted() {
 }
 
 #[test]
-fn a_rest_url_is_refused_by_name() {
+fn an_http_url_without_rest_is_refused_and_names_rest() {
     let refusal = options("https://etp.example.org/api/reservoir-ddms/v2")
         .endpoint()
-        .expect_err("REST is not bridged yet");
+        .expect_err("an HTTP URL is a REST API's");
+    assert_eq!(refusal.kind, Kind::BadArgument);
+    assert!(refusal.message.contains("rest=True"), "{}", refusal.message);
+}
+
+#[test]
+fn a_rest_url_with_rest_is_accepted() {
+    let mut given = options("https://etp.example.org/api/reservoir-ddms/v2");
+    given.rest = true;
+    given.partition = Some("opendes".to_string());
+    let (endpoint, warnings) = given.endpoint().expect("accepted");
+    assert_eq!(endpoint.url, "https://etp.example.org/api/reservoir-ddms/v2");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn rest_refuses_a_websocket_url_and_what_only_a_session_has() {
+    let mut websocket = options("wss://etp.example.org/");
+    websocket.rest = true;
+    let refusal = websocket.endpoint().expect_err("a WebSocket's URL");
+    assert_eq!(refusal.kind, Kind::BadArgument);
+    assert!(refusal.message.contains("REST API's URL"), "{}", refusal.message);
+
+    let mut keepalive = options("https://etp.example.org/api/reservoir-ddms/v2");
+    keepalive.rest = true;
+    keepalive.keepalive_seconds = Some(30);
+    let refusal = keepalive.endpoint().expect_err("no session to keep alive");
+    assert!(refusal.message.contains("keepalive"), "{}", refusal.message);
+
+    let mut types = options("https://etp.example.org/api/reservoir-ddms/v2");
+    types.rest = true;
+    types.types = vec!["resqml20.*".to_string()];
+    let refusal = types.endpoint().expect_err("no session to negotiate");
+    assert!(refusal.message.contains("types"), "{}", refusal.message);
+}
+
+#[test]
+fn a_rest_session_opens_without_a_network_and_refuses_what_rest_does_not_do() {
+    // The REST client opens nothing: each request goes on its own.
+    let mut given = options("https://etp.example.org/api/reservoir-ddms/v2");
+    given.rest = true;
+    let mut session = Session::open(given).expect("nothing to open");
+    assert!(session.live().is_none(), "a REST session is not a live one");
+    let refusal = session
+        .delete_dataspaces(&["demo".to_string()])
+        .expect_err("read-only");
     assert_eq!(refusal.kind, Kind::Unsupported);
-    assert!(refusal.message.contains("REST"), "{}", refusal.message);
+    assert!(refusal.message.contains("writing=True"), "{}", refusal.message);
+    session.close().expect("closes");
+}
+
+#[test]
+fn a_user_and_a_password_are_http_basic() {
+    let mut given = options("wss://etp.example.org/");
+    given.login.user = Some("someone".to_string());
+    given.login.password = Some("pa55word".to_string());
+    let (endpoint, _) = given.endpoint().expect("accepted");
+    let credentials = endpoint.credentials.expect("credentials");
+    assert_eq!(credentials.scheme(), "Basic");
+    assert!(!format!("{credentials:?}").contains("pa55word"));
+}
+
+#[test]
+fn a_token_comes_before_any_other_login() {
+    let mut given = options("wss://etp.example.org/");
+    given.token = Some("abc.DEF".to_string());
+    given.login.user = Some("someone".to_string());
+    let (endpoint, _) = given.endpoint().expect("accepted");
+    assert_eq!(endpoint.credentials.expect("credentials").scheme(), "Bearer");
+}
+
+#[test]
+fn a_login_that_lacks_a_part_is_refused_before_any_request() {
+    let mut no_password = options("wss://etp.example.org/");
+    no_password.login.user = Some("someone".to_string());
+    let refusal = no_password.endpoint().expect_err("no password");
+    assert_eq!(refusal.kind, Kind::BadArgument);
+    assert!(refusal.message.contains("password"), "{}", refusal.message);
+
+    // The region is checked before Cognito is asked anything.
+    let mut cognito = options("wss://etp.example.org/");
+    cognito.login.cognito_region = Some("Not A Region".to_string());
+    cognito.login.client_id = Some("client".to_string());
+    cognito.login.user = Some("someone".to_string());
+    cognito.login.password = Some("pa55word".to_string());
+    let refusal = cognito.endpoint().expect_err("not a region");
+    assert_eq!(refusal.kind, Kind::BadArgument);
+    assert!(refusal.message.contains("AWS region"), "{}", refusal.message);
+    assert!(!refusal.message.contains("pa55word"), "{}", refusal.message);
 }
 
 #[test]

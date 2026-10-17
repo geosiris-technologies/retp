@@ -19,6 +19,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use retp_client::Transaction;
 use retp_client::arrays::Decoded;
+use retp_client::login::Choice;
 use retp_client::notifications::uuid_text;
 
 use crate::session::{
@@ -833,9 +834,16 @@ fn pushed(py: Python<'_>, report: PushReport) -> PyResult<Bound<'_, PyDict>> {
 ///
 /// `token` is an OAuth 2.0 bearer token, without its scheme. It is handed to
 /// the Rust client and kept nowhere else: not in `repr`, not in `url`, not in
-/// an exception message.
+/// an exception message. Without a token, the other logins of the command
+/// line: `user` and `password` (HTTP Basic, or the password grant at
+/// `token_url` or Azure AD's `azure_tenant`), `client_id` and `client_secret`
+/// (client credentials at a token endpoint), `cognito_region` (AWS Cognito,
+/// with a user, a password and a client id). No environment variable is read.
+///
+/// `rest=True` talks to the Reservoir DDMS REST API at `url`
+/// (`https://.../api/reservoir-ddms/v2`) instead of an ETP WebSocket.
 #[pyfunction]
-#[pyo3(signature = (url, token = None, *, partition = None, insecure = false, writing = false, types = None, keepalive = None, at_once = None))]
+#[pyo3(signature = (url, token = None, *, partition = None, insecure = false, writing = false, types = None, keepalive = None, at_once = None, rest = false, user = None, password = None, token_url = None, azure_tenant = None, cognito_region = None, client_id = None, client_secret = None, oauth_scope = None))]
 #[allow(clippy::too_many_arguments)]
 fn connect(
     py: Python<'_>,
@@ -847,10 +855,31 @@ fn connect(
     types: Option<Vec<String>>,
     keepalive: Option<u64>,
     at_once: Option<usize>,
+    rest: bool,
+    user: Option<String>,
+    password: Option<String>,
+    token_url: Option<String>,
+    azure_tenant: Option<String>,
+    cognito_region: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    oauth_scope: Option<String>,
 ) -> PyResult<PySession> {
     let options = ConnectOptions {
         url,
         token,
+        login: Choice {
+            token: None,
+            user,
+            password,
+            token_url,
+            azure_tenant,
+            cognito_region,
+            client_id,
+            client_secret,
+            oauth_scope,
+        },
+        rest,
         partition,
         insecure,
         writing,

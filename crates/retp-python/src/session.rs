@@ -47,6 +47,7 @@ use energyml_storage::storage::EnergymlStorage;
 use retp_avro::Avro;
 use retp_client::arrays::{Array, ArrayFailure, Block, Decoded, array_metadata, read_arrays, read_regions};
 use retp_client::channels::{channel_metadata, get_ranges};
+use retp_client::login::{Choice, LoginError};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
 use retp_client::{
     Blocking, ClientError, Ended, Opened, ResourceQuery, ServerProfile, Transaction, blocking,
@@ -205,12 +206,24 @@ impl From<ArrayFailure> for Failure {
 /// **The token is consumed by [`ConnectOptions::endpoint`]**, which turns it
 /// into `retp_proto::credentials::Credentials` (whose `Debug` hides the
 /// secret) and keeps nothing else. There is deliberately no `Debug` here, and
-/// [`Session`] holds no copy of it.
+/// [`Session`] holds no copy of it. The same holds for every secret of
+/// [`ConnectOptions::login`].
+#[derive(Default)]
 pub struct ConnectOptions {
-    /// `ws://` or `wss://` URL of the ETP endpoint.
+    /// `ws://` or `wss://` URL of the ETP endpoint; with [`ConnectOptions::rest`],
+    /// the `http(s)://` URL of the Reservoir DDMS REST API.
     pub url: String,
     /// An OAuth 2.0 bearer token, without its scheme.
     pub token: Option<String>,
+    /// Another way in than a token in hand - HTTP Basic, an OAuth 2.0 token
+    /// endpoint (password or client credentials, Azure AD's included), AWS
+    /// Cognito: `retp_client::login::Choice`, the command line's own, which
+    /// decides which login the fields given ask for. Its `token` is replaced by
+    /// [`ConnectOptions::token`].
+    pub login: Choice,
+    /// Talk to the Reservoir DDMS REST API instead of an ETP WebSocket: the
+    /// command line's `--rest`, and `native::rest_client`.
+    pub rest: bool,
     /// An OSDU data partition: talks to the server as OSDU's Reservoir DDMS.
     pub partition: Option<String>,
     /// Do not check the server's certificate. Said in [`Session::warnings`].
@@ -226,32 +239,22 @@ pub struct ConnectOptions {
 }
 
 impl ConnectOptions {
-    /// The URL, validated, the token turned into credentials, and the
+    /// The URL, validated, the login turned into credentials, and the
     /// warnings the library has about the connection.
     ///
-    /// Pure: opens nothing, so every refusal here is tested without a server.
+    /// Opens no session, so every refusal here is tested without a server. A
+    /// token in hand or HTTP Basic needs no network either; a login at a token
+    /// endpoint or at Cognito makes its one request here
+    /// (`retp_client::login::Login::obtain`), after every check that needs
+    /// none.
     pub fn endpoint(self) -> Result<(Endpoint, Vec<String>), Failure> {
-        if !(self.url.starts_with("ws://") || self.url.starts_with("wss://")) {
-            // The CLI can also go through the Reservoir DDMS REST API
-            // (`--rest`); this first scope binds the WebSocket only.
-            return Err(Failure::unsupported(format!(
-                "{}: this bridge connects to an ETP WebSocket (ws:// or wss://); the Reservoir DDMS REST API is not bridged yet",
-                self.url
-            )));
-        }
+        self.check_transport()?;
         if self.at_once == Some(0) {
             return Err(Failure::bad_argument(
                 "at_once must be at least 1 (1 sends the requests one after the other)",
             ));
         }
-        let credentials = match &self.token {
-            Some(token) => Some(
-                Credentials::bearer(token)
-                    // The refusal names the rule, never the token.
-                    .map_err(|why| Failure::bad_argument(format!("the token is refused: {}", why.0)))?,
-            ),
-            None => None,
-        };
+        let credentials = self.credentials()?;
         let certificates = if self.insecure {
             CertificateCheck::Skip
         } else {
@@ -276,6 +279,73 @@ impl ConnectOptions {
             warnings,
         ))
     }
+
+    /// The URL matches the transport asked for, and nothing is given that the
+    /// transport has no use for - the command line's checks (`retp-cli`'s
+    /// `Server::open_rest`), refused by name rather than ignored.
+    fn check_transport(&self) -> Result<(), Failure> {
+        let url = &self.url;
+        let websocket = url.starts_with("ws://") || url.starts_with("wss://");
+        let http = url.starts_with("http://") || url.starts_with("https://");
+        match (self.rest, websocket, http) {
+            (false, true, _) => Ok(()),
+            (false, _, true) => Err(Failure::bad_argument(format!(
+                "{url} is an HTTP URL: pass rest=True to talk to the Reservoir DDMS REST API, \
+                 or give the ETP WebSocket's ws:// or wss:// URL"
+            ))),
+            (false, _, _) => Err(Failure::bad_argument(format!(
+                "{url}: an ETP WebSocket URL is ws:// or wss:// (with rest=True, the REST API's http:// or https://)"
+            ))),
+            (true, _, true) => {
+                for (name, given) in [
+                    ("keepalive", self.keepalive_seconds.is_some()),
+                    ("types", !self.types.is_empty()),
+                ] {
+                    if given {
+                        return Err(Failure::bad_argument(format!(
+                            "{name} means nothing over REST: there is no session to negotiate or keep alive"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            (true, _, _) => Err(Failure::bad_argument(format!(
+                "{url}: rest=True takes the REST API's URL (https://.../api/reservoir-ddms/v2), not a WebSocket's"
+            ))),
+        }
+    }
+
+    /// The credentials the login gives: `Choice::login` decides which login
+    /// the fields ask for, in the command line's order (a token first), and
+    /// `Login::obtain` makes them.
+    ///
+    /// **No environment variable is read**: `Choice::login` takes a lookup,
+    /// and the bridge gives it none, so that what a session logs in with is
+    /// what the Python call says (a caller passes what `os.environ` holds).
+    fn credentials(&self) -> Result<Option<Credentials>, Failure> {
+        let mut choice = self.login.clone();
+        choice.token = self.token.clone();
+        let Some(login) = choice.login(|_| None).map_err(login_failure)? else {
+            return Ok(None);
+        };
+        Ok(Some(login.obtain().map_err(login_failure)?.credentials))
+    }
+}
+
+/// Why no credentials came out, as the failure a caller acts on. The
+/// library's words are kept; none of them carries a secret.
+fn login_failure(error: LoginError) -> Failure {
+    let kind = match &error {
+        // What was given cannot make credentials: fix the call.
+        LoginError::Invalid(_) => Kind::BadArgument,
+        // The authorization server could not be reached: no session.
+        LoginError::Http(_) => Kind::SessionRefused,
+        // It answered no: log in again, with other credentials.
+        LoginError::Refused { .. } => Kind::AuthorizationNeeded,
+        // A step this client does not take (a new password, a second factor).
+        LoginError::Challenge { .. } => Kind::Unsupported,
+    };
+    Failure::new(kind, format!("the login failed: {error}"))
 }
 
 /// Which way from a URI in Discovery's graph: the five names of the ETP
@@ -504,15 +574,33 @@ impl Session {
     /// Open a session: the CLI's own steps (`retp-cli`'s `Server::open_for`) -
     /// an offer (`reading_client` / `writing_client`), fitted to what the
     /// server announces when no type was named, then `native::connect`.
+    ///
+    /// With `rest`, the REST client instead (`native::rest_client`, as the
+    /// command line's `open_rest`): nothing is opened, each request goes on
+    /// its own.
     pub fn open(options: ConnectOptions) -> Result<Self, Failure> {
-        let (types, keepalive, at_once, writing) = (
+        let (types, keepalive, at_once, writing, rest) = (
             options.types.clone(),
             options.keepalive_seconds,
             options.at_once,
             options.writing,
+            options.rest,
         );
         let url = options.url.clone();
         let (endpoint, warnings) = options.endpoint()?;
+        if rest {
+            let mut client = native::rest_client(&endpoint);
+            if let Some(at_once) = at_once {
+                client = client.with_at_once(at_once);
+            }
+            return Ok(Session {
+                remote: Some(Remote::Rest(Box::new(client))),
+                registry: Arc::new(energyml_schemas::all()),
+                url,
+                writing,
+                warnings,
+            });
+        }
         let (name, version, id) = (APPLICATION_NAME, env!("CARGO_PKG_VERSION"), native::random_uuid());
         let (offer, handlers) = if writing {
             writing_client(name, version, id, &types)

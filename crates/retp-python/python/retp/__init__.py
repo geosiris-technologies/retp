@@ -29,7 +29,7 @@ from .errors import (
     TimedOut,
     Unsupported,
 )
-from .session import Session
+from .session import Session, Transaction
 
 __all__ = [
     "AnswerRefused",
@@ -44,6 +44,7 @@ __all__ = [
     "Session",
     "SessionRefused",
     "TimedOut",
+    "Transaction",
     "Unsupported",
     "connect",
 ]

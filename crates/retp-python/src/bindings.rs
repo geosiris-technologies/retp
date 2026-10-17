@@ -4,22 +4,26 @@
 //! `maturin develop`: `cargo test` never runs it, which is exactly why it
 //! decides nothing. Everything that can be wrong lives in [`crate::session`].
 //!
-//! TODO(verify): this file has never been compiled. The pyo3/numpy 0.29 calls
-//! follow `energyml-python`'s `bindings.rs` (`detach`, `Bound`, `into_pyarray`);
-//! the first build will say which one drifted.
+//! The pyo3/numpy 0.29 calls follow `energyml-python`'s `bindings.rs`
+//! (`detach`, `Bound`, `into_pyarray`). `scripts/wheel-smoke.py` calls into
+//! this file through an installed wheel, with no server.
 
 use numpy::IntoPyArray;
 use std::sync::{Mutex, MutexGuard};
 
+use energyml_etp_store::pack::{Packed, Wanted};
+use energyml_storage::array::ArrayValues as StoredValues;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
+use retp_client::Transaction;
 use retp_client::arrays::Decoded;
+use retp_client::notifications::uuid_text;
 
 use crate::session::{
-    ArrayInfos, ArrayRead, ConnectOptions, DataspaceRow, Failure, Kind, Objects, PushReport, Resources,
-    Session,
+    ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, DataspaceRow, Failure, Kind, Objects, Outcomes,
+    PushReport, Resources, Session, SupportedTypeRow,
 };
 
 // The exception tree. One class per thing a caller does differently (see
@@ -220,6 +224,119 @@ fn values_into_py(py: Python<'_>, values: Decoded) -> PyResult<Py<PyAny>> {
             ));
         }
     })
+}
+
+/// `{uri: failure}` for the URIs of a plural call that did not go through.
+fn errors_into_py<'py>(py: Python<'py>, failed: &[(String, Failure)]) -> PyResult<Bound<'py, PyDict>> {
+    let errors = PyDict::new(py);
+    for (uri, failure) in failed {
+        errors.set_item(uri, failure_into_py(py, failure)?)?;
+    }
+    Ok(errors)
+}
+
+/// `([uri, ...], errors)`: the URIs the store took, in the order asked.
+fn taken_into_py<'py>(
+    py: Python<'py>,
+    outcomes: &Outcomes<String>,
+) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+    let done = outcomes.done.iter().map(|(uri, _)| uri.clone()).collect();
+    Ok((done, errors_into_py(py, &outcomes.failed)?))
+}
+
+fn supported_type_into_py<'py>(py: Python<'py>, one: &SupportedTypeRow) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("data_object_type", &one.data_object_type)?;
+    out.set_item("object_count", one.object_count)?;
+    out.set_item("relationship_kind", &one.relationship_kind)?;
+    Ok(out)
+}
+
+/// A stored array's values into numpy, flat, by copy - as [`values_into_py`].
+fn stored_values_into_py(py: Python<'_>, values: StoredValues) -> PyResult<Py<PyAny>> {
+    Ok(match values {
+        StoredValues::F64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::F32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I16(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I8(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U16(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U8(v) => v.into_pyarray(py).into_any().unbind(),
+        // `ArrayValues` is `#[non_exhaustive]`: a kind of values a later
+        // `energyml-storage` adds is refused by name, not dropped.
+        other => {
+            return Err(Unsupported::new_err(format!(
+                "{} arrays do not cross as numpy arrays in this bridge yet",
+                other.element_type()
+            )));
+        }
+    })
+}
+
+/// A packed dataspace: `{"epc": bytes, "objects", "arrays": [...], "left_out",
+/// "taken"}`.
+fn packed_into_py(py: Python<'_>, packed: Packed) -> PyResult<Bound<'_, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("epc", PyBytes::new(py, &packed.epc))?;
+    out.set_item("objects", packed.objects)?;
+    let arrays = PyList::empty(py);
+    for array in packed.arrays {
+        let row = PyDict::new(py);
+        row.set_item("file", &array.file)?;
+        row.set_item("path", &array.path)?;
+        row.set_item("dimensions", &array.dimensions)?;
+        row.set_item("values", stored_values_into_py(py, array.values)?)?;
+        arrays.append(row)?;
+    }
+    out.set_item("arrays", arrays)?;
+    out.set_item("left_out", &packed.left_out)?;
+    let taken = PyDict::new(py);
+    for (uri, when) in &packed.taken {
+        taken.set_item(uri, when)?;
+    }
+    out.set_item("taken", taken)?;
+    Ok(out)
+}
+
+/// A transaction a store opened (`Session.start_transaction`). Hand it back to
+/// `Session.commit_transaction` or `Session.rollback_transaction`: nothing
+/// else ends it, and nothing ends it on its own.
+#[pyclass(name = "Transaction", frozen)]
+pub struct PyTransaction {
+    inner: Transaction,
+}
+
+#[pymethods]
+impl PyTransaction {
+    /// The uuid the store gave it, as text.
+    #[getter]
+    fn uuid(&self) -> String {
+        uuid_text(&self.inner.uuid)
+    }
+
+    /// The dataspace URIs it spans.
+    #[getter]
+    fn dataspaces(&self) -> Vec<String> {
+        self.inner.dataspaces.clone()
+    }
+
+    /// Whether it only reads.
+    #[getter]
+    fn read_only(&self) -> bool {
+        self.inner.read_only
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Transaction(uuid={}, dataspaces={:?}, read_only={})",
+            uuid_text(&self.inner.uuid),
+            self.inner.dataspaces,
+            self.inner.read_only
+        )
+    }
 }
 
 /// An open session with an ETP server.
@@ -501,6 +618,189 @@ impl PySession {
         Ok((values_into_py(py, values)?, dimensions))
     }
 
+    /// Delete objects by URI: `(deleted, errors)`. `deleted` maps each URI
+    /// the store deleted to the list of URIs it says it deleted with it
+    /// (contained objects included); `errors` maps a URI it did not delete to
+    /// `{"kind", "code", "message"}`. `prune_contained` asks the store to drop
+    /// the contained objects the deletion would orphan. Needs a session opened
+    /// with `writing=True`.
+    #[pyo3(signature = (uris, *, prune_contained = false))]
+    fn delete_objects<'py>(
+        &mut self,
+        py: Python<'py>,
+        uris: Vec<String>,
+        prune_contained: bool,
+    ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+        let outcomes = py
+            .detach(|| self.session().delete_objects(&uris, prune_contained))
+            .map_err(failed)?;
+        let deleted = PyDict::new(py);
+        for (uri, with_it) in &outcomes.done {
+            deleted.set_item(uri, with_it)?;
+        }
+        Ok((deleted, errors_into_py(py, &outcomes.failed)?))
+    }
+
+    /// Create or replace dataspaces, each given by its path (`demo`) or URI:
+    /// `(created, errors)`, `created` the URIs the store took, in the order
+    /// given. `custom_data` goes with each, every value as the command line's
+    /// `--custom KEY=VALUE` reads it: `"a,b"` is a list of strings, any other
+    /// text one string (an OSDU store reads its ACLs and legal tags there).
+    /// Needs a session opened with `writing=True`.
+    #[pyo3(signature = (dataspaces, *, custom_data = None))]
+    fn put_dataspaces<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspaces: Vec<String>,
+        custom_data: Option<std::collections::BTreeMap<String, String>>,
+    ) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+        let custom: Vec<(String, String)> = custom_data.unwrap_or_default().into_iter().collect();
+        let outcomes = py
+            .detach(|| self.session().put_dataspaces(&dataspaces, &custom))
+            .map_err(failed)?;
+        taken_into_py(py, &outcomes)
+    }
+
+    /// Delete dataspaces, each given by its path or URI: `(deleted, errors)`,
+    /// in the order given. Needs a session opened with `writing=True`.
+    fn delete_dataspaces<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspaces: Vec<String>,
+    ) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+        let outcomes = py
+            .detach(|| self.session().delete_dataspaces(&dataspaces))
+            .map_err(failed)?;
+        taken_into_py(py, &outcomes)
+    }
+
+    /// Open a transaction over dataspaces (paths or URIs; none means the
+    /// store's default). Returns a `Transaction`, ended only by
+    /// `commit_transaction` or `rollback_transaction`. A store that refuses
+    /// raises `ServerError`; a store without transactions raises
+    /// `Unsupported`. Needs a session opened with `writing=True`.
+    #[pyo3(signature = (dataspaces = None, *, read_only = false, message = ""))]
+    fn start_transaction(
+        &mut self,
+        py: Python<'_>,
+        dataspaces: Option<Vec<String>>,
+        read_only: bool,
+        message: &str,
+    ) -> PyResult<PyTransaction> {
+        let dataspaces = dataspaces.unwrap_or_default();
+        let inner = py
+            .detach(|| self.session().start_transaction(&dataspaces, read_only, message))
+            .map_err(failed)?;
+        Ok(PyTransaction { inner })
+    }
+
+    /// Commit a transaction: everything written in it becomes visible, or
+    /// none of it. A refusal raises `ServerError`, and then the writes are not
+    /// in the store; a connection lost meanwhile raises `OutcomeUnknown`.
+    fn commit_transaction(&mut self, py: Python<'_>, transaction: PyRef<'_, PyTransaction>) -> PyResult<()> {
+        let transaction = transaction.inner.clone();
+        py.detach(|| self.session().commit_transaction(&transaction))
+            .map_err(failed)
+    }
+
+    /// Roll a transaction back: nothing written in it stays. A refusal raises
+    /// `ServerError`, and then its writes may still be there.
+    fn rollback_transaction(
+        &mut self,
+        py: Python<'_>,
+        transaction: PyRef<'_, PyTransaction>,
+    ) -> PyResult<()> {
+        let transaction = transaction.inner.clone();
+        py.detach(|| self.session().rollback_transaction(&transaction))
+            .map_err(failed)
+    }
+
+    /// The data object types under a dataspace (a path or a URI) or an
+    /// object, as dictionaries: `data_object_type`, `object_count` (when
+    /// `count`), `relationship_kind`. `scope` is `targets` or `sources`;
+    /// `empty` also lists the types the store supports and holds none of.
+    #[pyo3(signature = (dataspace = "", *, scope = "targets", count = false, empty = false))]
+    fn supported_types<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspace: &str,
+        scope: &str,
+        count: bool,
+        empty: bool,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py
+            .detach(|| self.session().supported_types(dataspace, scope, count, empty))
+            .map_err(failed)?;
+        rows.iter().map(|one| supported_type_into_py(py, one)).collect()
+    }
+
+    /// The channels at these URIs (a log, a channel set, a channel):
+    /// `(found, errors)`. `found` maps a URI to its `ChannelMetadataRecord`,
+    /// a dictionary in the ETP Avro JSON encoding (`id`, `channelName`,
+    /// `uom`, `indexes`...); the `id` is what a range asks for.
+    fn channel_metadata<'py>(
+        &mut self,
+        py: Python<'py>,
+        uris: Vec<String>,
+    ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+        let ChannelRecords { found, failed: bad } = py
+            .detach(|| self.session().channel_metadata(&uris))
+            .map_err(failed)?;
+        let records = PyDict::new(py);
+        for (uri, json) in &found {
+            records.set_item(uri, loads(py, json)?)?;
+        }
+        Ok((records, errors_into_py(py, &bad)?))
+    }
+
+    /// Channel values over index intervals: each range a dictionary (or its
+    /// JSON text) in the ETP Avro JSON encoding of `ChannelRangeInfo`
+    /// (`channelIds`, `interval`, `secondaryIntervals`); the answer a list of
+    /// `DataItem` dictionaries in the same encoding. A refusal raises
+    /// `ServerError`.
+    fn get_ranges<'py>(
+        &mut self,
+        py: Python<'py>,
+        ranges: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let texts = ranges
+            .iter()
+            .map(|one| dumps(py, one))
+            .collect::<PyResult<Vec<_>>>()?;
+        let items = py.detach(|| self.session().get_ranges(&texts)).map_err(failed)?;
+        items.iter().map(|json| loads(py, json)).collect()
+    }
+
+    /// A dataspace (a path or a URI) as an EPC, in memory: `{"epc": bytes,
+    /// "objects", "arrays", "left_out", "taken"}`. `arrays` lists the arrays
+    /// the objects name, each `{"file", "path", "dimensions", "values"}`
+    /// (`values` a flat numpy array), for the caller to write into the HDF5
+    /// file the package names; `left_out` says what could not be taken;
+    /// `taken` maps each listed URI to its `storeLastWrite`. `types` and
+    /// `uris` narrow what is taken; `references` also takes what the kept
+    /// objects reference, while the dataspace holds it.
+    #[pyo3(signature = (dataspace = "", *, types = None, uris = None, arrays = true, references = false))]
+    fn download_epc<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspace: &str,
+        types: Option<Vec<String>>,
+        uris: Option<Vec<String>>,
+        arrays: bool,
+        references: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let wanted = Wanted {
+            types: types.unwrap_or_default(),
+            uris: uris.unwrap_or_default(),
+            arrays,
+            references,
+        };
+        let packed = py
+            .detach(|| self.session().download_epc(dataspace, &wanted))
+            .map_err(failed)?;
+        packed_into_py(py, packed)
+    }
+
     fn __repr__(&self) -> String {
         {
             let session = self.shared();
@@ -574,6 +874,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add_class::<PySession>()?;
     module.add_class::<crate::notifications::PySubscription>()?;
+    module.add_class::<PyTransaction>()?;
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add("RetpError", py.get_type::<RetpError>())?;
     module.add("Unsupported", py.get_type::<Unsupported>())?;

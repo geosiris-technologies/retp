@@ -21,26 +21,45 @@
 //! runs it on the blocking `Client` through `retp_client::blocking`. Python
 //! calls are synchronous, so the bridge uses exactly that: no runtime, no
 //! thread of its own, and the GIL is released around each call by the binding.
+//!
+//! # Operations on any blocking client
+//!
+//! The operations added after the first scope (deleting, dataspaces,
+//! transactions, supported types, channels, packing a dataspace) are free
+//! functions over any [`Blocking`] client, and the [`Session`] method of the
+//! same name calls them on its remote. The suite runs the same functions on a
+//! client whose other end is a server connection in memory
+//! (`retp_client::memory`), so what the bridge makes of an answer is tested
+//! without a socket.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use energyml_core::identifiers::EtpUri;
 use energyml_core::registry::{ReadMode, Registry};
+use energyml_etp_store::pack::{Packed, Wanted, pack};
 use energyml_etp_store::push::{Options, Stop, push};
 use energyml_etp_store::{DEFAULT_MESSAGE, read_object};
 use energyml_storage::EpcStore;
 use energyml_storage::storage::EnergymlStorage;
+use retp_avro::Avro;
 use retp_client::arrays::{Array, ArrayFailure, Block, Decoded, array_metadata, read_arrays, read_regions};
+use retp_client::channels::{channel_metadata, get_ranges};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
 use retp_client::{
-    ClientError, ResourceQuery, ServerProfile, blocking, dataspace_uri, get_data_objects, list_dataspaces,
-    list_resources, plain_text_warning, reading_client, writing_client,
+    Blocking, ClientError, Ended, Opened, ResourceQuery, ServerProfile, Transaction, blocking,
+    commit_transaction, custom_data_value, dataspace_uri, delete_data_objects, delete_dataspaces,
+    get_data_objects, list_dataspaces, list_resources, list_supported_types, plain_text_warning,
+    put_dataspaces, reading_client, rollback_transaction, start_transaction, writing_client,
 };
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
+use retp_types::datatypes::ErrorInfo;
+use retp_types::datatypes::channel_data::ChannelRangeInfo;
 use retp_types::datatypes::data_array_types::DataArrayIdentifier;
-use retp_types::datatypes::object::ContextScopeKind;
+use retp_types::datatypes::object::{ContextScopeKind, Dataspace};
 
 /// The name this client announces in `RequestSession`.
 pub const APPLICATION_NAME: &str = "retp-python";
@@ -127,6 +146,18 @@ impl Failure {
             message: message.into(),
             code: Some(code),
         }
+    }
+
+    /// The error a server sent for one item of a plural request.
+    fn of_error(error: ErrorInfo) -> Self {
+        Failure::server(error.code, error.message)
+    }
+
+    /// A store's "no" that carries a reason and no error code (a refused
+    /// transaction, a refused commit): a server answer, so `Kind::Server`,
+    /// without a code.
+    fn said_no(message: impl Into<String>) -> Self {
+        Failure::new(Kind::Server, message)
     }
 }
 
@@ -696,8 +727,8 @@ impl Session {
         Ok(out)
     }
 
-    fn require_writing(&self) -> Result<(), Failure> {
-        refuse_unless_writing(self.writing)
+    fn require_writing(&self, what: &str) -> Result<(), Failure> {
+        refuse_unless_writing(self.writing, what)
     }
 
     /// Put objects, given as EnergyML JSON texts (each with its `$type`), into
@@ -715,7 +746,7 @@ impl Session {
     /// Objects carrying `_data` (referenced objects expanded in place) are
     /// refused: which of the two a caller means is not ours to guess.
     pub fn put_objects(&mut self, dataspace: &str, jsons: &[String]) -> Result<PushReport, Failure> {
-        self.require_writing()?;
+        self.require_writing("put objects")?;
         let store = stage(&self.registry, jsons)?;
         self.push_store(&store, dataspace)
     }
@@ -726,7 +757,7 @@ impl Session {
     /// The arrays travel too, and reading them needs the `hdf5` feature of this
     /// build: without it the storage layer refuses an array by name.
     pub fn push_epc(&mut self, path: &str, dataspace: &str) -> Result<PushReport, Failure> {
-        self.require_writing()?;
+        self.require_writing("push a package")?;
         let store = EpcStore::open(path, self.registry.clone())
             .map_err(|why| Failure::local(format!("cannot open {path}: {why}")))?;
         self.push_store(&store, dataspace)
@@ -822,6 +853,85 @@ impl Session {
             values,
         })
     }
+
+    /// [`delete_objects`] on this session; it writes, so needs `writing`.
+    pub fn delete_objects(
+        &mut self,
+        uris: &[String],
+        prune_contained: bool,
+    ) -> Result<Outcomes<Vec<String>>, Failure> {
+        self.require_writing("delete objects")?;
+        delete_objects(self.remote()?, uris, prune_contained)
+    }
+
+    /// [`create_dataspaces`] on this session; it writes, so needs `writing`.
+    pub fn put_dataspaces(
+        &mut self,
+        dataspaces: &[String],
+        custom_data: &[(String, String)],
+    ) -> Result<Outcomes<String>, Failure> {
+        self.require_writing("create dataspaces")?;
+        create_dataspaces(self.remote()?, dataspaces, custom_data)
+    }
+
+    /// [`remove_dataspaces`] on this session; it writes, so needs `writing`.
+    pub fn delete_dataspaces(&mut self, dataspaces: &[String]) -> Result<Outcomes<String>, Failure> {
+        self.require_writing("delete dataspaces")?;
+        remove_dataspaces(self.remote()?, dataspaces)
+    }
+
+    /// [`open_transaction`] on this session. The Transaction protocol is only
+    /// announced by a session that writes (`writing_client`), so a read-only
+    /// session refuses by name, even for a read-only transaction.
+    pub fn start_transaction(
+        &mut self,
+        dataspaces: &[String],
+        read_only: bool,
+        message: &str,
+    ) -> Result<Transaction, Failure> {
+        self.require_writing("open a transaction")?;
+        open_transaction(self.remote()?, dataspaces, read_only, message)
+    }
+
+    /// [`commit`] on this session.
+    pub fn commit_transaction(&mut self, transaction: &Transaction) -> Result<(), Failure> {
+        self.require_writing("commit a transaction")?;
+        commit(self.remote()?, transaction)
+    }
+
+    /// [`rollback`] on this session.
+    pub fn rollback_transaction(&mut self, transaction: &Transaction) -> Result<(), Failure> {
+        self.require_writing("roll a transaction back")?;
+        rollback(self.remote()?, transaction)
+    }
+
+    /// [`supported_types`] on this session.
+    pub fn supported_types(
+        &mut self,
+        uri_or_path: &str,
+        scope: &str,
+        count: bool,
+        empty: bool,
+    ) -> Result<Vec<SupportedTypeRow>, Failure> {
+        supported_types(self.remote()?, uri_or_path, scope, count, empty)
+    }
+
+    /// [`channels`] on this session.
+    pub fn channel_metadata(&mut self, uris: &[String]) -> Result<ChannelRecords, Failure> {
+        channels(self.remote()?, uris)
+    }
+
+    /// [`ranges`] on this session.
+    pub fn get_ranges(&mut self, ranges_json: &[String]) -> Result<Vec<String>, Failure> {
+        ranges(self.remote()?, ranges_json)
+    }
+
+    /// [`pack_dataspace`] on this session, read with the schemas the bridge
+    /// carries.
+    pub fn download_epc(&mut self, dataspace: &str, wanted: &Wanted) -> Result<Packed, Failure> {
+        let registry = self.registry.clone();
+        pack_dataspace(self.remote()?, &registry, dataspace, wanted)
+    }
 }
 
 fn identifiers(uri: &str, paths: &[String]) -> Vec<DataArrayIdentifier> {
@@ -835,15 +945,308 @@ fn identifiers(uri: &str, paths: &[String]) -> Vec<DataArrayIdentifier> {
 }
 
 /// A read-only session cannot write: a named refusal rather than the server's
-/// later one (the Transaction protocol was never announced).
-pub fn refuse_unless_writing(writing: bool) -> Result<(), Failure> {
+/// later one (the Transaction protocol was never announced). `what` is what
+/// the caller tried, for the message.
+pub fn refuse_unless_writing(writing: bool, what: &str) -> Result<(), Failure> {
     if writing {
         Ok(())
     } else {
-        Err(Failure::unsupported(
-            "this session was opened read-only; open it with writing=True to put objects",
-        ))
+        Err(Failure::unsupported(format!(
+            "this session was opened read-only; open it with writing=True to {what}"
+        )))
     }
+}
+
+// ---------------------------------------------------------------------------
+// The operations beyond the first scope, on any blocking client
+// ---------------------------------------------------------------------------
+
+/// What a plural write said of each item, **in the order asked**: what the
+/// store did, or why it did not. Nothing asked is missing from both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcomes<T> {
+    /// The items the store took, each with what it said of it.
+    pub done: Vec<(String, T)>,
+    /// The ones it did not, with why.
+    pub failed: Vec<(String, Failure)>,
+}
+
+/// One supported type (SupportedTypes, `GetSupportedTypes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportedTypeRow {
+    /// The qualified type (`resqml20.obj_TriangulatedSetRepresentation`).
+    pub data_object_type: String,
+    /// How many objects of it, when they were counted.
+    pub object_count: Option<i32>,
+    /// The relationship kind, by its ETP name.
+    pub relationship_kind: String,
+}
+
+/// The channels at some URIs (`GetChannelMetadata`), each record as the ETP
+/// Avro JSON encoding the Rust library writes (ETP v1.2 section 3.8.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRecords {
+    /// URI and the JSON text of its `ChannelMetadataRecord`.
+    pub found: Vec<(String, String)>,
+    /// The URIs the store did not answer with a record, with why.
+    pub failed: Vec<(String, Failure)>,
+}
+
+/// The same URI twice in one keyed request would be one key in the answer:
+/// refused by name, rather than one of the two reported as unanswered.
+fn refuse_repeats(uris: &[String]) -> Result<(), Failure> {
+    if uris.is_empty() {
+        return Err(Failure::bad_argument("no URI given"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for uri in uris {
+        if !seen.insert(uri.as_str()) {
+            return Err(Failure::bad_argument(format!("{uri} is given twice")));
+        }
+    }
+    Ok(())
+}
+
+/// A keyed answer, back in the order asked. A label the answer does not
+/// carry is said, not skipped.
+fn in_order<T>(asked: &[String], mut answers: BTreeMap<String, Result<T, ErrorInfo>>) -> Outcomes<T> {
+    let mut out = Outcomes {
+        done: Vec::new(),
+        failed: Vec::new(),
+    };
+    for uri in asked {
+        match answers.remove(uri) {
+            Some(Ok(value)) => out.done.push((uri.clone(), value)),
+            Some(Err(error)) => out.failed.push((uri.clone(), Failure::of_error(error))),
+            None => out.failed.push((
+                uri.clone(),
+                Failure::new(
+                    Kind::AnswerRefused,
+                    "the server's answer does not mention this URI",
+                ),
+            )),
+        }
+    }
+    out
+}
+
+/// Delete objects by URI: `retp_client::delete_data_objects`. What each one
+/// took with it is the store's statement (the URIs it deleted, contained
+/// objects included); `prune_contained` asks it to drop the contained objects
+/// the deletion would orphan.
+pub fn delete_objects<K: Blocking>(
+    client: &mut K,
+    uris: &[String],
+    prune_contained: bool,
+) -> Result<Outcomes<Vec<String>>, Failure> {
+    refuse_repeats(uris)?;
+    let answers = delete_data_objects(client, uris, prune_contained)?;
+    Ok(in_order(uris, answers))
+}
+
+/// The dataspaces as `retp_client::put_dataspaces` sends them: each path or
+/// URI made a URI by `dataspace_uri`, its path read back from that URI by
+/// `EtpUri::parse`, and the same `custom_data` on each, every value through
+/// `retp_client::custom_data_value` (the command line's `--custom KEY=VALUE`:
+/// `a,b` is a list of strings, any other text one string).
+pub fn dataspaces_to_put(
+    dataspaces: &[String],
+    custom_data: &[(String, String)],
+) -> Result<Vec<Dataspace>, Failure> {
+    if dataspaces.is_empty() {
+        return Err(Failure::bad_argument("no dataspace given"));
+    }
+    dataspaces
+        .iter()
+        .map(|given| {
+            let uri = dataspace_uri(given);
+            let parsed = EtpUri::parse(&uri)
+                .map_err(|why| Failure::bad_argument(format!("{given} is not a dataspace: {why}")))?;
+            if parsed.object_type.is_some() || parsed.uuid.is_some() {
+                return Err(Failure::bad_argument(format!(
+                    "{given} names an object, not a dataspace"
+                )));
+            }
+            Ok(Dataspace {
+                uri,
+                path: parsed.dataspace.unwrap_or_default(),
+                custom_data: custom_data
+                    .iter()
+                    .map(|(key, value)| (key.clone(), custom_data_value(value)))
+                    .collect(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// Create or replace dataspaces: `retp_client::put_dataspaces` with
+/// [`dataspaces_to_put`]. Each dataspace answers for itself, by its URI.
+pub fn create_dataspaces<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+    custom_data: &[(String, String)],
+) -> Result<Outcomes<String>, Failure> {
+    let spaces = dataspaces_to_put(dataspaces, custom_data)?;
+    let uris: Vec<String> = spaces.iter().map(|space| space.uri.clone()).collect();
+    refuse_repeats(&uris)?;
+    let answers = put_dataspaces(client, &spaces)?;
+    Ok(in_order(&uris, answers))
+}
+
+/// Delete dataspaces, each given by its path or URI (`dataspace_uri`):
+/// `retp_client::delete_dataspaces`.
+pub fn remove_dataspaces<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+) -> Result<Outcomes<String>, Failure> {
+    let uris: Vec<String> = dataspaces.iter().map(|given| dataspace_uri(given)).collect();
+    refuse_repeats(&uris)?;
+    let answers = delete_dataspaces(client, &uris)?;
+    Ok(in_order(&uris, answers))
+}
+
+/// Open a transaction over dataspaces (paths or URIs, `dataspace_uri`):
+/// `retp_client::start_transaction`.
+///
+/// The store's two kinds of no stay apart, as the library keeps them: a
+/// refusal (*not now*) is a server answer, an absent Transaction protocol
+/// (*never here*) is [`Kind::Unsupported`].
+pub fn open_transaction<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+    read_only: bool,
+    message: &str,
+) -> Result<Transaction, Failure> {
+    let uris: Vec<String> = dataspaces.iter().map(|given| dataspace_uri(given)).collect();
+    match start_transaction(client, &uris, read_only, message)? {
+        Opened::Open(transaction) => Ok(transaction),
+        Opened::Refused(why) => Err(Failure::said_no(format!(
+            "the store did not open the transaction: {why}"
+        ))),
+        Opened::Unsupported(why) => Err(Failure::unsupported(format!(
+            "the store has no transactions: {why}"
+        ))),
+    }
+}
+
+/// Commit a transaction: `retp_client::commit_transaction`. A refused commit
+/// means the writes of the transaction are **not** in the store, and says so.
+pub fn commit<K: Blocking>(client: &mut K, transaction: &Transaction) -> Result<(), Failure> {
+    match commit_transaction(client, transaction)? {
+        Ended::Done => Ok(()),
+        Ended::Refused(why) => Err(Failure::said_no(format!(
+            "the store refused the commit: {why} (the writes of the transaction are not in the store)"
+        ))),
+    }
+}
+
+/// Roll a transaction back: `retp_client::rollback_transaction`. A refused
+/// rollback means its writes may still be there, and says so.
+pub fn rollback<K: Blocking>(client: &mut K, transaction: &Transaction) -> Result<(), Failure> {
+    match rollback_transaction(client, transaction)? {
+        Ended::Done => Ok(()),
+        Ended::Refused(why) => Err(Failure::said_no(format!(
+            "the store refused the rollback: {why} (the writes of the transaction may still be there)"
+        ))),
+    }
+}
+
+/// The data object types under a dataspace (a path or a URI) or an object:
+/// `retp_client::list_supported_types`. The library refuses, before sending,
+/// any scope but `sources` and `targets`.
+///
+/// An answer a server cut short with an error is **refused**, not returned as
+/// if it were the whole list.
+pub fn supported_types<K: Blocking>(
+    client: &mut K,
+    uri_or_path: &str,
+    scope: &str,
+    count: bool,
+    empty: bool,
+) -> Result<Vec<SupportedTypeRow>, Failure> {
+    let list = list_supported_types(
+        client,
+        &dataspace_uri(uri_or_path),
+        parse_scope(scope)?,
+        count,
+        empty,
+    )?;
+    if let Some(error) = list.ended_by {
+        return Err(Failure::server(
+            error.code,
+            format!("the supported-type list was cut short: {}", error.message),
+        ));
+    }
+    Ok(list
+        .items
+        .into_iter()
+        .map(|one| SupportedTypeRow {
+            data_object_type: one.data_object_type,
+            object_count: one.object_count,
+            relationship_kind: format!("{:?}", one.relationship_kind),
+        })
+        .collect())
+}
+
+/// The channels at these URIs (a log, a channel set, a channel):
+/// `retp_client::channels::channel_metadata`, each record in its Avro JSON
+/// encoding (`retp_avro::Avro::to_json`).
+pub fn channels<K: Blocking>(client: &mut K, uris: &[String]) -> Result<ChannelRecords, Failure> {
+    refuse_repeats(uris)?;
+    let answers = channel_metadata(client, uris)?;
+    let mut out = ChannelRecords {
+        found: Vec::new(),
+        failed: Vec::new(),
+    };
+    for (uri, answer) in uris.iter().zip(answers) {
+        match answer {
+            Ok(record) => out.found.push((uri.clone(), record.to_json().to_string())),
+            Err(error) => out.failed.push((uri.clone(), Failure::of_error(error))),
+        }
+    }
+    Ok(out)
+}
+
+/// Channel values over index intervals: `retp_client::channels::get_ranges`,
+/// each range read from its Avro JSON encoding
+/// (`ChannelRangeInfo::from_json_str`), each data item written back in it.
+/// The request's uuid is a fresh one (`native::random_uuid`).
+pub fn ranges<K: Blocking>(client: &mut K, ranges: &[String]) -> Result<Vec<String>, Failure> {
+    let asked = ranges_from_json(ranges)?;
+    match get_ranges(client, native::random_uuid(), &asked)? {
+        Ok(items) => Ok(items.iter().map(|item| item.to_json().to_string()).collect()),
+        Err(error) => Err(Failure::of_error(error)),
+    }
+}
+
+/// The ranges of [`ranges`], read; each refusal names the range.
+pub fn ranges_from_json(ranges: &[String]) -> Result<Vec<ChannelRangeInfo>, Failure> {
+    if ranges.is_empty() {
+        return Err(Failure::bad_argument("no range given"));
+    }
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(rank, text)| {
+            ChannelRangeInfo::from_json_str(text).map_err(|why| {
+                Failure::bad_argument(format!("range {rank} is not a ChannelRangeInfo: {why}"))
+            })
+        })
+        .collect()
+}
+
+/// A dataspace (a path or a URI) as an EPC, in memory:
+/// `energyml_etp_store::pack::pack`. The package's bytes, the arrays its
+/// objects name (for the caller to write into the files the package names),
+/// and what could not be taken, said rather than left out quietly.
+pub fn pack_dataspace<K: Blocking>(
+    client: &mut K,
+    registry: &Registry,
+    dataspace: &str,
+    wanted: &Wanted,
+) -> Result<Packed, Failure> {
+    Ok(blocking(pack(client, dataspace, registry, wanted))?)
 }
 
 /// Objects, as EnergyML JSON texts, in an in-memory package. Pure Rust, no

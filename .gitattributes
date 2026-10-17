@@ -50,9 +50,3 @@ ci/hooks/*  text eol=lf
 *.woff    binary
 *.woff2   binary
 *.whl     binary
-
-# ---- Claude Code plugins ----
-# The Claude plugin directory validates a plugin from GitHub's archive of the repository and
-# refuses one whose files the archive rewrites: no end-of-line conversion under plugins/ (the
-# *.ps1 rule above made install-retp.ps1 CRLF in the archive). PowerShell runs LF scripts.
-plugins/** -text -eol

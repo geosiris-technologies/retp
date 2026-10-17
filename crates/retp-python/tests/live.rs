@@ -16,11 +16,7 @@ fn open() -> Session {
         url,
         token: std::env::var("RETP_TEST_TOKEN").ok(),
         partition: std::env::var("RETP_TEST_PARTITION").ok(),
-        insecure: false,
-        writing: false,
-        types: Vec::new(),
-        keepalive_seconds: None,
-        at_once: None,
+        ..ConnectOptions::default()
     })
     .expect("a session")
 }

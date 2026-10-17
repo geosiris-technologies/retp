@@ -1,8 +1,8 @@
 # Design note: the Python bridge of retp
 
-Status: first draft, written without compiling anything. Every statement about
-an API that was not exercised carries a `TODO(verify)`. Decisions that belong to
-the maintainers are marked **Decision**.
+Status: built and published (`retp` 0.2.0 on PyPI since 2026-10-15). A statement
+about an API that no test or build exercised still carries a `TODO(verify)`.
+Decisions that belong to the maintainers are marked **Decision**.
 
 ## 1. What this is for
 
@@ -17,13 +17,15 @@ not have**. It is only a bridge. Each operation is one call into the Rust
 library; the bridge converts arguments and results. Where Python needs something
 Rust lacks, it is listed in section 9 and added in Rust first.
 
-## 2. Scope of the first draft
+## 2. Scope
 
 Bound, function by function (Python name, then the Rust item it calls):
 
 | Python | Rust |
 |---|---|
-| `retp.connect(url, token, partition=, insecure=, writing=, types=, keepalive=, at_once=)` | `native::connect` over `reading_client` / `writing_client` and `native::fit_to_server`; `Credentials::bearer`; `ServerProfile`; `plain_text_warning`, `CertificateCheck::warning` |
+| `retp.connect(url, token, partition=, insecure=, writing=, types=, keepalive=, at_once=)` | `retp_client::live::LiveSession::connect` over `reading_client` / `writing_client` and `native::fit_to_server`; `ServerProfile`; `plain_text_warning`, `CertificateCheck::warning` |
+| `retp.connect(..., user=, password=, token_url=, azure_tenant=, cognito_region=, client_id=, client_secret=, oauth_scope=)` | `retp_client::login::Choice::login` (given no environment), then `Login::obtain`; a token alone is `Login::Bearer`, so `Credentials::bearer` |
+| `retp.connect(..., rest=True)` | `native::rest_client`, `RestClient::with_at_once`; `Remote::Rest` |
 | `Session.dataspaces()` | `retp_client::list_dataspaces` |
 | `Session.resources(dataspace, depth=, scope=, types=, edges=, count=)` | `retp_client::list_resources` with a `ResourceQuery`; `dataspace_uri` |
 | `Session.get_object(uri)`, `get_objects(uris)` | `retp_client::get_data_objects` (format `xml`), then `energyml_etp_store::read_object`, then `energyml_core::json::write_string` |
@@ -32,14 +34,26 @@ Bound, function by function (Python name, then the Rust item it calls):
 | `Session.array_metadata(uri, paths)` | `retp_client::arrays::array_metadata` |
 | `Session.read_array(uri, path, start=, count=)` | `retp_client::arrays::read_arrays`, or `read_regions` with a `Block`; `ArrayValues::decode` |
 | `Session.ping()`, `close()` | `Remote::ping`, `Remote::close` |
+| `Session.subscribe(uri, ...)` | `retp_client::live::LiveSession::subscribe_to`, `unsubscribe_from`; `live::as_json` |
+| `Session.supported_types(dataspace, scope=, count=, empty=)` | `retp_client::list_supported_types`; `dataspace_uri` |
+| `Session.delete_objects(uris, prune_contained=)` | `retp_client::delete_data_objects` |
+| `Session.put_dataspaces(dataspaces, custom_data=)` | `retp_client::put_dataspaces`; `dataspace_uri`, `EtpUri::parse` for the path, `custom_data_value` |
+| `Session.delete_dataspaces(dataspaces)` | `retp_client::delete_dataspaces`; `dataspace_uri` |
+| `Session.start_transaction(dataspaces, read_only=, message=)`, `commit_transaction(t)`, `rollback_transaction(t)` | `retp_client::start_transaction`, `commit_transaction`, `rollback_transaction`; `retp.Transaction` holds the library's `Transaction` |
+| `Session.channel_metadata(uris)` | `retp_client::channels::channel_metadata`; `retp_avro::Avro::to_json` |
+| `Session.get_ranges(ranges)` | `retp_client::channels::get_ranges`; `Avro::from_json_str`, `to_json`; `native::random_uuid` |
+| `Session.download_epc(dataspace, types=, uris=, arrays=, references=)` | `energyml_etp_store::pack::pack` |
 
-Deliberately not bound in this draft (Rust has them; each is a small follow-up
-binding, not a gap): deleting objects and dataspaces, creating dataspaces,
-explicit transactions, `list_supported_types`, notifications, channels and
-catch-up (`changes_since`), the logins of `retp_client::login` (the bridge takes
-a token), resumable runs (`retp_client::resume`), the REST transport
-(`Remote::Rest`, refused by name for now), downloading a dataspace as an EPC
-(`energyml_etp_store::pack`).
+Each operation added after the first scope is a free function of `session.rs`
+over any `retp_client::Blocking` client (`delete_objects`, `create_dataspaces`,
+`open_transaction`...), which the `Session` method of the same purpose calls on
+its remote, and which `tests/operations.rs` runs on a client whose other end is
+a server connection in memory (`retp_client::memory`).
+
+Not bound, though Rust has them: catch-up (`changes_since`) and resumable runs
+(`retp_client::resume`, the directory download). Not bound because Rust lacks a
+piece first: writing arrays (G2), channel subscriptions and ChannelStreaming
+(G11), writing a packed dataspace to disk (G12); section 9.
 
 ### Moving objects between `energyml.rust` and a dataspace
 
@@ -59,8 +73,9 @@ both already speak:
 - **A dataspace to an `Epc`**: `session.get_object(uri)` gives a dictionary that
   `Epc.put` accepts; arrays do not follow until `read_array` is paired with
   `Epc.write_array`, which is the caller's loop (nothing is lost, but nothing is
-  planned either). The proper path is `energyml_etp_store::pack` bound as
-  `download_epc` (not done, section 9).
+  planned either). The proper path is `session.download_epc(dataspace)`
+  (`energyml_etp_store::pack`): the package's bytes and its arrays, in memory;
+  the arrays are written by the caller (G12).
 - **In memory, with no file in between**: `energyml.rust` has no
   `Epc.to_bytes()` (gap G3 on that side).
 
@@ -119,13 +134,23 @@ then each `Kind` becomes an exception class in `bindings.rs`:
 | unsupported case | `Unsupported` | `Unsupported` | use another route |
 | object does not read/write, package does not open | `Local` | `LocalError` | fix the data |
 | push not in full | (report) | `PushIncomplete` with `.report` | read the report |
+| `LoginError::Invalid` | `BadArgument` | `ValueError` | fix the login |
+| `LoginError::Http` | `SessionRefused` | `SessionRefused` | reach the authorization server |
+| `LoginError::Refused` | `AuthorizationNeeded` | `AuthorizationNeeded` | log in again |
+| `LoginError::Challenge` | `Unsupported` | `Unsupported` | settle it in another client |
+| `Opened::Refused`, `Ended::Refused` | `Server` (no code) | `ServerError` | read the store's reason |
+| `Opened::Unsupported` | `Unsupported` | `Unsupported` | write without a transaction |
 
 Rules kept:
 
 - The library's own message is kept as is.
-- A plural read (`get_objects`, `array_metadata`) returns `(found, errors)`: a
-  URI that failed is in `errors`, never silently missing. The singular
-  (`get_object`, `read_array`) raises.
+- A plural read (`get_objects`, `array_metadata`, `channel_metadata`) returns
+  `(found, errors)`, and a plural write that is not a push (`delete_objects`,
+  `put_dataspaces`, `delete_dataspaces`) `(done, errors)`: a URI that failed is
+  in `errors`, never silently missing. The singular (`get_object`,
+  `read_array`) raises. The same URI twice in one keyed request is refused
+  (`ValueError`): the answer is keyed by it, and one of the two would read as
+  unanswered.
 - A listing a server cut short with an error is refused (`ServerError`), not
   returned as a complete list. The partial list is lost by this (gap G5).
 - `OutcomeUnknown` keeps the library's statement that the outcome is unknown:
@@ -243,7 +268,13 @@ TODO(verify): that this works on Linux, macOS and Windows.
 - `tests/errors.rs`: each `ClientError` variant gets its kind; the bridge agrees
   with the library's `is_connection_lost`.
 - `tests/connect.rs`: URL, token, scope and `at_once` refusals, the warnings,
-  and that a refused token is never echoed.
+  that a refused token is never echoed, the REST checks (an HTTP URL needs
+  `rest=True`, `keepalive` and `types` mean nothing over REST, a REST session
+  opens with no network), and the logins (HTTP Basic, a token first, a login
+  lacking a part refused before any request).
+- `tests/operations.rs`: deleting objects and dataspaces, creating dataspaces,
+  transactions, supported types, channel metadata and ranges, and packing a
+  dataspace, on a client whose other end is a server connection in memory.
 - `tests/stage.rs`: refusals of staging objects for a push (no object, not JSON,
   no `$type`, unknown type). TODO(verify): the positive test, with an object built
   by the library.
@@ -265,10 +296,14 @@ existing Rust and flagged where it is.
   dangling references.
 - **G2. Writing an array from numbers.** `retp_client::arrays::write_arrays`
   takes an `Array` (dimensions, logical type, transport type, `ArrayValues`).
-  Nothing builds one from a typed vector: choosing the logical type of an `f64`
-  vector, and a transport type from `allowed_transports`, is a decision that
-  belongs in Rust (for instance `Array::from_decoded(dimensions, Decoded)`), not
-  in a numpy dtype switch in the bridge. Until then `write_array` is not bound.
+  The one conversion from stored numbers to that `Array` exists, as
+  `energyml_etp_store::push::to_wire` (`push` and the writer call it), but it is
+  `pub(crate)`; the public `convert::arrays::array_data_to_etp` gives a
+  `DataArray` without the logical type, and turning its union back into
+  `ArrayValues` is private too. Rebuilding either in the bridge would be a second
+  spelling of how a number is widened. Making `to_wire` public (or an
+  `Array::from_stored(&ArrayData)`) lifts this; until then `write_array` is not
+  bound.
 - **G3. Bytes of an EPC.** `energyml.rust.Epc` has no save-to-bytes, and
   `push` only reads an `EnergymlStorage` that lives in the same module, so the
   hand-off between the two wheels goes through a file.
@@ -281,9 +316,12 @@ existing Rust and flagged where it is.
   both would let a caller choose.
 - **G6. JSON for protocol data.** `Dataspace.custom_data`,
   `Resource.custom_data`, `active_status`, `DataArrayMetadata.custom_data` are
-  not exposed: converting `DataValue` to JSON is a decision about a mapping, so it
-  belongs to `retp-types` (a `to_json`), not to the bridge. The active-status
-  filter of `ResourceQuery` is likewise not exposed.
+  not exposed. Every generated ETP type has the Avro JSON encoding
+  (`retp_avro::Avro::to_json`, ETP section 3.8.1, which the specification keeps
+  for testing and debugging), and the channel bindings use it; whether it is
+  also the form custom data takes for a Python caller is still to decide, in
+  Rust, for both bridges. The active-status filter of `ResourceQuery` is
+  likewise not exposed.
 - **G7. Objects sent as JSON.** `read_object` reads XML only; a server that
   answers `format = "json"` is refused by name. A JSON reader beside it (the
   EnergyML JSON is `energyml_core::json`) would lift that.
@@ -298,12 +336,28 @@ existing Rust and flagged where it is.
   CLI says it in its exit code (`stopped.is_none() && left_out.is_empty()`);
   `PushReport::complete` repeats that line. It should be a method of
   `push::Report`.
+- **G11. Subscribing to channels.** `retp_client::channels::subscribe_channels`
+  and `start_streaming` exist, and a live session can route protocol 21 or 1
+  to a destination (`LiveSession::route`), but the two are separate calls. For
+  notifications the library joins them (`LiveSession::subscribe_to`: the route
+  first, so that nothing arriving between the answer and the route is lost; a
+  refusal removes it); for channels nothing does, and doing it in the bridge
+  would be that ordering written a second time. A
+  `LiveSession::subscribe_channels_to` (and its `unsubscribe`) lifts this;
+  `channel_metadata` and `get_ranges` are bound meanwhile.
+- **G12. A packed dataspace to disk.** `pack` returns the package's bytes and
+  its arrays in memory; writing the arrays into the HDF5 files the package names
+  is done by the command line itself (`retp-cli`'s `download_epc` and
+  `write_array`, over `Hdf5Backend`), not by a library function. A
+  `pack::save(packed, path)` in `energyml-etp-store` would give
+  `download_epc(path=...)` without a second writer in the bridge; until then the
+  bridge returns what `pack` returns.
 
-Not gaps, but worth recording: the REST transport (`Remote::Rest`) is available in
-Rust and refused here by name. Subscriptions are bound (`Session.subscribe`):
-the session is a live one (`retp_client::live`), whose task receives what
-arrives and hands it to a destination - nobody polls. Channels would take the
-same road.
+Not gaps, but worth recording: the REST transport is bound (`rest=True`,
+`Remote::Rest`), and what REST has no counterpart for is refused by the Rust
+REST client by name. Subscriptions are bound (`Session.subscribe`): the session
+is a live one (`retp_client::live`), whose task receives what arrives and hands
+it to a destination - nobody polls.
 
 ## 10. Open questions
 
@@ -312,4 +366,4 @@ same road.
 - Whether `retp` and `energyml.rust` should be one wheel one day. They are two
   now so that the ETP stack does not weigh on the people who only read EPC files,
   and the other way round; the dependency allow-list test keeps it that way.
-- The shape of an event binding (section 9, last paragraph).
+- The shape of a channel subscription binding, once G11 is in Rust.

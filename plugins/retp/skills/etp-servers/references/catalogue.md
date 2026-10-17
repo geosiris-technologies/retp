@@ -69,11 +69,12 @@ A name is lowercase letters, digits, `.`, `_`, `-`, and cannot be a command of `
 ## Using it
 
 ```sh
-retp @my-server dataspaces            # `@` always means a server
+retp --server my-server dataspaces    # works in every shell; -s my-server for short
+retp '@my-server' dataspaces          # `@` always means a server; quoted, as PowerShell needs
 retp my-server dataspaces             # the same, unless a command has that name
 retp --server my-server dataspaces    # the same; -s is short
-retp @my-server shell                 # the shell (retp shell my-server fails in 0.3.0)
-retp-conformance @my-server --out report.md
+retp --server my-server shell         # the shell (retp shell my-server fails in 0.3.0)
+retp-conformance --server my-server --out report.md
 retp mcp --server my-server --dataspace demo
 ```
 
@@ -97,7 +98,7 @@ retp mcp --server my-server --dataspace demo
 Its steps are `definition`, `references`, `well-known`, `token`, `session`. A server that
 protects `/.well-known` with another method than the session (seen: Bearer required there,
 Basic accepted for the session) fails at `well-known` and skips the rest. Try
-`retp @NAME connect` before saying the server is unreachable.
+`retp --server NAME connect` before saying the server is unreachable.
 
 ## In Docker
 

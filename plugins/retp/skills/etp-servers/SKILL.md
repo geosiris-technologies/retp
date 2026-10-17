@@ -130,8 +130,10 @@ is how it resumes); `--overwrite` replaces them — only on request.
 
 Prefer, in this order:
 
-1. **A catalogue server**: `retp @NAME COMMAND ...` (`@` always means a server; `retp NAME
-   COMMAND` and `--server NAME` work too). `retp server list` shows what exists. To add one,
+1. **A catalogue server**: `retp --server NAME COMMAND ...` (`-s NAME` for short). Prefer it to
+   the other forms, because it works in every shell: `retp @NAME COMMAND` fails in PowerShell, which
+   reads a bare `@NAME` as splatting and passes nothing (quote it there: `'@NAME'`); `retp NAME
+   COMMAND` works too. `retp server list` shows what exists. To add one,
    collect the URL, the login method and its non-secret fields from the user, have them create
    the secret file, then `retp server add` with `--*-from` references and `retp server test
    NAME`. Details and every method (basic, bearer, OAuth, Azure, Cognito, OSDU partition):
@@ -150,25 +152,25 @@ Quote ETP URIs with **double quotes** in every shell: they contain single quotes
 (`"eml:///dataspace('demo')"`).
 
 ```sh
-retp @my-server probe                       # what the server says of itself, no session
-retp @my-server connect                     # session: protocols, types, max message size
-retp @my-server dataspaces                  # one line per dataspace: URI, path
-retp @my-server resources --uri "eml:///dataspace('demo')" --depth 1
-retp @my-server supported-types --uri "eml:///dataspace('demo')" --count
-retp @my-server get "eml:///dataspace('demo')/resqml20.obj_LocalDepth3dCrs(<uuid>)" --out objects/
-retp @my-server array "<uri of the holder>" "<path in the HDF5 file>" --metadata
-retp @my-server download-epc demo --out demo-2026-10-17.epc
-retp @my-server download demo --out demo-objects/
+retp --server my-server probe              # what the server says of itself, no session
+retp --server my-server connect            # session: protocols, types, max message size
+retp --server my-server dataspaces         # one line per dataspace: URI, path
+retp --server my-server resources --uri "eml:///dataspace('demo')" --depth 1
+retp --server my-server supported-types --uri "eml:///dataspace('demo')" --count
+retp --server my-server get "eml:///dataspace('demo')/resqml20.obj_LocalDepth3dCrs(<uuid>)" --out objects/
+retp --server my-server array "<uri of the holder>" "<path in the HDF5 file>" --metadata
+retp --server my-server download-epc demo --out demo-2026-10-17.epc
+retp --server my-server download demo --out demo-objects/
 ```
 
-Replace `@my-server` by a URL to talk to a server outside the catalogue.
+Replace `--server my-server` by a URL to talk to a server outside the catalogue.
 
-**The shell** keeps one session for many commands. Start it as `retp @my-server shell` (not
+**The shell** keeps one session for many commands. Start it as `retp --server my-server shell` (not
 `retp shell my-server`, see the field notes). It is interactive; to use it from a tool, pipe a
 script in, one command per line:
 
 ```sh
-printf '%s\n' dataspaces "resources --uri eml:///dataspace('demo') --depth 1" exit | retp @my-server shell
+printf '%s\n' dataspaces "resources --uri eml:///dataspace('demo') --depth 1" exit | retp --server my-server shell
 ```
 
 In the shell, ETP URIs need no quotes. `help <command>` gives its options.
@@ -190,14 +192,14 @@ In the shell, ETP URIs need no quotes. `help <command>` gives its options.
 ## 7. Field notes from real servers (retp 0.3.0)
 
 - **`retp shell NAME` does not work** in 0.3.0 although `docs/cli.md` shows it: it fails with
-  "an ETP endpoint is a ws:// or wss:// URL". Use `retp @NAME shell` (or `retp NAME`, which
-  opens the shell, or `retp --server NAME shell`).
+  "an ETP endpoint is a ws:// or wss:// URL". Use `retp --server NAME shell` (or `retp NAME`, which
+  opens the shell).
 - **`resources --count` does not count resources**: it asks the store for each resource's
   source and target counts (`sources N  targets M` columns). For a total, count the output
   lines.
 - **`server test` can fail at `well-known`** when a server protects `/.well-known` with another
   auth method than the session (seen: Bearer required there, Basic accepted for the session).
-  Try `retp @NAME connect` before concluding a server is unreachable.
+  Try `retp --server NAME connect` before concluding a server is unreachable.
 - **`supported-types` may answer `0 item(s)` on a non-empty dataspace** on some servers.
   Cross-check with `resources` before saying a dataspace is empty.
 - **`download-epc` can fail on arrays** when a server refuses or chokes on
@@ -206,6 +208,9 @@ In the shell, ETP URIs need no quotes. `help <command>` gives its options.
   and names HDF5 files that are not there); `--at-once 1` helps a server that handles
   concurrent requests badly; `download` (one file per object) resumes where it stopped when run
   again. A build without HDF5 (the musl archives) cannot write arrays and says so.
+- **`retp @NAME` fails in PowerShell** (exit 2, "required arguments were not provided: <URL>"):
+  PowerShell takes `@NAME` for splatting an undefined variable, so retp never sees the name.
+  Use `retp --server NAME` (or `'@NAME'` quoted).
 - **ETP URIs contain single quotes**: double-quote them in sh, bash, zsh and PowerShell.
 
 ## References

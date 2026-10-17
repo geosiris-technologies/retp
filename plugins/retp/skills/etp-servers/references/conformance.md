@@ -8,7 +8,7 @@
 ## Reading only (the default): run it freely
 
 ```sh
-retp-conformance @my-server --out report.md --json report.json      # catalogue (0.3.0+)
+retp-conformance --server my-server --out report.md --json report.json  # catalogue (0.3.0+)
 retp-conformance wss://etp.example.com/etp --out report.md            # a URL
 ETP_TOKEN="$(cat ~/.config/retp/demo.token)" \
     retp-conformance wss://etp.example.com/etp --out report.md         # a URL with a token

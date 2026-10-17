@@ -207,7 +207,10 @@ In the shell, ETP URIs need no quotes. `help <command>` gives its options.
   `--no-arrays` still brings the XML objects (say clearly that the package has **no arrays**
   and names HDF5 files that are not there); `--at-once 1` helps a server that handles
   concurrent requests badly; `download` (one file per object) resumes where it stopped when run
-  again. A build without HDF5 (the musl archives) cannot write arrays and says so.
+  again. If `--at-once 1` still fails while `retp array ... --metadata` answers for the same
+  arrays one at a time, the server chokes on the batched request `download-epc` sends: say so,
+  and offer to read the arrays one by one with `retp array` (`download` brings no arrays).
+  A build without HDF5 (the musl archives) cannot write arrays and says so.
 - **`retp @NAME` fails in PowerShell** (exit 2, "required arguments were not provided: <URL>"):
   PowerShell takes `@NAME` for splatting an undefined variable, so retp never sees the name.
   Use `retp --server NAME` (or `'@NAME'` quoted).

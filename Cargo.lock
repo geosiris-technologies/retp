@@ -1628,6 +1628,7 @@ dependencies = [
  "energyml-storage",
  "numpy",
  "pyo3",
+ "retp-avro",
  "retp-client",
  "retp-proto",
  "retp-types",

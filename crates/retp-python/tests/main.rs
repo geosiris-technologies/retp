@@ -5,11 +5,13 @@
 //!
 //! **A new test file is a `mod` line here**, otherwise it does not run.
 //!
-//! None of these needs an ETP server or an interpreter. `live` does need a
-//! server, and is compiled only with the `live-server` feature.
+//! None of these needs an ETP server or an interpreter: `operations` talks to a
+//! server connection in the same process (`retp_client::memory`). `live` does
+//! need a server, and is compiled only with the `live-server` feature.
 
 mod connect;
 mod errors;
+mod operations;
 mod scope;
 mod stage;
 

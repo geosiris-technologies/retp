@@ -91,8 +91,8 @@ fn the_five_scopes_parse_and_the_rest_is_refused() {
 
 #[test]
 fn a_read_only_session_refuses_to_write_by_name() {
-    assert!(refuse_unless_writing(true).is_ok());
-    let refusal = refuse_unless_writing(false).expect_err("read-only");
+    assert!(refuse_unless_writing(true, "put objects").is_ok());
+    let refusal = refuse_unless_writing(false, "put objects").expect_err("read-only");
     assert_eq!(refusal.kind, Kind::Unsupported);
     assert!(refusal.message.contains("writing=True"), "{}", refusal.message);
 }

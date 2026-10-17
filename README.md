@@ -86,14 +86,15 @@ not have. See [docs/python.md](docs/python.md).
 
 ## Claude Code plugin
 
-The repository is a [Claude Code](https://code.claude.com) plugin marketplace. Its `retp`
-plugin teaches Claude to work with ETP servers through the `retp` command line - probe, list,
-read, download, the server catalogue, conformance, `retp mcp` - with credentials by reference
-only and writes only after you agree:
+A [Claude Code](https://code.claude.com) plugin, `retp`, teaches Claude to work with ETP servers
+through the `retp` command line - probe, list, read, download as EPC, check conformance, serve
+a dataspace over MCP - without a credential ever passing through the conversation, and with no
+write to a server unless the user says yes. It lives in
+[geosiris-technologies/claude-plugins](https://github.com/geosiris-technologies/claude-plugins):
 
 ```sh
-claude plugin marketplace add geosiris-technologies/retp
-claude plugin install retp@retp
+claude plugin marketplace add geosiris-technologies/claude-plugins
+claude plugin install retp@geosiris-technologies
 ```
 
 See [docs/claude-plugin.md](docs/claude-plugin.md).

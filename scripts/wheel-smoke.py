@@ -15,10 +15,12 @@ What the bridge exposes without a server is its connection layer, so that is wha
 is exercised:
 
   * the exception tree, as the compiled classes declare it;
-  * the refusals `retp.connect` makes before any socket is opened (a REST URL,
-    zero requests in flight, a token that is not a bearer token), each raised
-    by the Rust code as the exception of its kind, and a refused token never
-    echoed in the message;
+  * the refusals `retp.connect` makes before any socket is opened (an HTTP URL
+    without `rest=True`, zero requests in flight, a token that is not a bearer
+    token, a login without its password), each raised by the Rust code as the
+    exception of its kind, and a refused token never echoed in the message;
+  * a REST session, which opens nothing: what REST does not do (notifications)
+    and what a read-only session does not do (writing) are refused by name;
   * one real connection attempt, to a loopback port nothing listens on, which
     must fail with an exception of the retp tree (the native WebSocket
     transport and the error mapping run).
@@ -75,14 +77,33 @@ check(issubclass(retp.OutcomeUnknown, retp.ConnectionLost), "OutcomeUnknown is a
 check(issubclass(retp.RetpError, Exception), "RetpError is an Exception")
 
 # Refusals made by the Rust code before anything is sent.
-err = raised(lambda: retp.connect("https://etp.example.org/api/reservoir-ddms/v2"), retp.Unsupported)
-check(err is not None and "REST" in str(err), "a REST URL is refused by name (Unsupported)")
+REST_URL = "https://etp.example.org/api/reservoir-ddms/v2"
+err = raised(lambda: retp.connect(REST_URL), ValueError)
+check(err is not None and "rest=True" in str(err), "an HTTP URL without rest=True is refused (ValueError)")
+
+err = raised(lambda: retp.connect("wss://etp.example.org/", user="someone"), ValueError)
+check(err is not None and "password" in str(err), "a login without its password is refused (ValueError)")
 
 err = raised(lambda: retp.connect("wss://etp.example.org/", at_once=0), ValueError)
 check(err is not None and "at_once" in str(err), "at_once=0 is refused (ValueError)")
 
 err = raised(lambda: retp.connect("wss://etp.example.org/", token="Bearer s3cret value"), ValueError)
 check(err is not None and "s3cret" not in str(err), "a bad token is refused without being echoed (ValueError)")
+
+# A REST session opens nothing; what it cannot do is refused by name.
+try:
+    session = retp.connect(REST_URL, rest=True)
+except BaseException as err:
+    check(False, f"a REST session did not open: {type(err).__name__}: {err}")
+else:
+    check(isinstance(session, retp.Session), "a REST session opens without a network")
+    err = raised(lambda: session.subscribe("eml:///"), retp.Unsupported)
+    check(err is not None, "a REST session refuses notifications (Unsupported)")
+    err = raised(lambda: session.put_dataspaces(["demo"]), retp.Unsupported)
+    check(err is not None and "writing=True" in str(err), "a read-only session refuses to write (Unsupported)")
+    err = raised(lambda: session.start_transaction(["demo"]), retp.Unsupported)
+    check(err is not None, "a read-only session opens no transaction (Unsupported)")
+    session.close()
 
 # One real attempt: nothing listens on port 1 of the loopback interface.
 # TODO(verify): which subclass of RetpError this gives on each platform; only the

@@ -24,6 +24,15 @@ record: they are the registries of protocol numbers and of capability keys.
 The previous copy, extracted from `etp-rs`, was compared with these and found
 identical on the 208 types it held; see `doc/suivi/etp-avsc-comparaison.md`.
 
+## OSDU's extensions
+
+`OSDU/` holds two more `.avsc`, not Energistics': OSDU's extension of Core,
+`CoreOSDU` (protocol 2400, `ResumeSession` and its response), taken from the
+`etp-1.2.avpr` of OSDU's `open-etp-server` (Apache-2.0: `OSDU/LICENSE`). Where
+they come from, the file hash and how they were written out:
+`OSDU/PROVENANCE.md`. The generator reads them as it reads the others (they
+become `protocol::core_osdu`); the counts above are Energistics' alone.
+
 ## What the schemas do not carry
 
 Three files are ours. They come from the ETP v1.2 specification, not from a

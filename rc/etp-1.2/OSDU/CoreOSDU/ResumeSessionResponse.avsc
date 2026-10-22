@@ -1,0 +1,41 @@
+{
+	"type": "record",
+	"namespace": "Energistics.Etp.v12.Protocol.CoreOSDU",
+	"name": "ResumeSessionResponse",
+	"protocol": "2400",
+	"messageType": "2",
+	"senderRole": "server",
+	"protocolRoles": "client, server",
+	"multipartFlag": false,
+	"fields": [
+		{
+			"name": "applicationName",
+			"type": "string"
+		},
+		{
+			"name": "applicationVersion",
+			"type": "string"
+		},
+		{
+			"name": "serverInstanceId",
+			"type": "Energistics.Etp.v12.Datatypes.Uuid"
+		},
+		{
+			"name": "currentDateTime",
+			"type": "long"
+		},
+		{
+			"name": "sessionId",
+			"type": "Energistics.Etp.v12.Datatypes.Uuid"
+		},
+		{
+			"name": "earliestRetainedChangeTime",
+			"type": "long"
+		}
+	],
+	"fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSessionResponse",
+	"depends": [
+		"Energistics.Etp.v12.Datatypes.Uuid",
+		"Energistics.Etp.v12.Datatypes.Uuid"
+	]
+}

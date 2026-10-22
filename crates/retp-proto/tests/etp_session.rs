@@ -2031,3 +2031,221 @@ fn canonical_uris_are_the_ones_the_specification_lists() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Resuming a lost session - OSDU's ResumeSession (CoreOSDU, protocol 2400)
+// ---------------------------------------------------------------------------
+
+fn handlers_of_client() -> Vec<Box<dyn Handler>> {
+    vec![
+        Box::new(Forward(ProtocolOffer::v12(3, Role::Customer))),
+        Box::new(Forward(ProtocolOffer::v12(4, Role::Customer))),
+    ]
+}
+
+/// A session opened, then its WebSocket lost: what the client kept to ask it
+/// back, and the RequestSession the server kept.
+fn lost_session() -> (retp_proto::connection::Resumable, RequestSession, Connection) {
+    let (client, server) = opened();
+    let lost = client.resumable().expect("an open client can be resumed");
+    assert_eq!(lost.session_id, Uuid([0xAB; 16]), "the id the server gave");
+    let kept = server
+        .requested()
+        .expect("the server kept the RequestSession")
+        .clone();
+    assert_eq!(
+        &kept,
+        client.requested().unwrap(),
+        "both ends hold the same RequestSession"
+    );
+    (lost, kept, client)
+}
+
+fn resuming_client(lost: retp_proto::connection::Resumable, credentials: Option<Credentials>) -> Connection {
+    Connection::client_resuming(
+        client_offer(),
+        handlers_of_client(),
+        credentials,
+        lost,
+        T0 + 10 * S,
+    )
+    .unwrap()
+}
+
+/// A server on a new connection, of another session id: the resumed session
+/// must take the id the client asks back, not this one.
+fn accepting(authorizer: Option<Box<dyn retp_proto::connection::Authorizer>>) -> Connection {
+    Connection::server(
+        server_offer(),
+        vec![Box::new(Discovery), Box::new(Store)],
+        authorizer,
+        Uuid([0xCD; 16]),
+        T0 + 10 * S,
+    )
+    .unwrap()
+    .accepting_resume()
+}
+
+fn asked(events: &[Event]) -> Option<&retp_types::protocol::core_osdu::ResumeSession> {
+    events.iter().find_map(|e| match e {
+        Event::ResumeAsked(resume) => Some(resume),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_lost_session_is_given_back_by_resume_session() {
+    let (lost, kept, old) = lost_session();
+    let mut client = resuming_client(lost, None);
+    let mut server = accepting(None);
+    let start = client.start(T0 + 10 * S);
+    let first = &start.send[0].header;
+    assert_eq!(
+        (first.protocol, first.message_type),
+        (2400, 1),
+        "ResumeSession, not RequestSession"
+    );
+    let (c, s) = exchange(&mut client, &mut server, start, T0 + 10 * S);
+    assert!(c.is_empty(), "nothing opens before the server answers: {c:#?}");
+    let resume = asked(&s).expect("the server's application is asked");
+    assert_eq!(resume.session_id, Uuid([0xAB; 16]));
+    assert_eq!(resume.client_instance_id, client_offer().instance_id);
+    assert_eq!(server.state(), State::Negotiating);
+
+    let answer = server.resume(&kept, T0 + 10 * S);
+    assert!(answer.events.contains(&Event::Opened), "{:#?}", answer.events);
+    let reply = &answer.send[0].header;
+    assert_eq!(
+        (reply.protocol, reply.message_type),
+        (2400, 2),
+        "ResumeSessionResponse"
+    );
+    let step = client.receive(&answer.send[0].bytes, T0 + 10 * S);
+    assert!(step.events.contains(&Event::Opened), "{:#?}", step.events);
+    assert!(client.resumed() && server.resumed());
+    assert_eq!((client.state(), server.state()), (State::Open, State::Open));
+    // The same session as before the loss, under its own id, on both ends.
+    let (was, now) = (old.negotiated().unwrap(), client.negotiated().unwrap());
+    assert_eq!(now.session_id, Uuid([0xAB; 16]));
+    assert_eq!(server.negotiated().unwrap().session_id, Uuid([0xAB; 16]));
+    assert_eq!(now.protocols, was.protocols);
+    assert_eq!(now.data_objects, was.data_objects);
+    // And it works: a request crosses.
+    let ask = client.request(&GetResources::default(), T0 + 11 * S).unwrap();
+    let answered = server.receive(&ask.bytes, T0 + 11 * S);
+    assert_eq!(answered.send.len(), 1);
+    assert_eq!(answered.send[0].header.message_type, 4, "GetResourcesResponse");
+    // A resumed client can be resumed again.
+    assert_eq!(client.resumable().unwrap().session_id, Uuid([0xAB; 16]));
+}
+
+#[test]
+fn a_refused_resume_is_said_and_a_new_session_opens() {
+    let (lost, _, _) = lost_session();
+    let mut client = resuming_client(lost, None);
+    let mut server = accepting(None);
+    let start = client.start(T0 + 10 * S);
+    let (_, s) = exchange(&mut client, &mut server, start, T0 + 10 * S);
+    assert!(asked(&s).is_some());
+    let refused = server.refuse_resume(&EtpError::ENOT_FOUND.with_detail("Session not found or expired"));
+    assert_eq!(exceptions(&refused)[0].1, EtpError::ENOT_FOUND.code());
+    assert_eq!(server.state(), State::AwaitingSession);
+    let back = refused_to_client(&mut client, refused);
+    let (c, s) = exchange(&mut client, &mut server, back, T0 + 10 * S);
+    assert!(
+        c.iter()
+            .any(|e| matches!(e, Event::ResumeRefused(i) if i.code() == EtpError::ENOT_FOUND.code())),
+        "{c:#?}"
+    );
+    assert!(
+        c.contains(&Event::Opened) && s.contains(&Event::Opened),
+        "{c:#?} {s:#?}"
+    );
+    assert!(!client.resumed() && !server.resumed());
+    assert_eq!(
+        client.negotiated().unwrap().session_id,
+        Uuid([0xCD; 16]),
+        "a new session"
+    );
+}
+
+/// The server's messages, taken by the client; what the client sends back.
+fn refused_to_client(client: &mut Connection, from_server: Step) -> Step {
+    let mut out = Step::default();
+    for message in from_server.send {
+        let step = client.receive(&message.bytes, T0 + 10 * S);
+        out.send.extend(step.send);
+        out.events.extend(step.events);
+    }
+    out
+}
+
+#[test]
+fn a_server_that_does_not_resume_answers_unsupported_and_the_client_opens_anew() {
+    let (lost, _, _) = lost_session();
+    let mut client = resuming_client(lost, None);
+    let mut server = server();
+    let start = client.start(T0 + 10 * S);
+    let (c, s) = exchange(&mut client, &mut server, start, T0 + 10 * S);
+    assert!(asked(&s).is_none(), "{s:#?}");
+    assert!(
+        c.iter().any(
+            |e| matches!(e, Event::ResumeRefused(i) if i.code() == EtpError::EUNSUPPORTED_PROTOCOL.code())
+        ),
+        "{c:#?}"
+    );
+    assert!(c.contains(&Event::Opened) && s.contains(&Event::Opened));
+    assert!(!client.resumed());
+}
+
+#[test]
+fn a_resume_is_authorized_by_the_new_connection_itself() {
+    let (lost, kept, _) = lost_session();
+    let mut client = resuming_client(lost, Some(bearer("good")));
+    let mut server = accepting(requiring(T0 + 3600 * S));
+    let start = client.start(T0 + 10 * S);
+    let (_, s) = exchange(&mut client, &mut server, start, T0 + 10 * S);
+    // Refused unauthorized, authorized, asked again: only then is the
+    // application asked.
+    let resume = asked(&s).expect("asked once authorized");
+    assert_eq!(resume.session_id, Uuid([0xAB; 16]));
+    let answer = server.resume(&kept, T0 + 10 * S);
+    let step = refused_to_client(&mut client, answer);
+    assert!(step.events.contains(&Event::Opened), "{:#?}", step.events);
+    assert!(client.resumed());
+}
+
+#[test]
+fn resume_session_is_not_spoken_once_the_session_is_open() {
+    // CoreOSDU is spoken to open a session, and only then: the negotiated
+    // configuration that replaces it has no protocol 2400.
+    let (_client, mut server) = opened();
+    let mut server_resuming = accepting(None);
+    let _fresh = client_for(&mut server_resuming);
+    let body = retp_types::protocol::core_osdu::ResumeSession {
+        application_name: "late".into(),
+        application_version: "0".into(),
+        client_instance_id: Uuid([9; 16]),
+        current_date_time: T0,
+        session_id: Uuid([0xAB; 16]),
+    }
+    .to_avro();
+    for server in [&mut server, &mut server_resuming] {
+        let step = server.receive(&raw(2400, 1, 0, 1000, Flags::FIN, &body), T0);
+        assert!(asked(&step.events).is_none(), "{step:#?}");
+        assert_eq!(
+            exceptions(&step).first().map(|e| e.1),
+            Some(EtpError::EUNSUPPORTED_PROTOCOL.code()),
+            "{step:#?}"
+        );
+    }
+}
+
+/// A client whose fresh session with `server` is open.
+fn client_for(server: &mut Connection) -> Connection {
+    let mut fresh = client();
+    let start = fresh.start(T0);
+    let (c, s) = exchange(&mut fresh, server, start, T0);
+    assert!(c.contains(&Event::Opened) && s.contains(&Event::Opened));
+    fresh
+}

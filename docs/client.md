@@ -69,6 +69,26 @@ Nothing in the protocol crate reads the clock: every call that needs the time
 takes it as an argument. Tests drive timeouts, keepalives and resumption
 without sleeping.
 
+## Asking a lost session back
+
+ETP 1.2 has no session survivability; OSDU's servers add `ResumeSession`
+(protocol 2400, `CoreOSDU`), which asks the server, on a new WebSocket and in
+place of `RequestSession`, to give back a session whose connection was lost.
+The client keeps what it needs from an open session, `client.resumable()`, and
+opens the next connection with `native::connect_resuming(connect, lost)`. If the
+server gives the session back, it is the same session - its id, its protocols,
+and on the server side whatever it kept for it, such as an open transaction;
+`client.resumed()` is then true. If it does not (`ENOT_FOUND`, or a server that
+does not speak protocol 2400), the refusal is logged and a new session opens on
+the same WebSocket: the resume is attempted, never awaited (ADR-0003).
+
+Either way the new connection authorizes itself from the start: no right of the
+lost session is carried over. A server takes `ResumeSession` once built with
+`Connection::accepting_resume()`: each request reaches the application as
+`Event::ResumeAsked`, which answers with `Connection::resume(lost_request)` (the
+`RequestSession` the lost session was opened with, `Connection::requested()`)
+or `Connection::refuse_resume(incident)`.
+
 ## A live session: what arrives unasked, pushed as it arrives
 
 The blocking client reads the WebSocket only while a call runs: between two calls, a

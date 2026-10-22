@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::{Event, Handler, State};
+use retp_proto::connection::{Event, Handler, Resumable, State};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer, OfferRefusal};
 use retp_proto::wire::{Delivery, Incident, SendRefusal};
@@ -180,6 +180,28 @@ impl<T: Transport, C: Clock> Client<T, C> {
         settings: Settings,
     ) -> Result<Self, ClientError> {
         let engine = Engine::start(offer, handlers, credentials, clock.now())?;
+        Self::opening(engine, transport, clock, settings)
+    }
+
+    /// Open a session over `transport` by asking back the session `lost`
+    /// (OSDU's `ResumeSession`, ADR-0003) - on a server that gives it back, the
+    /// same session, its id and what it negotiated; on one that does not, a new
+    /// session, opened at once ([`Client::resumed`] says which). `offer` and
+    /// `handlers` are those `lost` was opened with.
+    pub fn resume(
+        transport: T,
+        clock: C,
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        settings: Settings,
+        lost: Resumable,
+    ) -> Result<Self, ClientError> {
+        let engine = Engine::resume(offer, handlers, credentials, lost, clock.now())?;
+        Self::opening(engine, transport, clock, settings)
+    }
+
+    fn opening(engine: Engine, transport: T, clock: C, settings: Settings) -> Result<Self, ClientError> {
         let mut client = Self {
             engine,
             transport,
@@ -203,6 +225,19 @@ impl<T: Transport, C: Clock> Client<T, C> {
         self.engine
             .negotiated()
             .expect("a client exists once its session is open")
+    }
+
+    /// What to ask this session back with, if its connection is lost
+    /// ([`Client::resume`]).
+    pub fn resumable(&self) -> Resumable {
+        self.engine
+            .resumable()
+            .expect("a client exists once its session is open")
+    }
+
+    /// Whether the session was given back by `ResumeSession`, not opened anew.
+    pub fn resumed(&self) -> bool {
+        self.engine.resumed()
     }
 
     /// How this client takes the server's faults.

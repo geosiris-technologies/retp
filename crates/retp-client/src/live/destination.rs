@@ -134,6 +134,14 @@ fn record(event: &Event, received: &str) -> Value {
         Event::Fault(incident) => {
             json!({"received": received, "event": "fault", "incident": incident.to_string()})
         }
+        Event::ResumeAsked(resume) => json!({
+            "received": received,
+            "event": "resume_asked",
+            "session": uuid_text(&resume.session_id),
+        }),
+        Event::ResumeRefused(incident) => {
+            json!({"received": received, "event": "resume_refused", "incident": incident.to_string()})
+        }
     }
 }
 
@@ -156,6 +164,15 @@ fn notice(event: &Event) -> String {
         Event::Closed { reason } => format!("the server closed the session: {reason}"),
         Event::Fault(incident) => format!("the server sent what could not be taken: {incident}"),
         Event::Delivered(_) => "a message was delivered".to_string(),
+        Event::ResumeAsked(resume) => {
+            format!(
+                "the client asks back the session {}",
+                uuid_text(&resume.session_id)
+            )
+        }
+        Event::ResumeRefused(incident) => {
+            format!("the lost session was not given back, a new one is opened: {incident}")
+        }
     }
 }
 

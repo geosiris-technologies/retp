@@ -15,6 +15,19 @@
 //! microseconds since the Unix epoch, UTC, the unit of ETP's
 //! `currentDateTime` - so that a test moves time forward by a number, and the
 //! transport keeps its own timer.
+//!
+//! **A lost session can be asked back** with OSDU's `ResumeSession` (protocol
+//! [`CORE_OSDU`](crate::wire::CORE_OSDU), ADR-0003), on a new WebSocket and in
+//! place of `RequestSession`. ETP 1.2 itself has no session survivability; this
+//! is OSDU's extension, read in its `open-etp-server`. A client built with
+//! [`Connection::client_resuming`] sends it, from what it kept of the lost
+//! session ([`Resumable`]); refused, it says so ([`Event::ResumeRefused`]) and
+//! opens a new session on the same WebSocket. A server built
+//! [`Connection::accepting_resume`] hands the question to the application
+//! ([`Event::ResumeAsked`]), which alone knows the lost session, and answers
+//! with [`Connection::resume`] or [`Connection::refuse_resume`]. Either way the
+//! new connection is authorized from the start: nothing of the lost session's
+//! authorization is carried over (the bypass of OSDU's issue #232).
 
 use std::collections::BTreeMap;
 
@@ -24,6 +37,7 @@ use retp_types::dispatch::Message;
 use retp_types::protocol::core::{
     Authorize, AuthorizeResponse, CloseSession, OpenSession, Ping, Pong, RequestSession,
 };
+use retp_types::protocol::core_osdu::{ResumeSession, ResumeSessionResponse};
 
 use crate::capabilities::{Problem, names};
 use crate::credentials::Credentials;
@@ -196,6 +210,32 @@ pub enum Event {
     },
     /// Something wrong in what the peer sent, not answered on the wire.
     Fault(Incident),
+    /// A server's: the client asks back the session it lost
+    /// ([`Connection::accepting_resume`]). Answer with [`Connection::resume`]
+    /// or [`Connection::refuse_resume`]; until then the session is not open.
+    ResumeAsked(ResumeSession),
+    /// A client's: the server would not give the lost session back. A new
+    /// session is asked at once, on the same WebSocket ([`Event::Opened`] or
+    /// [`Event::Refused`] follows).
+    ResumeRefused(Incident),
+}
+
+/// What a client keeps of an open session, to ask for it back with
+/// `ResumeSession` once its WebSocket is lost ([`Connection::resumable`],
+/// [`Connection::client_resuming`]).
+///
+/// The `RequestSession` it sent and the `OpenSession` it received are what the
+/// session was negotiated from: a resumed session is negotiated from them
+/// again, by both ends, so that both agree on what it speaks without the
+/// negotiation crossing the wire twice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resumable {
+    /// The id of the session, given by the server in its `OpenSession`.
+    pub session_id: Uuid,
+    /// The `RequestSession` this client sent.
+    pub request: RequestSession,
+    /// The `OpenSession` the server answered.
+    pub open: OpenSession,
 }
 
 /// What one call produced.
@@ -242,10 +282,18 @@ pub struct Connection {
     // A client's.
     credentials: Option<Credentials>,
     credentials_tried: bool,
+    // The RequestSession the session is negotiated from: the client's, sent;
+    // the server's, received (or given back by `resume`).
     request: Option<RequestSession>,
     request_id: Option<i64>,
     authorize_id: Option<i64>,
+    open: Option<OpenSession>,
+    resuming: Option<Resumable>,
+    resume_id: Option<i64>,
+    resumed: bool,
     // A server's.
+    accepts_resume: bool,
+    pending_resume: Option<Delivery>,
     authorizer: Option<Box<dyn Authorizer>>,
     authorized: bool,
     expires_at: Option<Micros>,
@@ -295,6 +343,12 @@ impl Connection {
             request: None,
             request_id: None,
             authorize_id: None,
+            open: None,
+            resuming: None,
+            resume_id: None,
+            resumed: false,
+            accepts_resume: false,
+            pending_resume: None,
             authorizer: None,
             authorized: false,
             expires_at: None,
@@ -337,6 +391,40 @@ impl Connection {
         connection.authorizer = authorizer;
         connection.session_id = session_id;
         Ok(connection)
+    }
+
+    /// A client's end that first asks back the session `lost` - OSDU's
+    /// `ResumeSession` - and opens a new one if the server will not give it
+    /// back. `offer` must be the one the lost session was opened with: the
+    /// session is negotiated again from what `lost` kept, against it.
+    pub fn client_resuming(
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        lost: Resumable,
+        now: Micros,
+    ) -> Result<Self, OfferRefusal> {
+        let mut connection = Self::client(offer, handlers, credentials, now)?;
+        connection.speak_core_osdu();
+        connection.resuming = Some(lost);
+        Ok(connection)
+    }
+
+    /// A server's end that takes `ResumeSession`: each one is handed to the
+    /// application as [`Event::ResumeAsked`]. Without this, protocol 2400 is
+    /// answered `EUNSUPPORTED_PROTOCOL`, as any protocol nobody announced.
+    pub fn accepting_resume(mut self) -> Self {
+        self.accepts_resume = true;
+        self.speak_core_osdu();
+        self
+    }
+
+    fn speak_core_osdu(&mut self) {
+        self.wire.reconfigure(
+            crate::wire::Config::new()
+                .tolerance(self.offer.tolerance)
+                .resumption(true),
+        );
     }
 
     /// Send-queue thresholds, for [`Connection::pressure`].
@@ -385,6 +473,32 @@ impl Connection {
         self.negotiated.as_ref()
     }
 
+    /// A client's: what to ask this session back with, once it is open - for
+    /// [`Connection::client_resuming`] on the next WebSocket, if this one is lost.
+    pub fn resumable(&self) -> Option<Resumable> {
+        if self.side != Side::Client {
+            return None;
+        }
+        let (request, open) = (self.request.as_ref()?, self.open.as_ref()?);
+        Some(Resumable {
+            session_id: open.session_id,
+            request: request.clone(),
+            open: open.clone(),
+        })
+    }
+
+    /// The `RequestSession` the session was negotiated from: the client's, as
+    /// sent; the server's, as received, or as given to [`Connection::resume`].
+    /// What a server keeps to give a lost session back.
+    pub fn requested(&self) -> Option<&RequestSession> {
+        self.request.as_ref()
+    }
+
+    /// Whether the session was opened by `ResumeSession`, not `RequestSession`.
+    pub fn resumed(&self) -> bool {
+        self.resumed
+    }
+
     /// The last `currentDateTime` heard from the peer (ADR-0003).
     pub fn watermark(&self) -> Option<Micros> {
         self.watermark
@@ -400,14 +514,37 @@ impl Connection {
         &mut self.wire
     }
 
-    /// Begin: a client sends its `RequestSession` (§5.2.1.1 step 1); a server
-    /// waits for one.
+    /// Begin: a client sends its `RequestSession` (§5.2.1.1 step 1), or its
+    /// `ResumeSession` if it resumes; a server waits for one.
     pub fn start(&mut self, now: Micros) -> Step {
         let mut step = Step::default();
         if self.side == Side::Client {
-            self.send_request_session(now, &mut step);
+            self.send_opening(now, &mut step);
         }
         step
+    }
+
+    /// A client's first word: `ResumeSession` while it has a session to ask
+    /// back, `RequestSession` otherwise.
+    fn send_opening(&mut self, now: Micros, step: &mut Step) {
+        let Some(lost) = &self.resuming else {
+            return self.send_request_session(now, step);
+        };
+        let resume = ResumeSession {
+            application_name: self.offer.application_name.clone(),
+            application_version: self.offer.application_version.clone(),
+            client_instance_id: self.offer.instance_id,
+            current_date_time: now,
+            session_id: lost.session_id,
+        };
+        let out = self
+            .wire
+            .request(&resume)
+            .expect("CoreOSDU is spoken while resuming");
+        self.resume_id = Some(out.header.message_id);
+        self.session_requested_at.get_or_insert(now);
+        self.state = State::Negotiating;
+        step.send.push(out);
     }
 
     fn send_request_session(&mut self, now: Micros, step: &mut Step) {
@@ -692,6 +829,19 @@ impl Connection {
                 let open = open.clone();
                 self.client_open_session(&delivery, open, step);
             }
+            Message::ResumeSession(resume) if self.side == Side::Server && self.accepts_resume => {
+                let resume = resume.clone();
+                self.server_resume_session(delivery, resume, now, step);
+            }
+            Message::ResumeSessionResponse(response)
+                if self.side == Side::Client
+                    && self
+                        .resume_id
+                        .is_some_and(|id| delivery.place == Place::Answers { request: id }) =>
+            {
+                let response = response.clone();
+                self.client_resumed(&delivery, response, step);
+            }
             Message::Authorize(authorize) if self.side == Side::Server => {
                 let verdict = match &mut self.authorizer {
                     Some(authorizer) => authorizer.authorize(&authorize.authorization, now),
@@ -725,7 +875,7 @@ impl Connection {
             Message::AuthorizeResponse(response) if self.side == Side::Client => {
                 if response.success {
                     if self.state != State::Open {
-                        self.send_request_session(now, step);
+                        self.send_opening(now, step);
                     }
                 } else {
                     self.state = State::Authorizing;
@@ -734,8 +884,12 @@ impl Connection {
                     });
                 }
             }
-            Message::ProtocolException(_) => self.exception(delivery, step),
-            Message::RequestSession(_) | Message::OpenSession(_) | Message::AuthorizeResponse(_) => {
+            Message::ProtocolException(_) => self.exception(delivery, now, step),
+            Message::RequestSession(_)
+            | Message::OpenSession(_)
+            | Message::AuthorizeResponse(_)
+            | Message::ResumeSession(_)
+            | Message::ResumeSessionResponse(_) => {
                 let incident = EtpError::EINVALID_MESSAGETYPE
                     .with_detail("this side of the connection never receives that message");
                 step.send.push(self.wire.refuse(&delivery, &incident));
@@ -774,16 +928,21 @@ impl Connection {
         }
     }
 
-    fn exception(&mut self, delivery: Delivery, step: &mut Step) {
+    fn exception(&mut self, delivery: Delivery, now: Micros, step: &mut Step) {
         let Some(Exception::Single(error)) = delivery.exception() else {
             step.events.push(Event::Delivered(delivery));
             return;
         };
-        let during_negotiation = self.side == Side::Client
-            && delivery.place
-                == Place::Answers {
-                    request: self.request_id.unwrap_or(-1),
-                };
+        let to_resume = self.side == Side::Client
+            && self
+                .resume_id
+                .is_some_and(|id| delivery.place == Place::Answers { request: id });
+        let during_negotiation = to_resume
+            || self.side == Side::Client
+                && delivery.place
+                    == Place::Answers {
+                        request: self.request_id.unwrap_or(-1),
+                    };
         let to_authorize = self.side == Side::Client
             && self
                 .authorize_id
@@ -815,6 +974,16 @@ impl Connection {
                 }
             };
             step.send.push(out);
+            return;
+        }
+        if to_resume {
+            // The lost session is not given back (OSDU: ENOT_FOUND, "Session
+            // not found or expired"): said, then a new session is asked, on
+            // the same WebSocket.
+            self.resuming = None;
+            self.resume_id = None;
+            step.events.push(Event::ResumeRefused(incident()));
+            self.send_request_session(now, step);
             return;
         }
         if during_negotiation {
@@ -864,6 +1033,9 @@ impl Connection {
                 if let Ok(out) = self.wire.respond(delivery, &open) {
                     step.send.push(out);
                 }
+                // A ResumeSession left unanswered is moot: this one opened.
+                self.pending_resume = None;
+                self.request = Some(request);
                 self.opened(negotiated, step);
             }
             Err(incident) => {
@@ -883,11 +1055,135 @@ impl Connection {
             .expect("an OpenSession answers our RequestSession");
         self.watermark = Some(open.current_date_time);
         match accept_open_session(&self.offer, &request, &open) {
-            Ok(negotiated) => self.opened(negotiated, step),
+            Ok(negotiated) => {
+                self.open = Some(open);
+                self.opened(negotiated, step);
+            }
             Err(incident) => {
                 step.send.push(self.wire.exception(&delivery.header, &incident));
                 step.events.push(Event::Refused(incident));
                 self.closing("the OpenSession could not be processed", step);
+            }
+        }
+    }
+
+    fn server_resume_session(
+        &mut self,
+        delivery: Delivery,
+        resume: ResumeSession,
+        now: Micros,
+        step: &mut Step,
+    ) {
+        if self.state == State::Open || self.pending_resume.is_some() {
+            let incident = EtpError::EINVALID_STATE.with_detail(if self.state == State::Open {
+                "the session is open already"
+            } else {
+                "a ResumeSession is already being answered"
+            });
+            step.send.push(self.wire.refuse(&delivery, &incident));
+            return;
+        }
+        self.session_requested_at.get_or_insert(now);
+        self.watermark = Some(resume.current_date_time);
+        if !self.authorized {
+            // As for RequestSession (§5.2.1.1 step 2.b): the new connection is
+            // authorized for itself, whatever the lost one was.
+            self.state = State::Authorizing;
+            let incident = EtpError::EAUTHORIZATION_REQUIRED
+                .with_detail("authorize first, then send ResumeSession again");
+            step.send.push(self.wire.refuse(&delivery, &incident));
+            return;
+        }
+        self.state = State::Negotiating;
+        self.pending_resume = Some(delivery);
+        step.events.push(Event::ResumeAsked(resume));
+    }
+
+    /// A server's answer to [`Event::ResumeAsked`]: the session is given back.
+    /// `lost` is the `RequestSession` it was opened with ([`Connection::requested`]
+    /// of the lost connection, kept by the application): the session is
+    /// negotiated from it again, against this end's offer, and opens under the
+    /// id the client asked for. If it no longer negotiates (the offer changed
+    /// since), the resume is refused, and the client may ask a new session.
+    pub fn resume(&mut self, lost: &RequestSession, now: Micros) -> Step {
+        let mut step = Step::default();
+        let Some(delivery) = self.pending_resume.take() else {
+            tracing::warn!(target: "retp_proto", "resume: no ResumeSession is waiting for an answer");
+            return step;
+        };
+        let Body::Message(Message::ResumeSession(asked)) = &delivery.body else {
+            unreachable!("only a ResumeSession is kept to be answered");
+        };
+        let session_id = asked.session_id;
+        match open_session(&self.offer, lost, session_id, now, self.earliest_retained) {
+            Ok((_, negotiated)) => {
+                let response = ResumeSessionResponse {
+                    application_name: self.offer.application_name.clone(),
+                    application_version: self.offer.application_version.clone(),
+                    server_instance_id: self.offer.instance_id,
+                    current_date_time: now,
+                    session_id,
+                    earliest_retained_change_time: self.earliest_retained,
+                };
+                if let Ok(out) = self.wire.respond(&delivery, &response) {
+                    step.send.push(out);
+                }
+                self.session_id = session_id;
+                self.request = Some(lost.clone());
+                self.resumed = true;
+                self.opened(negotiated, &mut step);
+            }
+            Err(incident) => {
+                let incident = EtpError::EREQUEST_DENIED.with_detail(format!(
+                    "the lost session no longer negotiates with this server: {}",
+                    incident.message()
+                ));
+                step.send.push(self.wire.refuse(&delivery, &incident));
+                self.state = State::AwaitingSession;
+            }
+        }
+        step
+    }
+
+    /// A server's answer to [`Event::ResumeAsked`]: the session is not given
+    /// back (OSDU answers `ENOT_FOUND`, "Session not found or expired"). The
+    /// WebSocket stays: the client may ask a new session on it.
+    pub fn refuse_resume(&mut self, incident: &Incident) -> Step {
+        let mut step = Step::default();
+        if let Some(delivery) = self.pending_resume.take() {
+            step.send.push(self.wire.refuse(&delivery, incident));
+            self.state = State::AwaitingSession;
+        }
+        step
+    }
+
+    fn client_resumed(&mut self, delivery: &Delivery, response: ResumeSessionResponse, step: &mut Step) {
+        let lost = self
+            .resuming
+            .take()
+            .expect("a ResumeSessionResponse answers our ResumeSession");
+        self.resume_id = None;
+        self.watermark = Some(response.current_date_time);
+        // The server holds the session open from here: a fault now is not a
+        // refused resume (a new session would find this one open) but a session
+        // that cannot be processed, closed as an OpenSession would be.
+        let negotiated = if response.session_id != lost.session_id {
+            Err(EtpError::EREQUEST_DENIED
+                .with_detail("the ResumeSessionResponse names another session than the one asked back"))
+        } else {
+            accept_open_session(&self.offer, &lost.request, &lost.open)
+        };
+        match negotiated {
+            Ok(negotiated) => {
+                self.request = Some(lost.request);
+                self.open = Some(lost.open);
+                self.resumed = true;
+                self.opened(negotiated, step);
+            }
+            Err(incident) => {
+                step.send.push(self.wire.exception(&delivery.header, &incident));
+                step.events.push(Event::Refused(incident));
+                self.closing("the ResumeSessionResponse could not be processed", step);
             }
         }
     }

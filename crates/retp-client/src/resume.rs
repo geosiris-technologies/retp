@@ -58,16 +58,15 @@ pub trait Connector {
     ///    `entitlement_` are not carried over, and a missing entitlement is
     ///    read as unrestricted access. A client that leant on it would hold
     ///    rights nobody granted it, which this client forbids by name (ADR-0003);
-    /// 4. its **wire format is not published**: the message type numbers and
-    ///    the field order - which *is* the Avro encoding - are in a
-    ///    dependency the repository does not carry. Guessing them would send
-    ///    a message the server cannot decode, and this repository refuses by
-    ///    name rather than guess.
+    /// 4. its **wire format** is published in `open-etp-server`'s
+    ///    `etp-1.2.avpr`: the generated `retp_types::protocol::core_osdu`
+    ///    holds it, and the connection speaks it
+    ///    (`Connection::client_resuming`, `native::connect_resuming`).
     ///
-    /// So the implementation that exists is the one below: none. The day the
-    /// format is published, a connector overrides this - and it still passes
-    /// through the whole authorization, because what is copied from OSDU is
-    /// its protocol, not its hole (ADR-0003).
+    /// The default below offers no resume: a connector that wants one
+    /// overrides it, with `connect_resuming` - which still passes through the
+    /// whole authorization, because what is copied from OSDU is its protocol,
+    /// not its hole (ADR-0003).
     fn resume(&mut self) -> Option<Result<Self::Session, Box<dyn std::error::Error + Send + Sync>>> {
         None
     }

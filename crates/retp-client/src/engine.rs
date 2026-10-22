@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::{Connection, Event, Handler, State, Step};
+use retp_proto::connection::{Connection, Event, Handler, Resumable, State, Step};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer};
 use retp_proto::wire::{Delivery, Options, Place, Tolerance};
@@ -76,6 +76,26 @@ impl Engine {
         now: i64,
     ) -> Result<Self, ClientError> {
         let connection = Connection::client(offer, handlers, credentials, now).map_err(ClientError::Offer)?;
+        Ok(Self::begin(connection, now))
+    }
+
+    /// A client's session that first asks back the session `lost` (OSDU's
+    /// `ResumeSession`, ADR-0003), and opens a new one if the server will not
+    /// give it back - which [`Engine::resumed`] then says. `offer` and
+    /// `handlers` are those the lost session was opened with.
+    pub fn resume(
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        lost: Resumable,
+        now: i64,
+    ) -> Result<Self, ClientError> {
+        let connection = Connection::client_resuming(offer, handlers, credentials, lost, now)
+            .map_err(ClientError::Offer)?;
+        Ok(Self::begin(connection, now))
+    }
+
+    fn begin(connection: Connection, now: i64) -> Self {
         let mut engine = Self {
             connection,
             outbox: Vec::new(),
@@ -91,7 +111,18 @@ impl Engine {
         };
         let start = engine.connection.start(now);
         engine.take_step(start, now);
-        Ok(engine)
+        engine
+    }
+
+    /// What to ask this session back with once its connection is lost
+    /// ([`Engine::resume`]): `None` until the session is open.
+    pub fn resumable(&self) -> Option<Resumable> {
+        self.connection.resumable()
+    }
+
+    /// Whether the session was given back by `ResumeSession`, not opened anew.
+    pub fn resumed(&self) -> bool {
+        self.connection.resumed()
     }
 
     /// How the opening went: `None` while it goes on. Asked again, the same
@@ -441,6 +472,11 @@ impl Engine {
                     self.opening = Some(Err(ClientError::AuthorizationNeeded { challenges }));
                 }
                 Event::Closed { reason } => self.opening = Some(Err(ClientError::Closed { reason })),
+                // A new session is asked at once, on the same connection: the
+                // opening goes on, and the refusal is said.
+                Event::ResumeRefused(incident) => {
+                    tracing::warn!(target: "retp_client", "the lost session was not given back ({incident}): a new session is opened");
+                }
                 other => self.unsolicited.push_back(other),
             }
             return;

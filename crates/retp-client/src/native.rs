@@ -919,6 +919,38 @@ pub struct Connect {
 
 /// Open a WebSocket and a session over it.
 pub fn connect(connect: Connect) -> Result<Client<WebSocketTransport, SystemClock>, ClientError> {
+    let (transport, connect) = open_socket(connect)?;
+    Client::open(
+        transport,
+        SystemClock,
+        connect.offer,
+        connect.handlers,
+        connect.endpoint.credentials,
+        Settings::default(),
+    )
+}
+
+/// Open a WebSocket and ask back over it the session `lost`, which another
+/// WebSocket held ([`Client::resumable`]) - OSDU's `ResumeSession`; a server
+/// that will not give it back opens a new session instead
+/// ([`Client::resumed`]). `connect` is what `lost` was opened with.
+pub fn connect_resuming(
+    connect: Connect,
+    lost: retp_proto::connection::Resumable,
+) -> Result<Client<WebSocketTransport, SystemClock>, ClientError> {
+    let (transport, connect) = open_socket(connect)?;
+    Client::resume(
+        transport,
+        SystemClock,
+        connect.offer,
+        connect.handlers,
+        connect.endpoint.credentials,
+        Settings::default(),
+        lost,
+    )
+}
+
+fn open_socket(connect: Connect) -> Result<(WebSocketTransport, Connect), ClientError> {
     let settings = HandshakeSettings {
         max_message: connect.max_message,
         max_frame: None,
@@ -928,14 +960,7 @@ pub fn connect(connect: Connect) -> Result<Client<WebSocketTransport, SystemCloc
         .map_err(|why| ClientError::Transport(TransportError::new(why.to_string())))?;
     let handshake = connect.endpoint.profile.adapt(handshake);
     let transport = WebSocketTransport::connect(&handshake, connect.endpoint.certificates)?;
-    Client::open(
-        transport,
-        SystemClock,
-        connect.offer,
-        connect.handlers,
-        connect.endpoint.credentials,
-        Settings::default(),
-    )
+    Ok((transport, connect))
 }
 
 /// A [`Connector`](crate::resume::Connector) for the native transport:

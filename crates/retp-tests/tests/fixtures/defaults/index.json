@@ -580,6 +580,16 @@
     "bytes": 31
   },
   {
+    "fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSession",
+    "declared": 0,
+    "bytes": 35
+  },
+  {
+    "fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSessionResponse",
+    "declared": 0,
+    "bytes": 36
+  },
+  {
     "fullName": "Energistics.Etp.v12.Protocol.DataArray.GetDataArrayMetadata",
     "declared": 0,
     "bytes": 1

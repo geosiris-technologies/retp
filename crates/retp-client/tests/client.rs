@@ -46,6 +46,7 @@ use retp_types::datatypes::{
 };
 use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem, SupportedDataObject, Uuid};
 use retp_types::dispatch::Message;
+use retp_types::protocol::core::RequestSession;
 use retp_types::protocol::data_array::{
     GetDataArrayMetadataResponse, GetDataArraysResponse, GetDataSubarraysResponse, PutDataArraysResponse,
     PutDataSubarraysResponse, PutUninitializedDataArraysResponse,
@@ -5117,4 +5118,43 @@ fn a_null_in_a_json_array_is_a_no_value_not_a_refusal() {
     assert_eq!(values.len(), 4);
     assert_eq!((values[0], values[2]), (1.5, 3.5));
     assert!(values[1].is_nan() && values[3].is_nan(), "{values:?}");
+}
+
+// -- resuming a lost session (OSDU's ResumeSession, ADR-0003) -----------------
+
+/// A client on a new connection that asks back the session `lost`, to a server
+/// that gives it back (`kept`, what it kept of it) or not (`None`).
+fn resuming(
+    lost: retp_proto::connection::Resumable,
+    kept: Option<RequestSession>,
+) -> Client<Loopback, ManualClock> {
+    let clock = ManualClock::new(T0 + 60 * S);
+    let server = server_full(false, false, None, T0 + 60 * S).accepting_resume();
+    let transport = MemoryTransport::new(server, clock.clone()).resumes(kept);
+    let (offer, handlers) = reading_client("test client", "0.1", Uuid([1; 16]), &["resqml20.*".to_string()]);
+    let handlers: Vec<Box<dyn Handler>> = handlers
+        .into_iter()
+        .filter(|h| h.offer().protocol != 24)
+        .collect();
+    Client::resume(transport, clock, offer, handlers, None, Settings::default(), lost).unwrap()
+}
+
+#[test]
+fn a_lost_session_is_asked_back_and_goes_on() {
+    let first = open(false, None);
+    let lost = first.resumable();
+    let was = first.negotiated().clone();
+    let mut client = resuming(lost.clone(), Some(lost.request.clone()));
+    assert!(client.resumed(), "the server gave the session back");
+    assert_eq!(client.negotiated().session_id, was.session_id);
+    assert_eq!(client.negotiated().protocols, was.protocols);
+    client.ping().expect("the resumed session answers");
+}
+
+#[test]
+fn a_session_not_given_back_is_opened_anew() {
+    let lost = open(false, None).resumable();
+    let mut client = resuming(lost, None);
+    assert!(!client.resumed(), "refused: a new session");
+    client.ping().expect("the new session answers");
 }

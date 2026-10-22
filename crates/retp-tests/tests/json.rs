@@ -143,7 +143,7 @@ fn every_message_agrees_with_fastavros_json() {
         "only the records without a field may lack a fastavro witness"
     );
     let checked = results.len() - unwitnessed.len();
-    assert_eq!(checked, 133, "every other message has a JSON fixture");
+    assert_eq!(checked, 135, "every other message has a JSON fixture");
 }
 
 /// A record without a field is `{}` -- Avro 1.x, "JSON Encoding": a record is an

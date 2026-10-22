@@ -1,4 +1,4 @@
-//! The 138 ETP messages, by type, for tests that must visit every one.
+//! The 140 ETP messages (138 of Energistics, 2 of OSDU's CoreOSDU), by type, for tests that must visit every one.
 //!
 //! Read off the dispatch table of `retp-types` (`dispatch::decode`),
 //! one line per arm. `MESSAGE_COUNT` is what the test compares the length
@@ -147,6 +147,8 @@ macro_rules! every_message {
         (WMLS_GetVersionResponse, retp_types::private_protocols::witsml_soap::WMLS_GetVersionResponse),
         (WMLS_UpdateInStore, retp_types::private_protocols::witsml_soap::WMLS_UpdateInStore),
         (WMLS_UpdateInStoreResponse, retp_types::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse),
+        (ResumeSession, retp_types::protocol::core_osdu::ResumeSession),
+        (ResumeSessionResponse, retp_types::protocol::core_osdu::ResumeSessionResponse),
         }
     };
 }

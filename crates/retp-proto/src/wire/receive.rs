@@ -27,8 +27,8 @@ use super::send::{ACKNOWLEDGE, PROTOCOL_EXCEPTION};
 use retp_types::protocol::core::ProtocolException;
 
 use super::{
-    Body, Delivery, EtpError, Exception, FIRST_PRIVATE_PROTOCOL, Flags, Held, Incident, Open, Place,
-    Received, Tolerance, Wire,
+    Body, CORE_OSDU, Delivery, EtpError, Exception, FIRST_PRIVATE_PROTOCOL, Flags, Held, Incident, Open,
+    Place, Received, Tolerance, Wire,
 };
 
 /// What becomes of the correlation table once the body has decoded.
@@ -210,7 +210,7 @@ impl Wire {
         }
 
         let protocol = header.protocol;
-        if protocol >= FIRST_PRIVATE_PROTOCOL {
+        if protocol >= FIRST_PRIVATE_PROTOCOL && !(protocol == CORE_OSDU && self.config.resumption) {
             if !self.config.private.contains(&protocol) {
                 return Err(EtpError::EUNSUPPORTED_PROTOCOL
                     .with_detail(format!("private protocol {protocol} was not negotiated")));

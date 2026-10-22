@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use retp_proto::connection::Connection;
+use retp_proto::connection::{Connection, Event, Step};
+use retp_proto::wire::EtpError;
+use retp_types::protocol::core::RequestSession;
 
 use crate::{Clock, Transport, TransportError};
 
@@ -60,6 +62,7 @@ pub struct MemoryTransport {
     sent: usize,
     started: i64,
     patience: Duration,
+    lost: Option<RequestSession>,
 }
 
 impl MemoryTransport {
@@ -75,6 +78,30 @@ impl MemoryTransport {
             sent: 0,
             started,
             patience: Duration::from_secs(3600),
+            lost: None,
+        }
+    }
+
+    /// The server's answer to a `ResumeSession` (the server built
+    /// `accepting_resume`): the session given back, negotiated from `lost` -
+    /// what a real server keeps of the session it lost -, or, with `None` (the
+    /// default), refused `ENOT_FOUND` as OSDU refuses a session it no longer has.
+    pub fn resumes(mut self, lost: Option<RequestSession>) -> Self {
+        self.lost = lost;
+        self
+    }
+
+    /// What the server sends for `step`, and for the resume it asks, if any.
+    fn take(&mut self, step: Step) {
+        self.to_client.extend(step.send.into_iter().map(|o| o.bytes));
+        if step.events.iter().any(|e| matches!(e, Event::ResumeAsked(_))) {
+            let answer = match &self.lost {
+                Some(lost) => self.server.resume(lost, self.clock.now()),
+                None => self
+                    .server
+                    .refuse_resume(&EtpError::ENOT_FOUND.with_detail("Session not found or expired")),
+            };
+            self.to_client.extend(answer.send.into_iter().map(|o| o.bytes));
         }
     }
 
@@ -115,7 +142,7 @@ impl Transport for MemoryTransport {
         }
         self.sent += 1;
         let step = self.server.receive(message, self.clock.now());
-        self.to_client.extend(step.send.into_iter().map(|o| o.bytes));
+        self.take(step);
         Ok(())
     }
 
@@ -133,7 +160,7 @@ impl Transport for MemoryTransport {
             ));
         }
         let step = self.server.tick(self.clock.now());
-        self.to_client.extend(step.send.into_iter().map(|o| o.bytes));
+        self.take(step);
         Ok(None)
     }
 

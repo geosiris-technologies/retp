@@ -189,8 +189,20 @@ impl Refused {
     }
 }
 
-/// What this crate asks credentials from. See the [module](self) for what it
-/// promises (the witness, the thread) and what it leaves to the application.
+/// What this crate asks credentials from, when one fixed [`Credentials`] is
+/// not enough.
+///
+/// A source keeps **no state per connection**: every [`Fresh`] it gives
+/// carries a [`Witness`], and the refusal of **those** credentials brings that
+/// witness back. An ETP session and REST calls to the same server can then
+/// share one source, and the refusal of one is never read as the refusal of
+/// the credentials the other holds.
+///
+/// A source may block (it may fetch a token): it is never called on the thread
+/// or task that runs a session, but on the thread of the caller that opens the
+/// session, renews it or drives the REST future.
+///
+/// When to renew is the application's rule, not this crate's.
 pub trait CredentialSource: Send + Sync {
     /// Credentials for ONE opening, ONE REST request or ONE renewal. May
     /// block: never called on the thread or task of a session.

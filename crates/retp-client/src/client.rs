@@ -35,6 +35,7 @@ impl Default for Settings {
 
 /// Why the client could not do what was asked.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ClientError {
     /// The offer is not one a session can be asked with.
     Offer(OfferRefusal),

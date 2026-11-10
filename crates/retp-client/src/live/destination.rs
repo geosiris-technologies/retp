@@ -151,6 +151,9 @@ fn record(event: &Event, received: &str) -> Value {
         Event::ResumeRefused(incident) => {
             json!({"received": received, "event": "resume_refused", "incident": incident.to_string()})
         }
+        // `Event` is non-exhaustive: a case added by a later version of the library. It is
+        // recorded by a generic name, never by its debug text.
+        _ => json!({"received": received, "event": "unknown"}),
     }
 }
 
@@ -189,6 +192,8 @@ fn notice(event: &Event) -> String {
         Event::ResumeRefused(incident) => {
             format!("the lost session was not given back, a new one is opened: {incident}")
         }
+        // `Event` is non-exhaustive: a case added by a later version of the library.
+        _ => "an event this version does not know".to_string(),
     }
 }
 

@@ -165,6 +165,7 @@ pub enum State {
 /// an allocation per message to save bytes on the rare others.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Event {
     /// The session is open: [`Connection::negotiated`] says with what.
     Opened,

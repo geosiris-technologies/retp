@@ -84,6 +84,9 @@ pub enum Kind {
     /// Something went wrong locally: an object that does not read or write, a
     /// package that does not open.
     Local,
+    /// A failure this version of the bridge has no name for (a case a later
+    /// version of the library added). The base `RetpError`, never a success.
+    Other,
 }
 
 /// A failure, as the bridge reports it: a kind, the library's own words, and
@@ -154,6 +157,9 @@ impl From<ClientError> for Failure {
             ClientError::Send(_) | ClientError::Invalid(_) => Kind::NotSent,
             ClientError::TimedOut { .. } => Kind::TimedOut,
             ClientError::AnswerRefused { .. } => Kind::AnswerRefused,
+            // `ClientError` is non-exhaustive: a case added by a later version of the
+            // library. It is a failure of no named kind, and it keeps the library's text.
+            _ => Kind::Other,
         };
         Failure::new(kind, message)
     }

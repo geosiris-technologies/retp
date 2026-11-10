@@ -160,6 +160,14 @@ changes:
 session.renew()?; // asks the source, sends Authorize, goes back to the source once if refused
 ```
 
+`retp_proto::connection::Event` and `ClientError` are `#[non_exhaustive]`: a later version may
+add a case (the renewal added some) without a breaking change. A `match` over either, written
+in another crate, needs a catch-all arm; treat an unknown event as "not for me" and an unknown
+error as a failure, never as a success, and do not print it with `{:?}`. The library's own
+destinations do the same: `JsonLines` writes `{"received", "event": "unknown"}`, and the
+console says "an event this version does not know"; the Python bridge raises the base
+`RetpError` with the error's own text.
+
 `Credentials` is wiped from memory when dropped (`zeroize`), every clone with it; a copy made
 by whoever reads `header()` is theirs to wipe.
 

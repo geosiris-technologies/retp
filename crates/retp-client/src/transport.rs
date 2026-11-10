@@ -8,12 +8,41 @@ use std::time::Duration;
 pub struct TransportError {
     /// What failed, as the transport says it.
     pub why: String,
+    /// Set when the server answered the WebSocket upgrade with an HTTP
+    /// refusal: the status and the challenges, for a caller to act on without
+    /// reading [`why`](Self::why). [`ClientError`](crate::ClientError) takes
+    /// it as `HandshakeRefused`.
+    pub handshake: Option<HandshakeRefusal>,
+}
+
+/// An HTTP refusal of the WebSocket upgrade: what an application needs to tell
+/// a credential to try again (401) from a scope to give up on (403, RFC 6750
+/// section 3.1). Only the status and the `WWW-Authenticate` challenges are
+/// kept - never the request, never another header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeRefusal {
+    /// The HTTP status of the answer.
+    pub status: u16,
+    /// The `WWW-Authenticate` challenges, one per header value; empty when the
+    /// server sent none.
+    pub challenges: Vec<String>,
 }
 
 impl TransportError {
     /// A failure, described.
     pub fn new(why: impl Into<String>) -> Self {
-        Self { why: why.into() }
+        Self {
+            why: why.into(),
+            handshake: None,
+        }
+    }
+
+    /// A failure that is an HTTP refusal of the WebSocket upgrade.
+    pub fn handshake_refused(why: impl Into<String>, status: u16, challenges: Vec<String>) -> Self {
+        Self {
+            why: why.into(),
+            handshake: Some(HandshakeRefusal { status, challenges }),
+        }
     }
 }
 

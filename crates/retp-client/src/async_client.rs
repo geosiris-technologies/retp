@@ -14,6 +14,7 @@
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
+use std::time::SystemTime;
 
 use retp_avro::EtpMessage;
 use retp_proto::connection::{Event, Handler};
@@ -23,6 +24,7 @@ use retp_proto::wire::{Delivery, Tolerance};
 
 use crate::caller::Caller;
 use crate::engine::Engine;
+use crate::source::{self, CredentialSource, Refused};
 use crate::{Acknowledged, ClientError, Clock, TransportError};
 
 /// `Send` on a native target, where the client is driven by a task of its
@@ -220,6 +222,50 @@ impl<C: Clock> AsyncClient<C> {
             id
         };
         self.answer(id).await.map(|_| ())
+    }
+
+    /// Renew the authorization of this open session with `credentials`: an
+    /// `Authorize` onto the sink (ETP 1.2 §3.13.5 point 1.b, p.90), over when
+    /// the server's answer arrives (§5.3.7, p.123). The session is the same
+    /// one afterwards. Do it before the authorization the server holds runs
+    /// out; when is the application's.
+    ///
+    /// A refusal is [`ClientError::AuthorizationNeeded`] with the server's
+    /// challenges, and the session is **still open**. The answer is also said
+    /// in [`AsyncClient::unsolicited`] as [`Event::Reauthorized`] or
+    /// [`Event::AuthorizationRefused`].
+    pub async fn reauthorize(&self, credentials: &Credentials) -> Result<(), ClientError> {
+        let id = {
+            let mut shared = self.lock();
+            let id = shared.engine.reauthorize(credentials, self.clock.now())?;
+            shared.flush();
+            id
+        };
+        self.answer(id).await.map(|_| ())
+    }
+
+    /// [`Self::reauthorize`] with the credentials a [`CredentialSource`]
+    /// gives: a refusal goes back to the source - with the witness of
+    /// **these** credentials - once, and the credentials it gives next are
+    /// sent; a second refusal, or a source that gives up, is
+    /// [`ClientError::AuthorizationNeeded`]. The source is called on the
+    /// thread that polls this future, never on the one that feeds the client
+    /// ([`AsyncClient::received`]): it may block. Gives when the accepted
+    /// credentials end, if the source said.
+    pub async fn reauthorize_with(
+        &self,
+        source: &dyn CredentialSource,
+    ) -> Result<Option<SystemTime>, ClientError> {
+        let first = source::begin(source, false)?;
+        match self.reauthorize(&first.credentials).await {
+            Ok(()) => Ok(first.valid_until),
+            Err(ClientError::AuthorizationNeeded { challenges }) => {
+                let second = source::again(source, first, Refused::Authorize { challenges })?;
+                self.reauthorize(&second.credentials).await?;
+                Ok(second.valid_until)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     fn answer(&self, id: i64) -> impl Future<Output = Result<Vec<Delivery>, ClientError>> + '_ {

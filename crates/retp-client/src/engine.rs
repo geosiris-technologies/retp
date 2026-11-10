@@ -282,6 +282,43 @@ impl Engine {
         Ok(id)
     }
 
+    /// Renew the authorization of the open session with `credentials`: an
+    /// `Authorize` (§3.13.5 point 1.b, p.90; §5.3.4, p.121) goes to the outbox,
+    /// and its answer is gathered under the id returned - `Ok` when the server
+    /// accepted (`AuthorizeResponse`, §5.3.7, p.123), [`ClientError::AuthorizationNeeded`]
+    /// with its challenges when it refused. The session stays open either
+    /// way, until the authorization it holds runs out.
+    ///
+    /// Refused ([`ClientError::Invalid`]) when the session is not open.
+    pub fn reauthorize(&mut self, credentials: &Credentials, now: i64) -> Result<i64, ClientError> {
+        if let Some(why) = &self.lost {
+            return Err(ClientError::Transport(why.clone()));
+        }
+        if self.connection.state() == State::Closed {
+            return Err(ClientError::Closed {
+                reason: "the session is closed".into(),
+            });
+        }
+        let out = self
+            .connection
+            .reauthorize(credentials, now)
+            .map_err(ClientError::Invalid)?;
+        let id = out.header.message_id;
+        self.calls.insert(
+            id,
+            Call {
+                deliveries: Vec::new(),
+                single: true,
+                outcome: None,
+            },
+        );
+        self.outbox.push(Outbound {
+            bytes: out.bytes,
+            request: Some(id),
+        });
+        Ok(id)
+    }
+
     /// A `Ping`: its `Pong` is its answer.
     pub fn ping(&mut self, now: i64) -> Result<i64, ClientError> {
         if let Some(why) = &self.lost {
@@ -462,6 +499,15 @@ impl Engine {
         happened
     }
 
+    /// End the call `request` with `outcome`, if it is still waiting.
+    fn finish(&mut self, request: i64, outcome: Result<Vec<Delivery>, ClientError>) {
+        if let Some(call) = self.calls.get_mut(&request)
+            && call.outcome.is_none()
+        {
+            call.outcome = Some(outcome);
+        }
+    }
+
     fn dispatch(&mut self, event: Event) {
         if self.opening.is_none() {
             match event {
@@ -504,6 +550,22 @@ impl Engine {
                 }
                 _ => self.unsolicited.push_back(Event::TimedOut { request, incident }),
             },
+            // The answer to a renewal: the call that waits for it is over, and
+            // the event is also said to whoever listens to the session.
+            Event::Reauthorized { request } => {
+                self.finish(request, Ok(Vec::new()));
+                self.unsolicited.push_back(Event::Reauthorized { request });
+            }
+            Event::AuthorizationRefused { request, challenges } => {
+                self.finish(
+                    request,
+                    Err(ClientError::AuthorizationNeeded {
+                        challenges: challenges.clone(),
+                    }),
+                );
+                self.unsolicited
+                    .push_back(Event::AuthorizationRefused { request, challenges });
+            }
             Event::AnswerRefused { request, incident } => match self.calls.get_mut(&request) {
                 Some(call) if call.outcome.is_none() => {
                     call.outcome = Some(Err(ClientError::AnswerRefused { request, incident }));

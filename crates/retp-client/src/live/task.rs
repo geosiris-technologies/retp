@@ -327,7 +327,8 @@ pub(super) fn start(
             match Ws::open(&handshake, certificates).await {
                 Ok(ws) => run(ws, collector, out).await,
                 Err(why) => {
-                    let _ = failed.send(TransportError::new(why.why.clone()));
+                    // The whole error: a refused handshake keeps its status and challenges.
+                    let _ = failed.send(why.clone());
                     client.lost(why);
                 }
             }

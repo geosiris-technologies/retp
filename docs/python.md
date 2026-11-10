@@ -169,7 +169,7 @@ argument.
 | Exception | Meaning | What to do |
 |---|---|---|
 | `Unsupported` | the case is not supported; the message names it | use another route |
-| `SessionRefused` | the session could not be opened | change the offer or the server |
+| `SessionRefused` | the session could not be opened (also a refused WebSocket upgrade: the message gives its HTTP status) | change the offer, the credential or the server |
 | `AuthorizationNeeded` | the server wants credentials | log in again |
 | `ConnectionLost` | the connection is gone | open a new session |
 | `OutcomeUnknown` | the connection fell while a request was out (a `ConnectionLost`) | check before retrying a write |

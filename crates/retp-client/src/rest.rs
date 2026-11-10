@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use energyml_core::identifiers::EtpUri;
@@ -53,6 +54,7 @@ use retp_types::protocol::transaction::{
 use serde_json::Value as Json;
 
 use crate::caller::Caller;
+use crate::source::{self, CredentialSource, Fresh, Refused};
 use crate::{ClientError, TransportError};
 
 /// An HTTP method.
@@ -141,6 +143,9 @@ pub struct RestClient<H: Http> {
     /// `https://…/api/reservoir-ddms/v2`, without its last slash.
     base: String,
     credentials: Option<Credentials>,
+    /// Where each request's credentials come from, when they are not fixed
+    /// ([`RestClient::with_source`]).
+    source: Option<Arc<dyn CredentialSource>>,
     partition: Option<String>,
     page: usize,
     at_once: usize,
@@ -190,6 +195,7 @@ impl<H: Http> RestClient<H> {
             negotiated: described(&base),
             base,
             credentials,
+            source: None,
             partition,
             page: PAGE,
             at_once: AT_ONCE,
@@ -200,6 +206,27 @@ impl<H: Http> RestClient<H> {
             said_no_kind: false,
             transaction: None,
         }
+    }
+
+    /// Take the credentials of every request from `source` in place of the fixed
+    /// ones given to [`RestClient::new`] (which are dropped).
+    ///
+    /// **Each request asks the source** for credentials, and keeps their
+    /// witness. A `401` gives *that* witness back through
+    /// [`CredentialSource::refused`] - **once** -, and the request is sent
+    /// again with what the source gives; a second `401`, or a source that
+    /// gives up, is [`ClientError::AuthorizationNeeded`] with the server's
+    /// challenge. (A `401` means the server refused before it did anything:
+    /// sending the request again does not do it twice.) Credentials that are
+    /// fixed behave as before: one `401` is the error.
+    ///
+    /// The source is called on the thread that polls the REST future, one
+    /// call per request: it may block, so it answers from what it holds when
+    /// it can.
+    pub fn with_source(mut self, source: Arc<dyn CredentialSource>) -> Self {
+        self.credentials = None;
+        self.source = Some(source);
+        self
     }
 
     /// Ask for `resources` resources per page of a listing - a test asks for
@@ -1647,11 +1674,69 @@ impl<H: Http> RestClient<H> {
         calls: Vec<(Method, String, Option<Vec<u8>>)>,
     ) -> Result<Vec<HttpResponse>, ClientError> {
         let at_once = self.at_once;
+        // One credential per request, from the source when there is one: the
+        // witness of each is kept to be given back if the server refuses it.
+        let mut fresh: Vec<Option<Fresh>> = Vec::with_capacity(calls.len());
+        for _ in &calls {
+            fresh.push(match &self.source {
+                Some(source) => Some(source::begin(&**source, false)?),
+                None => None,
+            });
+        }
         let requests: Vec<HttpRequest> = calls
             .iter()
-            .map(|(method, path, body)| self.request_of(*method, path, body.clone()))
+            .zip(&fresh)
+            .map(|((method, path, body), fresh)| {
+                self.request_of(
+                    *method,
+                    path,
+                    body.clone(),
+                    fresh
+                        .as_ref()
+                        .map(|f| &f.credentials)
+                        .or(self.credentials.as_ref()),
+                )
+            })
             .collect();
-        let answers = self.http.send_all(requests, at_once).await;
+        let mut answers = self.http.send_all(requests, at_once).await;
+
+        // The rule of the 401, applied once: the source is told, with the
+        // witness of the credentials that request carried, and the request
+        // goes again with what it gives. No other refusal is tried again, and
+        // the second answer is not looked at for a 401: it is the error.
+        if let Some(source) = self.source.clone() {
+            let mut again: Vec<usize> = Vec::new();
+            let mut next: Vec<Fresh> = Vec::new();
+            for (index, answer) in answers.iter().enumerate() {
+                if let Ok(response) = answer
+                    && response.status == 401
+                    && let Some(used) = fresh[index].take()
+                {
+                    let why = Refused::Rest {
+                        challenges: response.challenge.clone().into_iter().collect(),
+                    };
+                    // A source that gives up leaves the 401 as it is.
+                    if let Ok(credentials) = source::again(&*source, used, why) {
+                        again.push(index);
+                        next.push(credentials);
+                    }
+                }
+            }
+            if !again.is_empty() {
+                let retry: Vec<HttpRequest> = again
+                    .iter()
+                    .zip(&next)
+                    .map(|(index, fresh)| {
+                        let (method, path, body) = &calls[*index];
+                        self.request_of(*method, path, body.clone(), Some(&fresh.credentials))
+                    })
+                    .collect();
+                let retried = self.http.send_all(retry, at_once).await;
+                for (index, answer) in again.into_iter().zip(retried) {
+                    answers[index] = answer;
+                }
+            }
+        }
         calls
             .into_iter()
             .zip(answers)
@@ -1660,9 +1745,15 @@ impl<H: Http> RestClient<H> {
     }
 
     /// What a call is on the wire: the URL, the credentials, the partition.
-    fn request_of(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> HttpRequest {
+    fn request_of(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        credentials: Option<&Credentials>,
+    ) -> HttpRequest {
         let mut headers = vec![("accept".to_string(), "application/json".to_string())];
-        if let Some(credentials) = &self.credentials {
+        if let Some(credentials) = credentials {
             headers.push(("authorization".into(), credentials.header().to_string()));
         }
         if let Some(partition) = &self.partition {

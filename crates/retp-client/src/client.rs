@@ -1,7 +1,7 @@
 //! The blocking client: an [`Engine`], a transport and a clock, driven.
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use retp_avro::EtpMessage;
 use retp_proto::connection::{Event, Handler, Resumable, State};
@@ -10,6 +10,7 @@ use retp_proto::negotiate::{Negotiated, Offer, OfferRefusal};
 use retp_proto::wire::{Delivery, Incident, SendRefusal};
 
 use crate::engine::Engine;
+use crate::source::{self, CredentialSource, Refused};
 use crate::{Clock, Transport, TransportError};
 
 /// How the client waits.
@@ -44,6 +45,20 @@ pub enum ClientError {
     /// The server wants credentials; the challenges say where to get them.
     AuthorizationNeeded {
         /// `WWW-Authenticate` style challenges.
+        challenges: Vec<String>,
+    },
+    /// The server answered the WebSocket upgrade with an HTTP refusal, so no
+    /// session opened. The status tells what to do: `401`, the credential is
+    /// missing or refused - try another credential once; `403`, the
+    /// credential is understood but its scope is not enough - retrying will
+    /// not help (RFC 6750 section 3.1); another status, the server failed or
+    /// the address is wrong. A browser does not say the status of a refused
+    /// WebSocket, so the web transport never produces this.
+    HandshakeRefused {
+        /// The HTTP status of the answer.
+        status: u16,
+        /// `WWW-Authenticate` challenges, one per header value; empty when
+        /// the server sent none.
         challenges: Vec<String>,
     },
     /// The session closed.
@@ -101,6 +116,14 @@ impl fmt::Display for ClientError {
                     challenges.join(" | ")
                 )
             }
+            ClientError::HandshakeRefused { status, challenges } if challenges.is_empty() => {
+                write!(f, "the server refused the WebSocket handshake: HTTP {status}")
+            }
+            ClientError::HandshakeRefused { status, challenges } => write!(
+                f,
+                "the server refused the WebSocket handshake: HTTP {status}; its challenges: {}",
+                challenges.join(" | ")
+            ),
             ClientError::Closed { reason } => write!(f, "the session is closed: {reason}"),
             ClientError::Send(why) => write!(f, "not sent: {why}"),
             ClientError::Invalid(incident) => write!(f, "not sent, the server would refuse it: {incident}"),
@@ -125,7 +148,10 @@ impl fmt::Display for ClientError {
 impl ClientError {
     /// Whether the connection is gone, so that nothing more can be asked in
     /// this session and a new one has to be opened. A refusal, a request that
-    /// timed out or an answer refused leave the session open.
+    /// timed out or an answer refused leave the session open. A refused
+    /// WebSocket upgrade ([`ClientError::HandshakeRefused`]) is not "lost": a
+    /// server that answered 403 will answer 403 again, so an automatic retry
+    /// must not take it for a dropped connection.
     pub fn is_connection_lost(&self) -> bool {
         matches!(
             self,
@@ -138,7 +164,13 @@ impl std::error::Error for ClientError {}
 
 impl From<TransportError> for ClientError {
     fn from(why: TransportError) -> Self {
-        ClientError::Transport(why)
+        match why.handshake {
+            Some(refusal) => ClientError::HandshakeRefused {
+                status: refusal.status,
+                challenges: refusal.challenges,
+            },
+            None => ClientError::Transport(why),
+        }
     }
 }
 
@@ -299,6 +331,51 @@ impl<T: Transport, C: Clock> Client<T, C> {
         self.wait_for(id)?;
         let micros = (self.clock.now() - sent_at).max(0);
         Ok(Duration::from_micros(micros as u64))
+    }
+
+    /// Renew the authorization of this open session with `credentials`: an
+    /// `Authorize` (ETP 1.2 §3.13.5 point 1.b, p.90), and the wait for the
+    /// server's answer (§5.3.7, p.123). The session is the same one
+    /// afterwards.
+    ///
+    /// Do it **before** the authorization the server holds runs out (point
+    /// 1.a): one that is not told sends `EAUTHORIZATION_EXPIRED` and closes
+    /// (point 3), and nothing brings the session back. When to do it is the
+    /// application's: it knows when its token changes; the server may warn
+    /// with `EAUTHORIZATION_EXPIRING` ([`Event::AuthorizationExpiring`], in
+    /// [`Client::unsolicited`]), which is only a warning.
+    ///
+    /// A refusal is [`ClientError::AuthorizationNeeded`] with the server's
+    /// challenges; the session is **still open** and another renewal may be in
+    /// time. The credentials must be those of the same principal and not of a
+    /// lesser scope (point 1.c): the server judges that, and says so by
+    /// refusing.
+    pub fn reauthorize(&mut self, credentials: &Credentials) -> Result<(), ClientError> {
+        let id = self.engine.reauthorize(credentials, self.clock.now())?;
+        self.wait_for(id).map(|_| ())
+    }
+
+    /// [`Self::reauthorize`] with the credentials a [`CredentialSource`]
+    /// gives. A refusal goes back to the source - with the witness of **these**
+    /// credentials - once, and the credentials it gives next are sent; a
+    /// second refusal, or a source that gives up, is
+    /// [`ClientError::AuthorizationNeeded`]. The source is called on the
+    /// thread of this call, which waits. Gives when the accepted credentials
+    /// end, if the source said.
+    pub fn reauthorize_with(
+        &mut self,
+        source: &dyn CredentialSource,
+    ) -> Result<Option<SystemTime>, ClientError> {
+        let first = source::begin(source, false)?;
+        match self.reauthorize(&first.credentials) {
+            Ok(()) => Ok(first.valid_until),
+            Err(ClientError::AuthorizationNeeded { challenges }) => {
+                let second = source::again(source, first, Refused::Authorize { challenges })?;
+                self.reauthorize(&second.credentials)?;
+                Ok(second.valid_until)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// The settings this client runs with.

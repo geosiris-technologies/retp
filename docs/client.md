@@ -121,6 +121,48 @@ trait to implement. `Filter` routes a protocol, one subscription, or the session
 events (a fault, the authorization running out, the session closed). A full queue drops and
 counts (`LiveSession::dropped`), never blocks the session.
 
+## A token that runs out: renewing an open session
+
+A session lasts longer than a token. ETP 1.2 (section 3.13.5) wants an endpoint to
+re-authorize *before* its authorization expires, with an `Authorize` sent at any time; a
+server that is not told sends `EAUTHORIZATION_EXPIRED` at the end, then `CloseSession`, and
+nothing brings the session back. The warning `EAUTHORIZATION_EXPIRING` is optional, so the
+client does not wait for it.
+
+`retp` offers the door and leaves the timing to the application, which knows when its token
+changes:
+
+- `Client::reauthorize(&credentials)`, `AsyncClient::reauthorize(&credentials)` and
+  `LiveSession::reauthorize(&credentials)` send the `Authorize` and wait for its answer.
+  The session is the same one afterwards. A refusal is `ClientError::AuthorizationNeeded`
+  with the server's challenges, and the session is still open until the authorization it
+  holds ends: another renewal may be in time. Both answers are also events of the session
+  (`Event::Reauthorized`, `Event::AuthorizationRefused { challenges }`, for
+  `Filter::Session`); an event never carries a credential.
+- A `CredentialSource` is what an application hands over when one fixed `Credentials` is not
+  enough: `credentials()` gives credentials for one opening, one REST request or one
+  renewal, and `refused(witness, why)` is told when the server refused them. Each `Fresh` it
+  gives carries a `Witness` - whatever the application puts in it - and gets it back on the
+  refusal of **those** credentials. The source keeps no state per connection, so an ETP
+  session and REST calls to the same server can share one source without the refusal of one
+  being taken for the refusal of the other. A source may block (it may fetch a token): it is
+  never called on the thread or task that runs a session.
+  `LiveSession::connect_with_source` and `RestClient::with_source` take one; a fixed
+  `Credentials` is a source too (`impl CredentialSource for Credentials`), and the fixed
+  forms keep working.
+- The 401 rule is applied once: a 401 on the WebSocket upgrade or on a REST request goes
+  back to the source, the credentials it gives next are tried, and a second 401 is the error.
+  A 403 is not retried. `LiveSession::renew()` (and `reauthorize_with(&source)` on the other
+  clients) renews from the source with the same rule on an `AuthorizeResponse` that failed.
+
+```rust,ignore
+// Every few minutes, or when the token changes - the application's rule, not the library's:
+session.renew()?; // asks the source, sends Authorize, goes back to the source once if refused
+```
+
+`Credentials` is wiped from memory when dropped (`zeroize`), every clone with it; a copy made
+by whoever reads `header()` is theirs to wipe.
+
 ## wasm
 
 `cargo check --target wasm32-unknown-unknown` on the client is part of CI. The

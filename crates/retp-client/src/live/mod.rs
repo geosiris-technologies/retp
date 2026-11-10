@@ -66,14 +66,17 @@ pub mod destination;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use retp_proto::credentials::Credentials;
 use retp_proto::probe::{self, HandshakeSettings};
+use retp_proto::wire::EtpError;
 use retp_types::datatypes::Uuid;
 
 pub use destination::{Callback, Console, Destination, JsonLines, Queue, as_json, as_line};
 
 use crate::native::Connect;
+use crate::source::{self, CredentialSource, Fresh, Refused};
 use crate::{AsyncClient, ClientError, SystemClock, TransportError};
 
 /// The sub-protocol of the store notifications (`StoreNotification`).
@@ -135,12 +138,78 @@ pub struct LiveSession {
     shared: Arc<task::Shared>,
     threads: Option<task::Threads>,
     at_once: usize,
+    /// Where the credentials come from, when the session was opened from a source
+    /// ([`LiveSession::connect_with_source`]); called on the thread of whoever renews.
+    source: Option<Arc<dyn CredentialSource>>,
+}
+
+/// How one attempt to open a session with a source's credentials ended.
+enum Attempt {
+    Open(Box<LiveSession>),
+    /// HTTP 401 on the WebSocket upgrade: the source is told, once.
+    Refused(Vec<String>),
+    Failed(ClientError),
 }
 
 impl LiveSession {
     /// Open the connection as `native::connect` does, start the session task on a thread of its
     /// own (a current-thread tokio runtime), and return once the session is open (or refused).
     pub fn connect(connect: Connect, settings: LiveSettings) -> Result<LiveSession, ClientError> {
+        Self::open(connect, settings)
+    }
+
+    /// [`LiveSession::connect`] with credentials from a [`CredentialSource`] in place of
+    /// `endpoint.credentials` (which is overwritten): the application keeps its token and its
+    /// timing, and renews the open session with [`LiveSession::renew`].
+    ///
+    /// `make` gives the [`Connect`] of one attempt - it is called again for the second attempt,
+    /// since the handlers of the first went with it. An HTTP 401 on the WebSocket upgrade goes to
+    /// [`CredentialSource::refused`] **once** (with the witness of the credentials that were
+    /// refused), and the credentials it gives are tried; a second 401 is
+    /// [`ClientError::HandshakeRefused`], and so is any other status (a 403 is not retried: more
+    /// credentials of the same kind will not widen a scope, RFC 6750 section 3.1).
+    ///
+    /// The source is called on **this thread**, never on the session's task: it may block.
+    pub fn connect_with_source(
+        source: Arc<dyn CredentialSource>,
+        mut make: impl FnMut() -> Connect,
+        settings: LiveSettings,
+    ) -> Result<LiveSession, ClientError> {
+        let mut attempt = |fresh: &Fresh| {
+            let mut connect = make();
+            connect.endpoint.credentials = Some(fresh.credentials.clone());
+            match Self::open(connect, settings.clone()) {
+                Ok(session) => Attempt::Open(Box::new(session)),
+                Err(ClientError::HandshakeRefused {
+                    status: 401,
+                    challenges,
+                }) => Attempt::Refused(challenges),
+                Err(other) => Attempt::Failed(other),
+            }
+        };
+        let first = source::begin(&*source, true)?;
+        let mut session = match attempt(&first) {
+            Attempt::Open(session) => session,
+            Attempt::Failed(why) => return Err(why),
+            Attempt::Refused(challenges) => {
+                let second = source::again(&*source, first, Refused::Handshake { challenges })?;
+                match attempt(&second) {
+                    Attempt::Open(session) => session,
+                    Attempt::Failed(why) => return Err(why),
+                    Attempt::Refused(challenges) => {
+                        return Err(ClientError::HandshakeRefused {
+                            status: 401,
+                            challenges,
+                        });
+                    }
+                }
+            }
+        };
+        session.source = Some(source);
+        Ok(*session)
+    }
+
+    fn open(connect: Connect, settings: LiveSettings) -> Result<LiveSession, ClientError> {
         let handshake_settings = HandshakeSettings {
             max_message: connect.max_message,
             max_frame: None,
@@ -192,12 +261,13 @@ impl LiveSession {
             shared,
             threads: Some(threads),
             at_once: settings.at_once.max(1),
+            source: None,
         };
         match task::block_on(session.client.opened()) {
             Ok(()) => Ok(session),
             // The session is dropped here: it closes and joins its threads.
             Err(why) => Err(match failed_rx.try_recv() {
-                Ok(transport) => ClientError::Transport(transport),
+                Ok(transport) => ClientError::from(transport),
                 Err(_) => why,
             }),
         }
@@ -206,6 +276,37 @@ impl LiveSession {
     /// The client: requests from any thread, `Caller` for every operation of the crate.
     pub fn client(&self) -> &AsyncClient<SystemClock> {
         &self.client
+    }
+
+    /// Renew the authorization of this open session with `credentials` (ETP 1.2 §3.13.5 point
+    /// 1.b, p.90): an `Authorize`, and the wait for the answer (§5.3.7, p.123). The session is the
+    /// same one afterwards. Do it before the authorization the server holds runs out; **when** is
+    /// the application's - it knows when its token changes - and `EAUTHORIZATION_EXPIRING`
+    /// (`Event::AuthorizationExpiring`, a [`Filter::Session`] event) is only a warning.
+    ///
+    /// A refusal is [`ClientError::AuthorizationNeeded`] with the server's challenges, and the
+    /// session is still open. The answer is also an event for [`Filter::Session`]:
+    /// `Event::Reauthorized` or `Event::AuthorizationRefused`. Not to be called from a
+    /// [`Destination`]: that thread would wait for the session.
+    pub fn reauthorize(&self, credentials: &Credentials) -> Result<(), ClientError> {
+        task::block_on(self.client.reauthorize(credentials))
+    }
+
+    /// [`LiveSession::reauthorize`] with the credentials of the source this session was opened from
+    /// ([`LiveSession::connect_with_source`]). A refusal goes back to the source once, with the
+    /// witness of the credentials that were refused; a second refusal, or a source that gives up,
+    /// is [`ClientError::AuthorizationNeeded`]. Gives when the accepted credentials end, if the
+    /// source said.
+    ///
+    /// The source is called on **the thread that calls this**, never on the session's task. A
+    /// session opened without a source refuses by name ([`ClientError::Invalid`]).
+    pub fn renew(&self) -> Result<Option<SystemTime>, ClientError> {
+        let Some(source) = &self.source else {
+            return Err(ClientError::Invalid(EtpError::EINVALID_STATE.with_detail(
+                "this live session was opened without a credential source: use `reauthorize` with credentials",
+            )));
+        };
+        task::block_on(self.client.reauthorize_with(&**source))
     }
 
     /// Run an operation (any future, typically an `async` operation over `Caller` on

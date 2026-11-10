@@ -236,3 +236,28 @@ fn client_secret_post_puts_the_client_in_the_form() {
     let posted = client_secret_post(public, "s6BhdRkqt3", "x");
     assert_eq!(posted.iter().filter(|(key, _)| *key == "client_id").count(), 1);
 }
+
+/// RFC 6749 §5.1: `expires_in` is the lifetime in seconds of the token, from
+/// the moment the answer was generated. The login gives it back as a number,
+/// and a credential source can make it the moment the credentials end -
+/// counted from the moment the caller says the answer came.
+#[test]
+fn how_long_credentials_last_is_given_back_not_lost() {
+    use std::time::UNIX_EPOCH;
+
+    let answer = br#"{"access_token":"mF_9.B5f-4.1JqM","token_type":"Bearer","expires_in":3600}"#;
+    let obtained = read_oauth_answer("https://server.example.com/token", 200, answer).unwrap();
+    let at = UNIX_EPOCH + Duration::from_secs(1_000);
+    assert_eq!(
+        obtained.valid_until(at),
+        Some(UNIX_EPOCH + Duration::from_secs(4_600))
+    );
+
+    let fresh = obtained.into_fresh(retp_client::Witness::none(), at);
+    assert_eq!(fresh.valid_until, Some(UNIX_EPOCH + Duration::from_secs(4_600)));
+    assert_eq!(fresh.credentials.header(), "Bearer mF_9.B5f-4.1JqM");
+
+    // An answer with no `expires_in` says nothing of the end: no guess.
+    let without = read_oauth_answer("s", 200, br#"{"access_token":"abc","token_type":"Bearer"}"#).unwrap();
+    assert_eq!(without.valid_until(at), None);
+}

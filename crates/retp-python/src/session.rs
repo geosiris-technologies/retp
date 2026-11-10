@@ -144,7 +144,10 @@ impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Self {
         let message = error.to_string();
         let kind = match &error {
-            ClientError::Offer(_) | ClientError::Refused(_) => Kind::SessionRefused,
+            // No session opened: the server refused the upgrade (the status is in the message).
+            ClientError::Offer(_) | ClientError::Refused(_) | ClientError::HandshakeRefused { .. } => {
+                Kind::SessionRefused
+            }
             ClientError::AuthorizationNeeded { .. } => Kind::AuthorizationNeeded,
             ClientError::Transport(_) | ClientError::Closed { .. } => Kind::ConnectionLost,
             ClientError::Interrupted { .. } => Kind::OutcomeUnknown,

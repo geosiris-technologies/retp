@@ -1262,6 +1262,150 @@ fn expiring_authorization_is_renewed_or_closes() {
     }
 }
 
+/// A client and a server that asks for authorization, opened with "good"
+/// credentials that run out at `T0 + 120 s`.
+fn opened_with_expiry() -> (Connection, Connection) {
+    let mut client = Connection::client(
+        client_offer(),
+        vec![Box::new(Forward(ProtocolOffer::v12(3, Role::Customer)))],
+        Some(bearer("good")),
+        T0,
+    )
+    .unwrap();
+    let mut server = server_with(server_offer(), requiring(T0 + 120 * S)).warn_expiring_before(60);
+    let start = client.start(T0);
+    let (c, _) = exchange(&mut client, &mut server, start, T0);
+    assert!(c.contains(&Event::Opened), "{c:#?}");
+    (client, server)
+}
+
+/// §3.13.5 point 1.b (p.90) and §5.3.4 (p.121): `Authorize` renews the
+/// authorization of a session that is open, and §5.3.7 (p.123): the answer
+/// says so. The session is the same one afterwards, and the server's deadline
+/// has moved.
+#[test]
+fn a_renewal_is_answered_and_keeps_the_session() {
+    let (mut client, mut server) = opened_with_expiry();
+    let session = client.resumable().expect("open").session_id;
+
+    let authorize = client.reauthorize(&bearer("renewed"), T0 + 62 * S).unwrap();
+    let answer = server.receive(&authorize.bytes, T0 + 62 * S);
+    let heard = client.receive(&answer.send[0].bytes, T0 + 62 * S);
+    assert_eq!(
+        heard.events,
+        [Event::Reauthorized {
+            request: authorize.header.message_id
+        }]
+    );
+    assert_eq!(
+        client.state(),
+        State::Open,
+        "a renewal does not reopen the session"
+    );
+    assert_eq!(server.state(), State::Open);
+    assert_eq!(client.resumable().expect("still open").session_id, session);
+    assert!(
+        server.tick(T0 + 200 * S).send.is_empty(),
+        "the old deadline (T0 + 120 s) no longer closes the session"
+    );
+}
+
+/// §5.3.7 (p.123): `success = false` with challenges is the equivalent of a
+/// 401. The session is **still open** - the authorization it holds has not
+/// run out (§3.13.5 point 3) - and the machine does not go back to the state
+/// of the opening, which would make the next request fail as if the session
+/// had never opened.
+#[test]
+fn a_refused_renewal_says_why_and_leaves_the_session_open() {
+    let (mut client, mut server) = opened_with_expiry();
+
+    let authorize = client.reauthorize(&bearer("stale"), T0 + 62 * S).unwrap();
+    let answer = server.receive(&authorize.bytes, T0 + 62 * S);
+    let heard = client.receive(&answer.send[0].bytes, T0 + 62 * S);
+    let [Event::AuthorizationRefused { request, challenges }] = &heard.events[..] else {
+        panic!("one refusal expected: {heard:#?}")
+    };
+    assert_eq!(*request, authorize.header.message_id);
+    assert!(challenges[0].contains("authz_server"), "{challenges:?}");
+    assert_eq!(
+        client.state(),
+        State::Open,
+        "not put back to Authorizing: the session is open"
+    );
+    // The deadline is the old one.
+    assert!(
+        server.tick(T0 + 119 * S).send.len() <= 1,
+        "only the warning, if any"
+    );
+    let end = server.tick(T0 + 120 * S);
+    assert_eq!(
+        single_error(&end.send[0]).code,
+        EtpError::EAUTHORIZATION_EXPIRED.code()
+    );
+    assert!(end.close);
+
+    // A request goes out on the client, which is still open.
+    let (mut client, _) = opened_with_expiry();
+    client.reauthorize(&bearer("stale"), T0 + 62 * S).unwrap();
+    assert!(client.request(&GetResources::default(), T0 + 63 * S).is_ok());
+}
+
+/// §3.13.5 point 1.a: a server that is not told before the authorization
+/// runs out closes the session - the test that shows the renewal matters.
+#[test]
+fn without_a_renewal_the_server_closes_at_the_deadline() {
+    let (mut client, mut server) = opened_with_expiry();
+    let warning = server.tick(T0 + 61 * S);
+    assert_eq!(
+        client.receive(&warning.send[0].bytes, T0 + 61 * S).events,
+        [Event::AuthorizationExpiring]
+    );
+    // Nobody renews.
+    let end = server.tick(T0 + 120 * S);
+    let sent: Vec<i32> = end.send.iter().map(|o| o.header.message_type).collect();
+    assert_eq!(sent, [1000, 5], "EAUTHORIZATION_EXPIRED, then CloseSession");
+    assert!(end.close);
+    assert_eq!(server.state(), State::Closed);
+}
+
+/// A renewal waits like any request: an answer that never comes is a
+/// `TimedOut` for its id, not a wait without end.
+#[test]
+fn a_renewal_without_an_answer_times_out() {
+    let (mut client, _) = opened_with_expiry();
+    let authorize = client.reauthorize(&bearer("renewed"), T0 + 62 * S).unwrap();
+    let step = client.tick(T0 + 62 * S + 301 * S);
+    assert!(
+        step.events.iter().any(|e| matches!(
+            e,
+            Event::TimedOut { request, .. } if *request == authorize.header.message_id
+        )),
+        "{step:#?}"
+    );
+}
+
+/// The opening has its own authorization: renewing a session that is not
+/// open is refused by name, and nothing is sent.
+#[test]
+fn a_renewal_is_refused_before_the_session_is_open() {
+    let mut client = client();
+    let refused = client.reauthorize(&bearer("good"), T0).unwrap_err();
+    assert_eq!(refused.code(), EtpError::EINVALID_STATE.code());
+}
+
+/// An `AuthorizeResponse` nobody asked for in an open session is a named
+/// fault, never taken for a renewal and never a change of state.
+#[test]
+fn an_authorize_response_nobody_asked_for_is_a_fault() {
+    let (mut client, mut server) = opened_with_expiry();
+    // The old way, which opens a session: in an open one nothing waits for it.
+    let authorize = client.authorize(&bearer("renewed"), T0 + 62 * S);
+    let answer = server.receive(&authorize.bytes, T0 + 62 * S);
+    let heard = client.receive(&answer.send[0].bytes, T0 + 62 * S);
+    assert!(matches!(&heard.events[..], [Event::Fault(_)]), "{heard:#?}");
+    assert_eq!(client.state(), State::Open);
+}
+
 // ---------------------------------------------------------------------------
 // Time - the connection never reads a clock
 // ---------------------------------------------------------------------------

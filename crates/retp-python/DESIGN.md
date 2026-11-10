@@ -109,7 +109,7 @@ then each `Kind` becomes an exception class in `bindings.rs`:
 |---|---|---|---|
 | bad argument (bridge) | `BadArgument` | `ValueError` | fix the call |
 | `Invalid`, `Send` | `NotSent` | `NotSent` | fix the request; the session is untouched |
-| `Offer`, `Refused` | `SessionRefused` | `SessionRefused` | change the offer or server |
+| `Offer`, `Refused`, `HandshakeRefused` | `SessionRefused` | `SessionRefused` | change the offer or server |
 | `AuthorizationNeeded` | `AuthorizationNeeded` | `AuthorizationNeeded` | log in again |
 | `Transport`, `Closed` | `ConnectionLost` | `ConnectionLost` | open a new session |
 | `Interrupted` | `OutcomeUnknown` | `OutcomeUnknown` (a `ConnectionLost`) | check before retrying a write |

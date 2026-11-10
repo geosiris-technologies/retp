@@ -160,6 +160,61 @@ changes:
 session.renew()?; // asks the source, sends Authorize, goes back to the source once if refused
 ```
 
+### Renewing at the server's warning, with a source of your own
+
+An application that has its own way of getting tokens needs nothing more than the two
+sections above: a destination routed on `Filter::Session`, and `renew`. The destination only
+passes the session's events on; a thread that is not the session's reads them and renews.
+
+```rust,ignore
+let source: Arc<dyn CredentialSource> = Arc::new(MySource::new()); // fetches a token in `credentials()`
+let session = LiveSession::connect_with_source(source, || my_connect(), LiveSettings::default())?;
+let (queue, events) = Queue::bounded(64);
+session.route(Filter::Session, Arc::new(queue));
+
+let mut due: Option<Instant> = None; // or from the end the source knows for the opening credentials
+loop {
+    let wait = due.map_or(Duration::from_secs(3600), |at| at.saturating_duration_since(Instant::now()));
+    let renew = match events.recv_timeout(wait) {
+        Ok(Event::AuthorizationExpiring) => true,          // the server's warning (optional)
+        Ok(Event::Closed { .. }) => break,                 // the session is over
+        Ok(_) => false,                                    // `Event` is non-exhaustive
+        Err(RecvTimeoutError::Timeout) => due.is_some_and(|at| Instant::now() >= at), // our own clock
+        Err(RecvTimeoutError::Disconnected) => break,
+    };
+    if renew {
+        match session.renew() {
+            // `Some(end)`: when the accepted credentials end, if the source said.
+            Ok(end) => due = end.map(|end| instant_before(end, MARGIN)),
+            // Refused: the session stays open until the authorization it holds ends.
+            Err(ClientError::AuthorizationNeeded { challenges }) => { report(challenges); break; }
+            Err(other) => { report_error(other); break; }
+        }
+    }
+}
+```
+
+Here the main thread reads the queue and renews, so the session is not shared with another
+thread. Two traps:
+
+- **Do not renew from inside a destination.** `deliver` runs on the dispatcher thread of the
+  session, and `reauthorize` and `renew` wait for the server's answer: that thread would wait
+  for the session, and the destinations behind it with it. Use a `Queue` (or a `Callback` that
+  only passes a signal on a channel) and a thread of your own that calls `renew`.
+- **Do not send again credentials the server already has.** A server may accept an `Authorize`
+  that does not move the end of the authorization and warn again at once; an application that
+  answers every warning with the same token then sends several `Authorize` per second, all
+  granted, with the end unchanged. Renew only with credentials newer than the ones last
+  accepted. With a source, that is the source's job: `credentials()` must give a fresh token
+  each time it is asked. The loop can protect itself too: if the end that `renew()` returns is
+  not later than the previous one, do not answer the next warning at once.
+
+The warning is optional, so the loop does not rely on it alone: it also renews on its own
+clock, some margin before the end that `renew()` returned (`Receiver::recv_timeout` gives both
+in one wait). `connect_with_source` does not return the end of the credentials it opened with:
+a source that knows it keeps it, and the loop asks the source for its first deadline. The
+complete program is `crates/retp-client/examples/renew_on_warning.rs`.
+
 `retp_proto::connection::Event` and `ClientError` are `#[non_exhaustive]`: a later version may
 add a case (the renewal added some) without a breaking change. A `match` over either, written
 in another crate, needs a catch-all arm; treat an unknown event as "not for me" and an unknown

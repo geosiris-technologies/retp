@@ -212,3 +212,8 @@ supported-type listing, channels, the logins of the command
 line (the bridge takes a token), the REST transport, downloading a dataspace as
 an EPC, and writing arrays. The Rust library has most of them; each is a small
 binding. The list of what Rust must grow first is in the crate's `DESIGN.md`.
+
+Renewing the authorization of an open session, and listening to the session's own events,
+are not bridged yet: `connect(url, token=...)` takes one fixed token and `Session.subscribe`
+carries store notifications only. A Python session therefore ends when its token does; the
+Rust library has both (see [Library usage](client.md)).

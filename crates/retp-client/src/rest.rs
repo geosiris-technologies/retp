@@ -55,7 +55,10 @@ use serde_json::Value as Json;
 
 use crate::caller::Caller;
 use crate::source::{self, CredentialSource, Fresh, Refused};
-use crate::{ClientError, TransportError};
+use crate::{ClientError, ExtraHeaders, HeaderRefusal, TransportError};
+
+/// The header that names the OSDU data partition.
+const PARTITION_HEADER: &str = "data-partition-id";
 
 /// An HTTP method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +150,9 @@ pub struct RestClient<H: Http> {
     /// ([`RestClient::with_source`]).
     source: Option<Arc<dyn CredentialSource>>,
     partition: Option<String>,
+    /// The headers the server wants in addition, sent with every request
+    /// ([`RestClient::with_headers`]).
+    extra: ExtraHeaders,
     page: usize,
     at_once: usize,
     /// Whether this server reads several objects in one request.
@@ -197,6 +203,7 @@ impl<H: Http> RestClient<H> {
             credentials,
             source: None,
             partition,
+            extra: ExtraHeaders::new(),
             page: PAGE,
             at_once: AT_ONCE,
             plural: None,
@@ -227,6 +234,25 @@ impl<H: Http> RestClient<H> {
         self.credentials = None;
         self.source = Some(source);
         self
+    }
+
+    /// Send `headers` with every request, in addition to the client's own -
+    /// what the server wants besides the credentials: a routing key, a
+    /// tenant, an API key. They replace the ones given before.
+    ///
+    /// Refused when one of them is the `data-partition-id` this client
+    /// already sends for the partition given to [`RestClient::new`]: the
+    /// header would go twice.
+    pub fn with_headers(mut self, headers: ExtraHeaders) -> Result<Self, HeaderRefusal> {
+        if self.partition.is_some()
+            && let Some(name) = headers
+                .names()
+                .find(|name| name.eq_ignore_ascii_case(PARTITION_HEADER))
+        {
+            return Err(HeaderRefusal::Twice(name.to_string()));
+        }
+        self.extra = headers;
+        Ok(self)
     }
 
     /// Ask for `resources` resources per page of a listing - a test asks for
@@ -1744,7 +1770,8 @@ impl<H: Http> RestClient<H> {
             .collect()
     }
 
-    /// What a call is on the wire: the URL, the credentials, the partition.
+    /// What a call is on the wire: the URL, the credentials, the partition,
+    /// the headers the server wants in addition.
     fn request_of(
         &self,
         method: Method,
@@ -1757,7 +1784,10 @@ impl<H: Http> RestClient<H> {
             headers.push(("authorization".into(), credentials.header().to_string()));
         }
         if let Some(partition) = &self.partition {
-            headers.push(("data-partition-id".into(), partition.clone()));
+            headers.push((PARTITION_HEADER.into(), partition.clone()));
+        }
+        for (name, value) in self.extra.iter() {
+            headers.push((name.to_string(), value.to_string()));
         }
         if body.is_some() {
             headers.push(("content-type".into(), "application/json".into()));

@@ -94,9 +94,11 @@ to decide the method would drift from the first.
   looks secret (`authorization`, `cookie`, anything with `key`, `token`,
   `secret` or `password`). `[defaults]` holds `legal_tags`, `owners` and
   `viewers`, not secrets, added as `--custom` entries to `create-dataspace` unless
-  the line gives its own. TODO(verify): `retp-client` has no way to send extra
-  headers yet. Until it has, a connection to an entry that defines some is
-  **refused by name** rather than made without them.
+  the line gives its own. The headers are sent with every request to the server,
+  and checked when the file is read
+  ([ADR 8](0008-headers-a-server-wants.md)); before the client could send them,
+  a connection to an entry that defined some was refused by name rather than
+  made without them.
 - **A guided form.** `retp server add` with no argument, on a terminal, asks for
   each field with plain prompts (no new dependency); a secret is asked for as a
   reference, and what is typed is checked as one. It probes `/.well-known` before

@@ -12,3 +12,4 @@ and what follows from it.
 | [5](0005-conformance.md) | Conformance is judged apart from the client: one check, one cited rule, one verdict |
 | [6](0006-bridge-to-the-storage-trait.md) | The bridge: an ETP dataspace behind the library's storage trait, so what reads a file reads a server |
 | [7](0007-server-catalogue.md) | The server catalogue: servers by name, secrets by reference and never by value |
+| [8](0008-headers-a-server-wants.md) | The headers a server wants are a property of the server: one list, on every request, and never a secret in a URL |

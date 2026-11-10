@@ -247,6 +247,8 @@ impl ConnectOptions {
             Endpoint {
                 url: self.url,
                 profile,
+                // Not bridged yet: the partition is the only addition.
+                headers: retp_client::ExtraHeaders::new(),
                 credentials,
                 certificates,
                 handshake: Profile::Native,

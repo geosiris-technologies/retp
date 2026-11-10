@@ -48,6 +48,7 @@ already lists is never written into.
 | `--server <NAME>`, `-s`, or `@NAME` first | a server of the [catalogue](cli.md#server-catalogue) instead of the URL and the login options |
 | `--rest` | check an OSDU Reservoir DDMS REST API; wire-only rules answer `NotApplicable` |
 | `--insecure` | do not verify the certificate |
+| `--partition <P>`, `--header <NAME=VALUE>` (`-H`, repeatable) | the [headers the server wants](cli.md#headers-a-server-wants), sent with every request of the pass |
 | `--tls-fallback` | verify it; if it fails, report `tls.chain` as failed and run the rest unverified |
 | `--write`, `--write-dataspace`, `--dataspace-custom KEY=VALUE`, `--write-fallback-dataspace` | the checks that write, and what a store needs to create a dataspace |
 | `--dataspace`, `--type` | where to read, and which types to ask for |

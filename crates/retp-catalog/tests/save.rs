@@ -76,6 +76,60 @@ fn a_secret_from_the_command_line_is_not_saved_and_the_entry_points_at_a_variabl
 }
 
 #[test]
+fn the_headers_of_the_line_are_saved_and_a_secret_one_as_a_reference() {
+    use retp_catalog::{Header, HeaderValue};
+    use retp_client::ExtraHeaders;
+
+    let connection = Connection {
+        headers: ExtraHeaders::from_pairs([("x-tenant", "acme"), ("X-Api-Key", CANARY)])
+            .expect("headers a command line may give"),
+        ..connection()
+    };
+    let observed = observe("azure-test", &connection, &Choice::default(), &nothing).expect("observed");
+    assert_eq!(
+        observed.entry.headers,
+        [
+            // Not a secret by its name: saved as `server add --header` saves it.
+            Header {
+                name: "x-tenant".into(),
+                value: HeaderValue::Literal("acme".into())
+            },
+            // A secret by its name: the entry points at a variable of its own.
+            Header {
+                name: "X-Api-Key".into(),
+                value: HeaderValue::Secret(SecretRef::Env("RETP_AZURE_TEST_HEADER_X_API_KEY".into()))
+            },
+        ]
+    );
+    let advice = observed.advice.join("\n");
+    assert!(
+        advice.contains("NOT saved")
+            && advice.contains("--header X-Api-Key")
+            && advice.contains("RETP_AZURE_TEST_HEADER_X_API_KEY"),
+        "{advice}"
+    );
+    let shown = format!(
+        "{advice} {} {observed:?} {connection:?}",
+        observed.entry.to_toml()
+    );
+    assert!(!shown.contains(CANARY), "{shown}");
+
+    // What was saved is an entry the catalogue reads back - a file keeps no
+    // order between its headers.
+    let read = retp_catalog::Entry::parse(&observed.entry.to_toml()).expect("valid");
+    assert_eq!(read.headers.len(), 2);
+    assert!(
+        observed
+            .entry
+            .headers
+            .iter()
+            .all(|header| read.headers.contains(header)),
+        "{:?}",
+        read.headers
+    );
+}
+
+#[test]
 fn every_method_is_deduced_from_the_login_the_options_gave() {
     let case = |choice: Choice, env: &dyn Fn(&str) -> Option<String>| {
         observe("srv", &connection(), &choice, env)

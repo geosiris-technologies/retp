@@ -9,15 +9,22 @@
 //! - the value came from the command line (`--password`…): nothing of it is
 //!   saved, since it is already in the shell's history; the entry points at a
 //!   variable of its own name, and the advice says to define it.
+//!
+//! A header given with `--header` follows the same rule: its value is saved
+//! when its name does not say it is a secret, as `server add --header` saves
+//! it; one whose name does is saved as a reference to a variable of its own.
 
 use retp_client::login::{Choice, Login};
+use retp_client::{ExtraHeaders, sensitive_header};
 
-use crate::entry::{AuthSpec, Entry, Handshake, ServerSpec, Tls, Transport};
+use crate::entry::{AuthSpec, Entry, Handshake, Header, HeaderValue, ServerSpec, Tls, Transport};
 use crate::error::CatalogError;
 use crate::secret::SecretRef;
 use crate::util::shout;
 
-/// What a command connected with, minus every secret.
+/// What a command connected with, minus every secret but one: the value of a
+/// header given with `--header`, which is held as the client holds it (never
+/// shown) and is not saved when the header's name says it carries a secret.
 #[derive(Debug, Clone, Default)]
 pub struct Connection {
     /// The URL.
@@ -26,6 +33,9 @@ pub struct Connection {
     pub rest: bool,
     /// The OSDU data partition.
     pub partition: Option<String>,
+    /// The headers given in addition (`--header`). Their `Debug` shows the
+    /// names only.
+    pub headers: ExtraHeaders,
     /// The certificate was not checked.
     pub insecure: bool,
     /// The handshake was a web page's.
@@ -194,7 +204,22 @@ pub fn observe(
     server.at_once = connection.at_once;
     server.types = connection.types.clone();
     server.offer = connection.offer.clone();
-    let entry = Entry::new(server, auth);
+    let mut entry = Entry::new(server, auth);
+    for (header, value) in connection.headers.iter() {
+        let value = if sensitive_header(header) {
+            let own = format!("RETP_{}_HEADER_{}", shout(name), shout(header));
+            advice.push(format!(
+                "the value given with --header {header} was NOT saved (it is already in your shell history); the entry reads the variable {own}: define it, or give the entry another reference with `retp server add --force` and --header-from {header}=env:NAME or {header}=file:PATH"
+            ));
+            HeaderValue::Secret(SecretRef::Env(own))
+        } else {
+            HeaderValue::Literal(value.to_string())
+        };
+        entry.headers.push(Header {
+            name: header.to_string(),
+            value,
+        });
+    }
     entry.validate().map_err(|problem| problem.located(None))?;
     Ok(Observed { entry, advice })
 }

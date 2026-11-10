@@ -1479,6 +1479,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]

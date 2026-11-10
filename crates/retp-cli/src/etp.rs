@@ -24,9 +24,9 @@ use retp_client::login::{Choice, Login};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen};
 use retp_client::resume::{Retry, RunEvent, Setback};
 use retp_client::{
-    ClientError, ResourceQuery, ServerProfile, dataspace_uri, delete_dataspaces, described_client,
-    get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
-    plain_text_warning, put_dataspaces, reading_client, writing_client,
+    ClientError, ExtraHeaders, ResourceQuery, ServerProfile, dataspace_uri, delete_dataspaces,
+    described_client, get_data_objects, list_dataspaces, list_resources, list_supported_types,
+    object_file_name, plain_text_warning, put_dataspaces, reading_client, writing_client,
 };
 use retp_proto::describe::OfferDescription;
 use retp_proto::negotiate::protocol_name;
@@ -154,9 +154,19 @@ struct Server {
     #[command(flatten)]
     login: LoginArgs,
     /// An OSDU data partition: talks to the server as OSDU's Reservoir DDMS,
-    /// which wants a `data-partition-id` header.
+    /// which wants a `data-partition-id` header. The same as
+    /// `--header data-partition-id=VALUE`.
     #[arg(long)]
     partition: Option<String>,
+    /// A header the server wants in addition, as `NAME=VALUE`; repeat the
+    /// option for several. It goes with every request to the server: the
+    /// WebSocket handshake, the probe of `/.well-known`, each REST call. With
+    /// a catalogue server it is added to the entry's own headers. A header
+    /// that carries a secret is better kept in a catalogue entry, by
+    /// reference (`retp server add --header-from`), than on a command line,
+    /// which lands in the shell's history.
+    #[arg(long = "header", short = 'H', value_name = "NAME=VALUE")]
+    headers: Vec<String>,
     /// Do not check the server's certificate - for a server whose certificate
     /// is known to be expired, self-signed or misnamed. The session stays
     /// encrypted, to a server nobody vouched for.
@@ -166,10 +176,11 @@ struct Server {
     /// print each acknowledgement as it comes.
     #[arg(long)]
     ack: bool,
-    /// Connect as a front end can: no header at all - ETP's attributes and the
-    /// OSDU partition in the query string, the credentials in an `Authorize`
-    /// once connected (§4.1.4.1, §4.3.2). Says whether a server will take the
-    /// front end.
+    /// Connect as a front end can: no header at all - ETP's attributes, the
+    /// OSDU partition and every `--header` in the query string, the
+    /// credentials in an `Authorize` once connected (§4.1.4.1, §4.3.2). A
+    /// header that carries a secret is refused: it would be written in the
+    /// URL. Says whether a server will take the front end.
     #[arg(long)]
     as_browser: bool,
     /// Send a Ping when the session has been quiet this many seconds, so that
@@ -287,6 +298,14 @@ impl Server {
         }
     }
 
+    /// The `--header` options as the library's list, which checks each one.
+    fn headers(&self) -> Result<ExtraHeaders> {
+        Ok(ExtraHeaders::from_pairs(catalog_cli::pairs(
+            &self.headers,
+            "--header",
+        )?)?)
+    }
+
     /// The server, with the credentials obtained and the warnings said.
     fn endpoint(&self) -> Result<Endpoint> {
         // A catalogue server: its secrets read, its login done, its warnings said, and the
@@ -299,6 +318,25 @@ impl Server {
         } else {
             CertificateCheck::Verify
         };
+        let mut endpoint = Endpoint {
+            url: self.url.clone(),
+            profile: self.profile(),
+            headers: self.headers()?,
+            credentials: None,
+            certificates,
+            handshake: if self.as_browser {
+                Profile::Browser
+            } else {
+                Profile::Native
+            },
+        };
+        // What the headers refuse is said before anything is asked of the
+        // network: the login costs a request. REST always sends headers.
+        if self.rest {
+            endpoint.additions()?;
+        } else {
+            endpoint.sendable()?;
+        }
         for warning in [plain_text_warning(&self.url), certificates.warning(&self.url)]
             .into_iter()
             .flatten()
@@ -320,17 +358,8 @@ impl Server {
             }
             None => None,
         };
-        Ok(Endpoint {
-            url: self.url.clone(),
-            profile: self.profile(),
-            credentials,
-            certificates,
-            handshake: if self.as_browser {
-                Profile::Browser
-            } else {
-                Profile::Native
-            },
-        })
+        endpoint.credentials = credentials;
+        Ok(endpoint)
     }
 
     fn open(&self) -> Result<Session> {
@@ -439,7 +468,7 @@ impl Server {
                 );
             }
         }
-        let mut client = native::rest_client(&self.endpoint()?);
+        let mut client = native::rest_client(&self.endpoint()?)?;
         if let Some(at_once) = self.at_once {
             client = client.with_at_once(at_once);
         }
@@ -2441,7 +2470,7 @@ fn uuid(bytes: &[u8; 16]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EtpCommand, Line, split_line};
+    use super::{EtpCommand, Line, Server, split_line};
     use clap::{CommandFactory, Parser};
 
     /// Every command builds: no two arguments of one command share a name
@@ -2478,5 +2507,63 @@ mod tests {
         assert_eq!(split_line("  ").unwrap(), Vec::<String>::new());
         assert_eq!(split_line(r#"get """#).unwrap(), ["get", ""]);
         assert!(split_line(r#"get "eml:///"#).is_err());
+    }
+
+    /// What the headers refuse is said before the login, which costs a
+    /// request: the token URL here is one nobody answers, and an attempt on
+    /// it would be the error.
+    #[test]
+    fn a_header_the_server_cannot_be_sent_is_refused_before_the_login() {
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            server: Server,
+        }
+        const SECRET: &str = "s3cret-of-the-client";
+        const KEY: &str = "k3y-of-the-header";
+        let key = format!("x-api-key={KEY}");
+        let cases: [(&[&str], &str); 3] = [
+            // The partition is a header: given twice.
+            (
+                &["--partition", "opendes", "--header", "data-partition-id=other"],
+                "data-partition-id",
+            ),
+            (
+                &[
+                    "--rest",
+                    "--partition",
+                    "opendes",
+                    "-H",
+                    "data-partition-id=other",
+                ],
+                "data-partition-id",
+            ),
+            // A front end has no header: a secret would be written in the URL.
+            (&["--as-browser", "--header", &key], "x-api-key"),
+        ];
+        for (extra, named) in cases {
+            let mut words = vec![
+                "retp",
+                "wss://etp.example.org/",
+                "--token-url",
+                "http://127.0.0.1:9/token",
+                "--client-id",
+                "app",
+                "--client-secret",
+                SECRET,
+            ];
+            words.extend_from_slice(extra);
+            let server = Cli::try_parse_from(words).expect("the options parse").server;
+            let why = match server.endpoint() {
+                Ok(_) => panic!("{extra:?} must be refused"),
+                Err(why) => format!("{why:#}"),
+            };
+            assert!(why.contains(named), "{extra:?}: {why}");
+            assert!(!why.contains("logging in"), "the login was tried first: {why}");
+            assert!(
+                !why.contains(SECRET) && !why.contains(KEY),
+                "a value is shown: {why}"
+            );
+        }
     }
 }

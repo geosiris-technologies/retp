@@ -26,6 +26,7 @@ pub mod channels;
 mod client;
 mod clock;
 pub mod engine;
+mod headers;
 pub mod notifications;
 mod offer;
 mod operations;
@@ -51,6 +52,7 @@ pub use async_client::{AsyncClient, Sink};
 pub use caller::{Blocking, Caller, run as blocking};
 pub use client::{Acknowledged, Client, ClientError, Settings};
 pub use clock::{Clock, SystemClock};
+pub use headers::{ExtraHeaders, HeaderRefusal, sensitive_header};
 pub use offer::{
     EVERY_RELEASE, FORMATS, READING, WRITING, customer_of, described_client, reading_client, writing_client,
 };

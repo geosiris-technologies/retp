@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use retp_client::login::{Choice, Login};
 use retp_client::native::{CertificateCheck, Endpoint};
-use retp_client::{ServerProfile, plain_text_warning};
+use retp_client::{ExtraHeaders, HeaderRefusal, ServerProfile, plain_text_warning};
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
 
@@ -21,7 +21,8 @@ use crate::secret::{RefStatus, Secret, SecretRef, SecretSource};
 
 /// What the command line decided, which wins over the entry: the URL it ended
 /// up with (the catalogue's own expansion put it there), the transport, the
-/// partition, the two flags.
+/// partition, the two flags. Its headers do not win, they are **added**: one
+/// the entry already defines is refused, by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     /// The URL to connect to. It must be one of the entry's.
@@ -30,6 +31,8 @@ pub struct Overrides {
     pub rest: Option<bool>,
     /// An OSDU data partition.
     pub partition: Option<String>,
+    /// Headers to send in addition to the entry's.
+    pub headers: ExtraHeaders,
     /// Do not check the certificate.
     pub insecure: bool,
     /// Connect as a web page can.
@@ -46,7 +49,7 @@ pub struct Resolved {
     browser: bool,
     protected: bool,
     login: Option<Login>,
-    headers: Vec<(String, String)>,
+    headers: ExtraHeaders,
     held: Vec<Secret>,
 }
 
@@ -228,14 +231,22 @@ impl Entry {
                 }
             }
         }
-        let mut headers = Vec::new();
+        // The entry's headers, then the command line's: one list, each header
+        // checked by the client's own door. A value read from a reference is
+        // a secret whatever the header is called.
+        let unsendable = |why: HeaderRefusal| CatalogError::refused(format!("server `{name}`: {why}"));
+        let mut headers = ExtraHeaders::new();
         for header in &self.headers {
-            let value = match &header.value {
-                HeaderValue::Literal(text) => text.clone(),
-                HeaderValue::Secret(reference) => read(&format!("header {}", header.name), reference)?,
-            };
-            headers.push((header.name.clone(), value));
+            headers = match &header.value {
+                HeaderValue::Literal(text) => headers.with(header.name.as_str(), text.as_str()),
+                HeaderValue::Secret(reference) => {
+                    let value = read(&format!("header {}", header.name), reference)?;
+                    headers.with_secret(header.name.as_str(), value)
+                }
+            }
+            .map_err(unsendable)?;
         }
+        let headers = headers.and(&overrides.headers).map_err(unsendable)?;
 
         let redact = |text: &str| {
             held.iter()
@@ -254,7 +265,7 @@ impl Entry {
             });
         }
         let partition = overrides.partition.clone().or_else(|| server.partition.clone());
-        Ok(Resolved {
+        let resolved = Resolved {
             name: name.to_string(),
             url,
             rest,
@@ -272,7 +283,9 @@ impl Entry {
             login,
             headers,
             held,
-        })
+        };
+        resolved.sendable().map_err(unsendable)?;
+        Ok(resolved)
     }
 }
 
@@ -303,9 +316,23 @@ impl Resolved {
         self.login.as_ref()
     }
 
-    /// The extra headers of the entry, their references read.
-    pub fn headers(&self) -> &[(String, String)] {
+    /// The extra headers of the entry, their references read, and the ones
+    /// the command line added. The endpoint carries them
+    /// ([`Resolved::endpoint`]).
+    pub fn headers(&self) -> &ExtraHeaders {
         &self.headers
+    }
+
+    /// What a connection would refuse, said as soon as the entry is resolved:
+    /// a header the partition already gives, and a header that carries a
+    /// secret when the session is opened as a front end opens it - its
+    /// attributes go in the URL. REST always sends headers.
+    fn sendable(&self) -> Result<(), HeaderRefusal> {
+        let endpoint = self.endpoint(None);
+        if self.rest {
+            return endpoint.additions().map(|_| ());
+        }
+        endpoint.sendable()
     }
 
     /// `text` with every literal occurrence of this entry's secrets removed: a
@@ -321,6 +348,7 @@ impl Resolved {
         Endpoint {
             url: self.url.clone(),
             profile: self.profile.clone(),
+            headers: self.headers.clone(),
             credentials,
             certificates: self.certificates,
             handshake: if self.browser {
@@ -333,17 +361,9 @@ impl Resolved {
 
     /// Get the credentials (one request to the authorization server when the
     /// method needs one) and build the endpoint, with the warnings the command
-    /// line prints for a plain-text or unchecked connection.
-    ///
-    /// Refused while the client has no way to send the entry's extra headers:
-    /// connecting without them would be a quiet departure from the definition.
+    /// line prints for a plain-text or unchecked connection. The entry's extra
+    /// headers are on the endpoint, which sends them with every request.
     pub fn obtain_endpoint(&self) -> Result<Opened, CatalogError> {
-        if !self.headers.is_empty() {
-            return Err(CatalogError::refused(format!(
-                "server `{}` defines extra headers, and retp-client has no way to send them yet",
-                self.name
-            )));
-        }
         let mut notes = Vec::new();
         for warning in [
             plain_text_warning(&self.url),

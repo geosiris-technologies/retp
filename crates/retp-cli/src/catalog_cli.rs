@@ -107,6 +107,7 @@ pub(super) fn endpoint(server: &Server) -> Result<Option<Endpoint>> {
         url: Some(server.url.clone()),
         rest: Some(server.rest),
         partition: server.partition.clone(),
+        headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
     };
@@ -205,6 +206,7 @@ pub(super) fn plan_save(server: &Server) -> Result<Option<SavePlan>> {
         url: server.url.clone(),
         rest: server.rest,
         partition: server.partition.clone(),
+        headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
         keepalive: server.keepalive,
@@ -262,7 +264,8 @@ impl Network for Net {
 
     fn session(&self, endpoint: Endpoint, rest: bool) -> std::result::Result<String, String> {
         if rest {
-            let mut remote = native::Remote::Rest(Box::new(native::rest_client(&endpoint)));
+            let client = native::rest_client(&endpoint).map_err(|why| why.to_string())?;
+            let mut remote = native::Remote::Rest(Box::new(client));
             return match remote.health() {
                 Some(Ok(health)) => Ok(format!("the REST API answers: {health}")),
                 Some(Err(why)) => Err(why.to_string()),
@@ -452,7 +455,7 @@ pub(super) struct AddArgs {
 }
 
 /// `NAME=VALUE`, the value never shown in an error.
-fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
+pub(super) fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
     options
         .iter()
         .map(|text| {
@@ -571,14 +574,8 @@ fn add(args: AddArgs) -> Result<ExitCode> {
             }
         }
     }
-    let has_headers = !entry.headers.is_empty();
     catalog.add(&name, entry, args.force, &reserved())?;
     println!("added `{name}`; check it with `retp server test {name}`");
-    if has_headers {
-        eprintln!(
-            "note: this version of retp cannot send extra headers yet; a connection to `{name}` will say so rather than leave them out"
-        );
-    }
     Ok(ExitCode::SUCCESS)
 }
 

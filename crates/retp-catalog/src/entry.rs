@@ -9,6 +9,7 @@
 
 use std::fmt::Write as _;
 
+use retp_client::{ExtraHeaders, HeaderRefusal, sensitive_header};
 use serde::Deserialize;
 
 use crate::error::CatalogError;
@@ -371,12 +372,17 @@ impl WriteDefaults {
     }
 }
 
-/// A header whose name says it carries a secret: its value is a reference, never a literal.
-fn sensitive_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    ["authorization", "cookie", "key", "token", "secret", "password"]
-        .iter()
-        .any(|word| lower.contains(word))
+/// What the client would refuse of this header before sending it: its name,
+/// and its value when the value is written here. The client's own check, so
+/// that an entry that is accepted is one that can be sent.
+fn sendable(header: &Header) -> Result<(), HeaderRefusal> {
+    let written = match &header.value {
+        HeaderValue::Literal(text) => text.as_str(),
+        HeaderValue::Secret(_) => "",
+    };
+    ExtraHeaders::new()
+        .with(header.name.as_str(), written)
+        .map(|_| ())
 }
 
 /// A catalogue entry: the contents of one `server.toml`.
@@ -883,14 +889,20 @@ impl Entry {
         }
         for (index, header) in self.headers.iter().enumerate() {
             let name = header.name.as_str();
-            let token = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
-            if !token {
+            match sendable(header) {
+                Ok(()) => {}
+                Err(HeaderRefusal::Name(_)) => {
+                    return Err(Problem::new(
+                        "headers",
+                        "a header name is letters, digits, `-` and `_`",
+                    ));
+                }
+                Err(why) => return Err(Problem::new(name, why.to_string())),
+            }
+            if server.partition.is_some() && name.eq_ignore_ascii_case("data-partition-id") {
                 return Err(Problem::new(
-                    "headers",
-                    "a header name is letters, digits, `-` and `_`",
+                    name,
+                    "this header is the data partition, which `partition` already gives: keep one of the two",
                 ));
             }
             if self.headers[..index]

@@ -185,6 +185,44 @@ fn a_header_that_looks_secret_takes_a_reference_and_not_a_literal() {
     assert_eq!(entry.headers.len(), 2);
 }
 
+#[test]
+fn a_header_the_client_could_not_send_is_refused_when_the_file_is_read() {
+    let with = |headers: &str| file(&format!("[auth]\nmethod = \"none\"\n[headers]\n{headers}\n"));
+
+    // The credentials have their own table: `[auth]`.
+    let message = refusal(&with("authorization = { env = \"A\" }"));
+    assert!(
+        message.contains("authorization") && message.contains("credentials"),
+        "{message}"
+    );
+    // What the handshake writes itself.
+    for own in ["etp-encoding = \"json\"", "sec-websocket-protocol = \"other\""] {
+        let message = refusal(&with(own));
+        assert!(message.contains("written by the client itself"), "{message}");
+    }
+    // A line break in a value would start another header.
+    let message = refusal(&with("x-tenant = \"acme\\r\\nx-injected: 1\""));
+    assert!(
+        message.contains("x-tenant") && message.contains("control character"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("x-injected"),
+        "the value is not shown: {message}"
+    );
+    // The data partition is `partition`, given once (the test server has one).
+    let message = refusal(&with("Data-Partition-Id = \"another\""));
+    assert!(
+        message.contains("Data-Partition-Id") && message.contains("partition"),
+        "{message}"
+    );
+    // Without `partition`, the header is the partition, like any other header.
+    let alone = with("data-partition-id = \"opendes\"").replace("partition = \"opendes\"\n", "");
+    let entry = Entry::parse(&alone).expect("valid");
+    assert_eq!(entry.server.partition, None);
+    assert_eq!(entry.headers.len(), 1);
+}
+
 fn full(auth: AuthSpec) -> Entry {
     let mut server = ServerSpec::etp("wss://h.example.com/etp");
     server.rest_url = Some("https://h.example.com/rest".into());

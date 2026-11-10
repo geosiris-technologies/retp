@@ -23,14 +23,27 @@ pub enum ServerProfile {
 }
 
 impl ServerProfile {
+    /// The header this server's habit comes down to, if it is one: a name and
+    /// its value. It is a header like any other of the endpoint
+    /// ([`ExtraHeaders`](crate::ExtraHeaders)), which is how the client sends
+    /// it.
+    pub fn header(&self) -> Option<(&'static str, &str)> {
+        match self {
+            ServerProfile::Standard => None,
+            ServerProfile::Rddms { data_partition } => Some(("data-partition-id", data_partition)),
+        }
+    }
+
     /// The handshake, with what this server expects in addition - as a
     /// header, or in the query string for a browser, which sets no header.
+    ///
+    /// The profile alone: an endpoint's whole handshake, its extra headers
+    /// included and checked, is
+    /// [`Endpoint::adapt`](crate::native::Endpoint::adapt).
     pub fn adapt(&self, handshake: Handshake) -> Handshake {
-        match self {
-            ServerProfile::Standard => handshake,
-            ServerProfile::Rddms { data_partition } => {
-                handshake.with_attribute("data-partition-id", data_partition)
-            }
+        match self.header() {
+            Some((name, value)) => handshake.with_attribute(name, value),
+            None => handshake,
         }
     }
 }

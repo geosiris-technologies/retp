@@ -569,3 +569,70 @@ fn a_secret_for_a_front_end_handshake_is_refused_before_anything_is_connected() 
         assert!(!format!("{said} {shown}").contains(SECRET), "{shown}");
     }
 }
+
+// ---- a secret header goes to no other host ---------------------------------------
+
+/// Listen on a free port and answer every request with a redirection to
+/// `location`.
+fn redirecting(location: String) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a free local port");
+    let port = listener.local_addr().expect("a bound address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("a second handle"));
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line == "\r\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let answer = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(answer.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
+#[test]
+fn a_request_that_carries_a_secret_header_follows_no_redirection() {
+    let (elsewhere, landed) = recording();
+    let from = redirecting(format!("http://127.0.0.1:{elsewhere}/landed"));
+
+    // The witness: with no secret among the headers the redirection is
+    // followed, and the headers go with it. That is what gives a meaning to
+    // the absences below.
+    let plain = Endpoint {
+        headers: ExtraHeaders::new().with("x-tenant", "acme").expect("taken"),
+        ..Endpoint::new(format!("http://127.0.0.1:{from}/api"))
+    };
+    let _ = Remote::Rest(Box::new(native::rest_client(&plain))).health();
+    let request = landed
+        .recv_timeout(WAIT)
+        .expect("a redirection is followed when no header is a secret");
+    assert_eq!(header(&request, "x-tenant"), Some("acme"), "{request}");
+
+    // A redirection is followed inside the call: once the call is back, a
+    // request that went elsewhere has already been received there.
+    let secret = demanding(format!("http://127.0.0.1:{from}/api"));
+    let answer = Remote::Rest(Box::new(native::rest_client(&secret))).health();
+    assert!(
+        landed.try_recv().is_err(),
+        "a REST call took its secret header to another host"
+    );
+    assert!(!format!("{answer:?}").contains(SECRET), "{answer:?}");
+
+    // The probe too.
+    let probed = demanding(format!("ws://127.0.0.1:{from}/etp"));
+    let error = fetch_server_capabilities(&probed).expect_err("a redirection is not the capabilities");
+    assert!(
+        landed.try_recv().is_err(),
+        "the probe took its secret header to another host"
+    );
+    assert!(!format!("{error} {error:?}").contains(SECRET), "{error:?}");
+}

@@ -22,8 +22,8 @@ use retp_client::memory::{ManualClock, MemoryTransport};
 use retp_client::rest::{BlockingHttp, Http, HttpRequest, HttpResponse, Method, RestClient};
 use retp_client::resume::{Connector, Retry, RunError, RunEvent, Setback};
 use retp_client::{
-    AsyncClient, Client, ClientError, Clock, Ended, Opened, ResourceQuery, ServerProfile, Settings, Sink,
-    TransportError, asynchronous, commit_transaction, dataspace_uri, delete_data_objects, delete_dataspaces,
+    AsyncClient, Client, ClientError, Clock, Ended, Opened, ResourceQuery, Settings, Sink, TransportError,
+    asynchronous, commit_transaction, dataspace_uri, delete_data_objects, delete_dataspaces,
     described_client, get_data_objects, list_dataspaces, list_resources, list_supported_types,
     object_file_name, plain_text_warning, put_data_objects, put_dataspaces, reading_client,
     rollback_transaction, start_transaction, writing_client,
@@ -33,7 +33,6 @@ use retp_proto::connection::Authorization;
 use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Offer, ProtocolOffer, Tolerance};
-use retp_proto::probe::{self, HandshakeSettings, Profile};
 use retp_proto::wire::chunk_objects;
 use retp_proto::wire::{Body, Delivery, EtpError};
 use retp_types::datatypes::MessageHeader;
@@ -2199,40 +2198,6 @@ fn interrupted_write_is_neither_success_nor_failure() {
 }
 
 #[test]
-fn server_profile_changes_no_protocol_code() {
-    let settings = HandshakeSettings::default();
-    let base = probe::handshake("wss://rddms.example/api/etp", Profile::Native, &settings).unwrap();
-    let standard = ServerProfile::Standard.adapt(base.clone());
-    let rddms = ServerProfile::Rddms {
-        data_partition: "opendes".into(),
-    }
-    .adapt(base.clone());
-    assert_eq!(standard, base, "the standard profile adds nothing");
-    let added: Vec<_> = rddms
-        .headers
-        .iter()
-        .filter(|h| !base.headers.contains(h))
-        .collect();
-    assert_eq!(added, [&("data-partition-id".to_string(), "opendes".to_string())]);
-    assert_eq!(
-        (rddms.url.as_str(), &rddms.subprotocols),
-        (base.url.as_str(), &base.subprotocols)
-    );
-
-    // A browser sets no header: the partition goes in the query string, as
-    // ETP's own attributes do (§4.3.2), and no header appears.
-    let browser = probe::handshake("wss://rddms.example/api/etp", Profile::Browser, &settings).unwrap();
-    let rddms = ServerProfile::Rddms {
-        data_partition: "open des".into(),
-    }
-    .adapt(browser.clone());
-    assert!(rddms.headers.is_empty(), "{:?}", rddms.headers);
-    assert_eq!(rddms.url, format!("{}&data-partition-id=open%20des", browser.url));
-    // And nothing past the handshake takes a profile: `Client::open` has no
-    // parameter for one - which is the property, held by the type.
-}
-
-#[test]
 fn plain_ws_to_a_remote_host_is_said() {
     for local in [
         "ws://localhost:9002",
@@ -2958,11 +2923,10 @@ fn b64(bytes: impl Iterator<Item = u8>) -> String {
 }
 
 fn rest(fake: FakeRest) -> RestClient<FakeRest> {
-    RestClient::new(
-        fake,
-        REST_BASE,
-        Some(Credentials::bearer("good").unwrap()),
-        Some("opendes".into()),
+    RestClient::new(fake, REST_BASE, Some(Credentials::bearer("good").unwrap())).with_headers(
+        retp_client::ExtraHeaders::new()
+            .with("data-partition-id", "opendes")
+            .unwrap(),
     )
 }
 

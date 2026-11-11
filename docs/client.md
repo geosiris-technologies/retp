@@ -27,7 +27,7 @@ gave credentials, and returns once `OpenSession` has arrived.
 
 ```rust,ignore
 let mut client = retp_client::native::connect(Connect {
-    endpoint,           // URL, credentials, certificate policy, server profile
+    endpoint,           // URL, credentials, certificate policy, server profile, extra headers
     offer,              // what this client asks for: types, formats, protocols
     handlers,           // the protocols it implements
     max_message: None,  // taken from the server's capabilities when probed
@@ -42,6 +42,53 @@ let spaces = retp_client::list_dataspaces(&mut client)?;
 
 The same operations exist asynchronously (`AsyncClient`), fed by whoever holds
 the socket; that is the form a browser uses.
+
+## Headers a server wants
+
+Which headers a server expects in addition to the protocol's own is a property of
+the server, like its URL: a tenant, a routing key, a data partition, an API key.
+They are given once, with the endpoint, and go with every request to it: the
+WebSocket handshake, the probe of `/.well-known/etp-server-capabilities`, each
+call of the REST API.
+
+```rust,ignore
+use retp_client::ExtraHeaders;
+use retp_client::native::Endpoint;
+
+let mut endpoint = Endpoint::new("wss://host/etp");
+endpoint.headers = ExtraHeaders::new()
+    .with("data-partition-id", "opendes")?    // the data partition of OSDU's Reservoir DDMS
+    .with("x-tenant", "acme")?
+    .with_secret("x-routing", routing_key)?;  // a secret whatever its name
+```
+
+`ExtraHeaders` is the one door they come through. Each header is checked when it
+is added, and what cannot be sent is refused there, by name (`HeaderRefusal`,
+which never carries a value): a name that is not letters, digits, `-` and `_`; a
+value with a control character or a character that is not ASCII; a header the
+client writes itself
+(`authorization`, `etp-encoding`, `sec-websocket-*`...); the same name twice,
+whatever the case. The data partition of OSDU's Reservoir DDMS is one of these
+headers, `data-partition-id`, and nothing else: the client has no other way to
+give it.
+
+A value may be a secret. One added with `with_secret`, or whose name says so
+(`sensitive_header`: `cookie`, anything with `authorization`, `key`, `token`,
+`secret` or `password`), is wiped from memory when the list is dropped and is in
+no `Debug` of this crate: the list and a REST `HttpRequest` show the names, and a
+`Handshake` shows the value of ETP's own attributes only. A request that carries
+one follows no redirection, so that it goes to no other host. It is never written
+in a URL either. The handshake of a
+front end (`Profile::Browser`) has no header, its attributes go in the query
+string (ETP 1.2 section 4.3.2), so a header that carries a secret is refused
+there, before the socket is opened (`HeaderRefusal::InTheUrl`). The copy a
+transport makes to send a header is the transport's to wipe.
+
+`Endpoint::sendable()` says what a WebSocket connection would refuse about the
+headers with nothing sent: ask it before a login, which costs a request.
+
+A transport of your own (the browser's `WebSocket`, which takes a URL) gets the
+handshake to send from `ExtraHeaders::onto(handshake)`.
 
 ## What you announce
 

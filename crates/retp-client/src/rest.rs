@@ -55,7 +55,7 @@ use serde_json::Value as Json;
 
 use crate::caller::Caller;
 use crate::source::{self, CredentialSource, Fresh, Refused};
-use crate::{ClientError, TransportError};
+use crate::{ClientError, ExtraHeaders, TransportError};
 
 /// An HTTP method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +70,10 @@ pub enum Method {
     Delete,
 }
 
-/// A request to send.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request to send. Its `Debug` shows the names of its headers and the
+/// length of its body, never a value: the credentials, or a header the
+/// server wants in addition, may be secrets.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// Its method.
     pub method: Method,
@@ -81,6 +83,18 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// Its body, if any.
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &names)
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// What came back.
@@ -146,7 +160,9 @@ pub struct RestClient<H: Http> {
     /// Where each request's credentials come from, when they are not fixed
     /// ([`RestClient::with_source`]).
     source: Option<Arc<dyn CredentialSource>>,
-    partition: Option<String>,
+    /// The headers the server wants in addition, sent with every request
+    /// ([`RestClient::with_headers`]).
+    extra: ExtraHeaders,
     page: usize,
     at_once: usize,
     /// Whether this server reads several objects in one request.
@@ -187,8 +203,9 @@ struct RestTransaction {
 
 impl<H: Http> RestClient<H> {
     /// A client of the API at `base` (`https://…/api/reservoir-ddms/v2`),
-    /// sending `credentials` and the OSDU `partition` with every request.
-    pub fn new(http: H, base: &str, credentials: Option<Credentials>, partition: Option<String>) -> Self {
+    /// sending `credentials` with every request. What the server wants besides,
+    /// the OSDU data partition for one, is a header: [`RestClient::with_headers`].
+    pub fn new(http: H, base: &str, credentials: Option<Credentials>) -> Self {
         let base = base.trim_end_matches('/').to_string();
         Self {
             http,
@@ -196,7 +213,7 @@ impl<H: Http> RestClient<H> {
             base,
             credentials,
             source: None,
-            partition,
+            extra: ExtraHeaders::new(),
             page: PAGE,
             at_once: AT_ONCE,
             plural: None,
@@ -226,6 +243,15 @@ impl<H: Http> RestClient<H> {
     pub fn with_source(mut self, source: Arc<dyn CredentialSource>) -> Self {
         self.credentials = None;
         self.source = Some(source);
+        self
+    }
+
+    /// Send `headers` with every request, in addition to the client's own -
+    /// what the server wants besides the credentials: a routing key, a
+    /// data partition, a tenant, an API key. They replace the ones given
+    /// before.
+    pub fn with_headers(mut self, headers: ExtraHeaders) -> Self {
+        self.extra = headers;
         self
     }
 
@@ -1744,7 +1770,8 @@ impl<H: Http> RestClient<H> {
             .collect()
     }
 
-    /// What a call is on the wire: the URL, the credentials, the partition.
+    /// What a call is on the wire: the URL, the credentials, the headers the
+    /// server wants in addition.
     fn request_of(
         &self,
         method: Method,
@@ -1756,8 +1783,8 @@ impl<H: Http> RestClient<H> {
         if let Some(credentials) = credentials {
             headers.push(("authorization".into(), credentials.header().to_string()));
         }
-        if let Some(partition) = &self.partition {
-            headers.push(("data-partition-id".into(), partition.clone()));
+        for (name, value) in self.extra.iter() {
+            headers.push((name.to_string(), value.to_string()));
         }
         if body.is_some() {
             headers.push(("content-type".into(), "application/json".into()));

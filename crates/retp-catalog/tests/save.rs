@@ -10,7 +10,9 @@ use crate::common::{CANARY, Sandbox, files_containing};
 fn connection() -> Connection {
     Connection {
         url: "wss://h.example.com/etp".into(),
-        partition: Some("opendes".into()),
+        headers: retp_client::ExtraHeaders::new()
+            .with("data-partition-id", "opendes")
+            .expect("taken"),
         insecure: true,
         ..Connection::default()
     }
@@ -44,7 +46,13 @@ fn a_secret_from_an_ambient_variable_becomes_a_reference_to_that_variable() {
             .iter()
             .any(|a| a.contains("ETP_PASSWORD") && a.contains("shared"))
     );
-    assert_eq!(observed.entry.server.partition.as_deref(), Some("opendes"));
+    assert_eq!(
+        observed.entry.headers,
+        [retp_catalog::Header {
+            name: "data-partition-id".into(),
+            value: retp_catalog::HeaderValue::Literal("opendes".into()),
+        }]
+    );
     assert_eq!(observed.entry.server.tls, retp_catalog::Tls::Skip);
     assert!(!observed.entry.to_toml().contains(CANARY));
     assert!(observed.advice.iter().all(|a| !a.contains(CANARY)));
@@ -73,6 +81,60 @@ fn a_secret_from_the_command_line_is_not_saved_and_the_entry_points_at_a_variabl
     );
     assert!(!advice.contains(CANARY));
     assert!(!observed.entry.to_toml().contains(CANARY));
+}
+
+#[test]
+fn the_headers_of_the_line_are_saved_and_a_secret_one_as_a_reference() {
+    use retp_catalog::{Header, HeaderValue};
+    use retp_client::ExtraHeaders;
+
+    let connection = Connection {
+        headers: ExtraHeaders::from_pairs([("x-tenant", "acme"), ("X-Api-Key", CANARY)])
+            .expect("headers a command line may give"),
+        ..connection()
+    };
+    let observed = observe("azure-test", &connection, &Choice::default(), &nothing).expect("observed");
+    assert_eq!(
+        observed.entry.headers,
+        [
+            // Not a secret by its name: saved as `server add --header` saves it.
+            Header {
+                name: "x-tenant".into(),
+                value: HeaderValue::Literal("acme".into())
+            },
+            // A secret by its name: the entry points at a variable of its own.
+            Header {
+                name: "X-Api-Key".into(),
+                value: HeaderValue::Secret(SecretRef::Env("RETP_AZURE_TEST_HEADER_X_API_KEY".into()))
+            },
+        ]
+    );
+    let advice = observed.advice.join("\n");
+    assert!(
+        advice.contains("NOT saved")
+            && advice.contains("--header X-Api-Key")
+            && advice.contains("RETP_AZURE_TEST_HEADER_X_API_KEY"),
+        "{advice}"
+    );
+    let shown = format!(
+        "{advice} {} {observed:?} {connection:?}",
+        observed.entry.to_toml()
+    );
+    assert!(!shown.contains(CANARY), "{shown}");
+
+    // What was saved is an entry the catalogue reads back - a file keeps no
+    // order between its headers.
+    let read = retp_catalog::Entry::parse(&observed.entry.to_toml()).expect("valid");
+    assert_eq!(read.headers.len(), 2);
+    assert!(
+        observed
+            .entry
+            .headers
+            .iter()
+            .all(|header| read.headers.contains(header)),
+        "{:?}",
+        read.headers
+    );
 }
 
 #[test]

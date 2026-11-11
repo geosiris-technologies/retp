@@ -24,6 +24,9 @@ tracing = { workspace = true }
 # both are pure Rust, and wasm takes them.
 serde_json = "1.0"
 base64 = "0.22"
+# A header that carries a secret is wiped when dropped (`headers.rs`), as the
+# credentials of retp-proto are.
+zeroize = "1"
 
 # The native transport: a blocking WebSocket over rustls, and the HTTP probe.
 # None of it compiles for wasm, and the front end brings its own transport

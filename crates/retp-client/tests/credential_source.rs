@@ -130,7 +130,7 @@ fn now<F: std::future::Future>(future: F) -> F::Output {
 }
 
 fn client(http: FakeHttp, source: Arc<Tokens>) -> RestClient<FakeHttp> {
-    RestClient::new(http, "http://rest.example/api", None, None).with_source(source)
+    RestClient::new(http, "http://rest.example/api", None).with_source(source)
 }
 
 fn list(client: &mut RestClient<FakeHttp>) -> Result<(), ClientError> {
@@ -218,7 +218,6 @@ fn fixed_credentials_still_work_and_a_401_is_the_error() {
         http,
         "http://rest.example/api",
         Some(Credentials::bearer("fixed").unwrap()),
-        None,
     );
     assert!(matches!(
         list(&mut rest),

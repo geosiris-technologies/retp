@@ -51,7 +51,7 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 
 | Option | Effect |
 |---|---|
-| `--partition <P>` | an OSDU data partition: the server is spoken to as OSDU's Reservoir DDMS, which wants a `data-partition-id` header |
+| `--header <NAME=VALUE>`, `-H` | a header this server wants in addition, repeatable; see [Headers a server wants](#headers-a-server-wants) |
 | `--insecure` | do not check the server's certificate. A warning says so every time |
 | `--rest` | the URL is OSDU's Reservoir DDMS REST API, not an ETP WebSocket; the same commands run over it |
 | `--as-browser` | connect as a web page can: no header, attributes in the query string, credentials in an `Authorize` message |
@@ -63,6 +63,43 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 | `--server <NAME>`, `-s` | a server of the [catalogue](#server-catalogue) instead of the URL (`--serveur` is a hidden alias) |
 | `--save-as <NAME>` | after the command has succeeded, save this connection in the catalogue; add `--force` to replace one |
 | `--yes` | confirm, without asking, a write to a protected catalogue server |
+
+## Headers a server wants
+
+Which headers a server expects is a property of the server, like its URL: a tenant, a
+routing key, a data partition, an API key. `--header NAME=VALUE` gives one, and is
+repeated for several:
+
+```sh
+retp dataspaces wss://host/etp --header x-tenant=acme -H x-region=eu
+```
+
+The value is everything after the first `=`, sent as given. Each header goes with **every
+request** to the server: the WebSocket handshake, the probe of
+`/.well-known/etp-server-capabilities`, each call of the REST API (`--rest`).
+
+What is refused, by name, before anything is asked of the network (no login is spent
+on a line that cannot be sent):
+
+- a name that is not letters, digits, `-` and `_` (the text is not repeated: written as
+  `Name: value`, it would hold the value), and a value with a control character (a line
+  break in it would start another header) or a character that is not ASCII;
+- a header the client writes itself: `authorization` (give credentials, see
+  [Logging in](#logging-in)), `etp-encoding`, `maxwebsocketframepayloadsize`,
+  `maxwebsocketmessagepayloadsize`, `host`, `connection`, `upgrade`, `accept`,
+  `content-type`, `content-length`, `transfer-encoding` and every `sec-websocket-*`;
+- the same header twice, whatever the case of its letters;
+- with `--as-browser`, a header that carries a secret: the handshake of a front end has
+  no header, so its attributes are written in the query string (ETP 1.2 section 4.3.2),
+  and a secret is never written in a URL. A header carries a secret when a catalogue
+  entry gives it by reference, or when its name says so (`cookie`, anything with
+  `authorization`, `key`, `token`, `secret` or `password`). The probe of `/.well-known`
+  is an ordinary HTTP request and keeps its headers.
+
+A header that carries a secret is better kept in a [catalogue](#server-catalogue) entry,
+by reference, than on a command line, which ends up in the shell's history. `retp mcp`,
+whose command line is written in a configuration file, refuses one
+([MCP server](mcp.md#secrets-never-go-on-the-command-line)).
 
 ## Logging in
 
@@ -106,7 +143,7 @@ retp server add                           # a guided form, on a terminal
 retp server add azure-test wss://adme.example.com/api/reservoir-ddms-etp/v2/ \
     --auth azure --tenant 00000000-0000-0000-0000-000000000000 --client-id APP_ID \
     --scope 'api://APP_ID/.default' --client-secret-from env:RETP_AZURE_TEST_SECRET \
-    --partition opendes --alias az
+    --header data-partition-id=opendes --alias az
 
 retp server test azure-test               # definition, references, /.well-known, login, session
 retp azure                                # a shell on it
@@ -139,7 +176,6 @@ alias = ["az"]
 etp_url = "wss://adme.example.com/api/reservoir-ddms-etp/v2/"
 rest_url = "https://adme.example.com/api/reservoir-ddms/v2"
 transport = "etp"          # which one a command uses unless told otherwise
-partition = "opendes"
 tls = "verify"             # or "skip" (--insecure), said again at every connection
 handshake = "native"       # or "browser" (--as-browser)
 protected = false          # true: a command that writes asks for confirmation
@@ -152,6 +188,7 @@ scope = "api://11111111-1111-1111-1111-111111111111/.default"
 client_secret = { env = "RETP_AZURE_TEST_SECRET" }
 
 [headers]                  # extra request headers (see below)
+data-partition-id = "opendes"   # the data partition of OSDU's Reservoir DDMS
 x-trace = "on"
 x-api-key = { env = "RETP_AZURE_TEST_KEY" }
 
@@ -167,11 +204,14 @@ ignored**, so that the `ETP_TOKEN` set for one server never goes to another; an 
 wants one says so (`token = { env = "ETP_TOKEN" }`). The login options (`--password`...)
 are refused with a catalogue server, and so is a URL.
 
-**Extra headers** are written as a literal for a header that carries nothing secret, or as a
-reference; a literal is refused for a name that looks secret (`authorization`, `cookie`,
-anything with `key`, `token`, `secret` or `password`). `retp-client` has no way to send
-extra headers yet, so a connection to an entry that defines some is refused by name
-instead of being made without them. **Write defaults** (`legal_tags`, `owners`,
+**Extra headers** are the [headers the server wants](#headers-a-server-wants), sent with
+every request to it. One is written as a literal when it carries nothing secret, or as a
+reference; a literal is refused for a name that looks secret (`cookie`, anything with
+`authorization`, `key`, `token`, `secret` or `password`). They are checked when the file
+is read, by the rules of `--header`: a header the client could not send is refused there,
+by name, and so is `data-partition-id` beside `partition` (keep one of the two). A
+`--header` on the line is added to the entry's; one the entry already has is refused, not
+replaced. The file keeps no order between its headers. **Write defaults** (`legal_tags`, `owners`,
 `viewers`) become `--custom legaltags=...`, `owners=...`, `viewers=...` on
 `create-dataspace`, unless the line gives its own.
 
@@ -192,13 +232,17 @@ for its name typed at a terminal, or `--yes`; otherwise it is refused. In a shel
 saves the connection after the command succeeded. A secret that came from an `ETP_*`
 variable is saved as a reference to that variable (shared with every other server: the
 output says so); one that came from the command line is **not saved**, and the entry
-points at a variable named after it, with the advice to define it. A name already taken is
-refused before the command runs, unless `--force`.
+points at a variable named after it, with the advice to define it. A `--header` follows
+the same rule: its value is saved when its name does not say it is a secret, and one whose
+name does is saved as a reference to a variable of its own
+(`RETP_<SERVER>_HEADER_<NAME>`). A name already taken is refused before the command runs,
+unless `--force`.
 
 **The guided form.** `retp server add` with no argument, on a terminal, asks for the
 method, the URLs, the method's fields (a secret as a reference, never a value), extra
-headers, the partition, the write defaults, `protected`, then probes `/.well-known`
-before saving. With arguments the same fields come from the options, and a script is
+headers, the OSDU data partition (kept as the header `data-partition-id`), the write
+defaults, `protected`, then probes `/.well-known` before saving (the URL alone:
+`retp server test` then asks again with the headers of the entry). With arguments the same fields come from the options, and a script is
 never asked: when the input is not a terminal and a field is missing, the command refuses
 and names it.
 
@@ -290,7 +334,7 @@ shell command is a read, and a read can be asked twice).
 `--rest` takes the REST API instead of the WebSocket, with the same commands:
 
 ```sh
-retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --partition PARTITION
+retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --header data-partition-id=PARTITION
 ```
 
 The URL is the API's, never guessed from the WebSocket's. What REST has no

@@ -29,7 +29,9 @@ use tungstenite::http::HeaderValue;
 use tungstenite::{Message, WebSocket};
 
 use crate::rest::{Http, HttpRequest, HttpResponse, Method, RestClient};
-use crate::{Client, ClientError, ServerProfile, Settings, SystemClock, Transport, TransportError};
+use crate::{
+    Client, ClientError, ExtraHeaders, HeaderRefusal, Settings, SystemClock, Transport, TransportError,
+};
 
 /// Whether the server's certificate is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -162,11 +164,23 @@ pub(crate) fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
 /// The HTTP client of the probe and of the logins: HTTP errors come back as
 /// responses, so their bodies - which say *why* - can be read.
 pub(crate) fn http_agent(check: CertificateCheck) -> ureq::Agent {
+    http_agent_following(check, REDIRECTS)
+}
+
+/// How many redirections a request follows when it carries no secret but
+/// its credentials, which are not sent on to another address.
+const REDIRECTS: u32 = 10;
+
+/// [`http_agent`], following at most `redirects` redirections. A request
+/// that carries a secret header follows none: only the credentials are
+/// taken off a redirected request, and the header would go to another host.
+fn http_agent_following(check: CertificateCheck, redirects: u32) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .disable_verification(check == CertificateCheck::Skip)
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
+        .max_redirects(redirects)
         .http_status_as_error(false)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(Duration::from_secs(60)))
@@ -179,8 +193,11 @@ pub(crate) fn http_agent(check: CertificateCheck) -> ureq::Agent {
 pub struct Endpoint {
     /// The server's WebSocket URL.
     pub url: String,
-    /// Its habits.
-    pub profile: ServerProfile,
+    /// The headers it wants in addition - a data partition, a routing key, a
+    /// tenant, an API key -, sent with every request: the handshake, the probe, each REST
+    /// call. A front end has no header: under [`Profile::Browser`] they go in
+    /// the query string, and one that carries a secret is refused.
+    pub headers: ExtraHeaders,
     /// The credentials, if the server wants some.
     pub credentials: Option<Credentials>,
     /// Whether its certificate is checked.
@@ -198,12 +215,32 @@ impl Endpoint {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            profile: ServerProfile::Standard,
+            headers: ExtraHeaders::new(),
             credentials: None,
             certificates: CertificateCheck::Verify,
             handshake: Profile::Native,
         }
     }
+
+    /// `handshake` with the headers this server wants in addition - what
+    /// [`connect`] sends. The data partition of OSDU's Reservoir DDMS is one
+    /// of them, `data-partition-id`: a header like any other.
+    pub fn adapt(&self, handshake: Handshake) -> Result<Handshake, HeaderRefusal> {
+        self.headers.onto(handshake)
+    }
+
+    /// What a WebSocket connection to this server would refuse about its
+    /// headers, with nothing sent: one that carries a secret when the
+    /// handshake is a front end's. To be asked before a login, which costs a
+    /// request. The REST API always sends headers, and refuses none here.
+    pub fn sendable(&self) -> Result<(), HeaderRefusal> {
+        self.headers.fit(self.handshake)
+    }
+}
+
+/// A header the endpoint cannot send, as the error of a connection.
+pub(crate) fn refused_header(why: HeaderRefusal) -> ClientError {
+    ClientError::Transport(TransportError::new(why.to_string()))
 }
 
 /// A WebSocket to an ETP server.
@@ -419,14 +456,18 @@ impl std::fmt::Display for ProbeError {
 impl std::error::Error for ProbeError {}
 
 /// `GET …/.well-known/etp-server-capabilities` for `endpoint` (§4.3.1): what
-/// it speaks, its limits, how to get a token.
+/// it speaks, its limits, how to get a token. The endpoint's partition and
+/// extra headers go with it, always as headers: this is HTTP, whatever the
+/// handshake of the WebSocket.
 pub fn fetch_server_capabilities(endpoint: &Endpoint) -> Result<(String, ServerCapabilities), ProbeError> {
     let url = probe::server_capabilities_url(&endpoint.url).map_err(ProbeError::Url)?;
-    let mut request = http_agent(endpoint.certificates)
+    let additions = &endpoint.headers;
+    let redirects = if additions.has_secret() { 0 } else { REDIRECTS };
+    let mut request = http_agent_following(endpoint.certificates, redirects)
         .get(&url)
         .header("accept", "avro/binary, application/json;q=0.5");
-    if let ServerProfile::Rddms { data_partition } = &endpoint.profile {
-        request = request.header("data-partition-id", data_partition);
+    for (name, value) in additions.iter() {
+        request = request.header(name, value);
     }
     if let Some(credentials) = &endpoint.credentials {
         request = request.header("authorization", credentials.header());
@@ -516,11 +557,23 @@ pub struct UreqHttp {
 impl UreqHttp {
     /// An HTTP client checking certificates as `check` says.
     pub fn new(check: CertificateCheck) -> Self {
+        Self::following(check, REDIRECTS)
+    }
+
+    /// [`UreqHttp::new`], for requests that carry a secret header: no
+    /// redirection is followed (the answer comes back as it is), so that the
+    /// header never goes to another host than the one it was given for.
+    pub fn without_redirects(check: CertificateCheck) -> Self {
+        Self::following(check, 0)
+    }
+
+    fn following(check: CertificateCheck, redirects: u32) -> Self {
         let tls = ureq::tls::TlsConfig::builder()
             .disable_verification(check == CertificateCheck::Skip)
             .build();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
+            .max_redirects(redirects)
             .http_status_as_error(false)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(Duration::from_secs(300)))
@@ -618,19 +671,18 @@ impl Http for UreqHttp {
 impl crate::rest::BlockingHttp for UreqHttp {}
 
 /// A client of the Reservoir DDMS REST API: `endpoint.url` is the API's base
-/// (`https://…/api/reservoir-ddms/v2`), and its credentials, OSDU partition
+/// (`https://…/api/reservoir-ddms/v2`), and its credentials, extra headers
 /// and certificate check go with every request.
+///
+/// When one of its headers is a secret, no redirection is followed
+/// ([`UreqHttp::without_redirects`]).
 pub fn rest_client(endpoint: &Endpoint) -> RestClient<UreqHttp> {
-    let partition = match &endpoint.profile {
-        ServerProfile::Rddms { data_partition } => Some(data_partition.clone()),
-        ServerProfile::Standard => None,
+    let http = if endpoint.headers.has_secret() {
+        UreqHttp::without_redirects(endpoint.certificates)
+    } else {
+        UreqHttp::new(endpoint.certificates)
     };
-    RestClient::new(
-        UreqHttp::new(endpoint.certificates),
-        &endpoint.url,
-        endpoint.credentials.clone(),
-        partition,
-    )
+    RestClient::new(http, &endpoint.url, endpoint.credentials.clone()).with_headers(endpoint.headers.clone())
 }
 
 /// A server, by either transport - what the command line holds: the same
@@ -970,7 +1022,7 @@ fn open_socket(connect: Connect) -> Result<(WebSocketTransport, Connect), Client
     };
     let handshake = probe::handshake(&connect.endpoint.url, connect.endpoint.handshake, &settings)
         .map_err(|why| ClientError::Transport(TransportError::new(why.to_string())))?;
-    let handshake = connect.endpoint.profile.adapt(handshake);
+    let handshake = connect.endpoint.adapt(handshake).map_err(refused_header)?;
     let transport = WebSocketTransport::connect(&handshake, connect.endpoint.certificates)?;
     Ok((transport, connect))
 }

@@ -73,7 +73,6 @@ fn flat() -> Grammar {
 fn azure() -> Entry {
     let mut server = ServerSpec::etp(ETP);
     server.rest_url = Some(REST.into());
-    server.partition = Some("opendes".into());
     server.tls = Tls::Skip;
     let mut entry = Entry::new(server, AuthSpec::None);
     entry.aliases = vec!["az".into()];
@@ -125,16 +124,7 @@ fn a_bare_server_name_opens_the_shell_on_it() {
     assert!(!expanded.via_default);
     assert_eq!(
         strings(&expanded),
-        [
-            "retp",
-            "shell",
-            ETP,
-            "--catalog-entry",
-            "azure",
-            "--partition",
-            "opendes",
-            "--insecure"
-        ]
+        ["retp", "shell", ETP, "--catalog-entry", "azure", "--insecure"]
     );
 }
 
@@ -168,16 +158,10 @@ fn every_way_to_name_a_server_gives_the_same_line() {
 fn the_command_line_wins_over_the_entry() {
     let sandbox = Sandbox::new("line-wins");
     let catalog = catalog_with(&sandbox, &[("azure", azure())]);
-    let line = run(
-        &["retp", "azure", "dataspaces", "--partition", "mine", "--insecure"],
-        &catalog,
-    )
-    .expect("expanded");
-    assert_eq!(value_of(&line, "--partition"), Some("mine"));
-    assert_eq!(count(&line, "--partition"), 1);
+    let line = run(&["retp", "azure", "dataspaces", "--insecure"], &catalog).expect("expanded");
     assert_eq!(count(&line, "--insecure"), 1);
-    let line = run(&["retp", "azure", "dataspaces", "--partition=mine"], &catalog).expect("expanded");
-    assert_eq!(count(&line, "--partition"), 0, "the `=` form is the line's too");
+    // A header of the entry is not an option of the line: the command reads it from the entry.
+    assert_eq!(count(&line, "--header"), 0);
 }
 
 #[test]

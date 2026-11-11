@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use retp_client::login::Choice;
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote, WebSocketTransport};
-use retp_client::{ServerProfile, SystemClock, writing_client};
+use retp_client::{ExtraHeaders, SystemClock, writing_client};
 use retp_conformance::renewing::Renewing;
 use retp_conformance::{Finding, Options, Report, Verdict, checks, raw};
 use retp_proto::credentials::Credentials;
@@ -75,9 +75,13 @@ struct Args {
     /// The scope to ask the token for.
     #[arg(long)]
     oauth_scope: Option<String>,
-    /// An OSDU data partition (`data-partition-id`).
-    #[arg(long)]
+    /// Gone: the data partition is a header (`--header data-partition-id=VALUE`). Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
+    /// A header the server wants in addition, `NAME=VALUE`, sent with every
+    /// request. Repeatable.
+    #[arg(long = "header", short = 'H', value_name = "NAME=VALUE")]
+    headers: Vec<String>,
     /// Do not check the server's certificate. The TLS check is then *not
     /// checked* rather than failed.
     #[arg(long)]
@@ -137,6 +141,22 @@ fn main() -> Result<ExitCode> {
         Some(name) => Some(resolve_entry(name, &args)?),
         None => None,
     };
+    let mut certificates = if args.insecure {
+        CertificateCheck::Skip
+    } else {
+        CertificateCheck::Verify
+    };
+    let mut endpoint = Endpoint {
+        url: args.url.clone(),
+        // A catalogue server: its own headers, and the command line's with them.
+        headers: match &resolved {
+            Some(resolved) => resolved.headers().clone(),
+            None => headers_of(&args)?,
+        },
+        credentials: None,
+        certificates,
+        handshake: Profile::Native,
+    };
     let login = match &resolved {
         // A catalogue server: the ambient `ETP_*` variables are ignored.
         Some(resolved) => resolved.login().cloned(),
@@ -177,23 +197,7 @@ fn main() -> Result<ExitCode> {
             return finish(&report, args.out.as_deref(), args.json.as_deref());
         }
     };
-    let mut certificates = if args.insecure {
-        CertificateCheck::Skip
-    } else {
-        CertificateCheck::Verify
-    };
-    let mut endpoint = Endpoint {
-        url: args.url.clone(),
-        profile: match &args.partition {
-            Some(data_partition) => ServerProfile::Rddms {
-                data_partition: data_partition.clone(),
-            },
-            None => ServerProfile::Standard,
-        },
-        credentials,
-        certificates,
-        handshake: Profile::Native,
-    };
+    endpoint.credentials = credentials;
     // A certificate the client could not verify, when `--tls-fallback` let
     // the run go on without it: the `tls.chain` finding says it, and so
     // does the report's head.
@@ -418,7 +422,12 @@ fn main() -> Result<ExitCode> {
         authorization: endpoint.credentials.clone(),
     };
     let _ = write_reports(&report, args.out.as_deref(), args.json.as_deref());
-    match handshake(&args.url, Profile::Native, &settings) {
+    // The second wire is asked for as the first was: the partition and the
+    // extra headers go with it.
+    let shake = handshake(&args.url, Profile::Native, &settings)
+        .map_err(|why| why.to_string())
+        .and_then(|shake| endpoint.adapt(shake).map_err(|why| why.to_string()));
+    match shake {
         Ok(shake) => match WebSocketTransport::connect(&shake, certificates) {
             Ok(transport) => report.findings.extend(raw::checks(
                 transport,
@@ -441,7 +450,7 @@ fn main() -> Result<ExitCode> {
             rule: "The WebSocket handshake",
             protocol: None,
             verdict: Verdict::NotChecked,
-            said: format!("{why}"),
+            said: why,
         }),
     }
     // --- The credentials in Authorize instead of the handshake's headers -------
@@ -461,7 +470,21 @@ fn main() -> Result<ExitCode> {
         Some(_) => {
             let mut browser = endpoint.clone();
             browser.handshake = Profile::Browser;
+            // A header that carries a secret has no place in the handshake of a front end (it would go in the
+            // URL): the client refuses it before anything is sent. That says nothing of the server.
+            let unsendable = browser.sendable().err();
             match open(&browser).0 {
+                Err(_) if unsendable.is_some() => Finding {
+                    id: "core.authorize",
+                    section: "§4.3.2, §5.3.4",
+                    rule: "A session opens with the credentials sent in Authorize, as a client that cannot set headers sends them",
+                    protocol: None,
+                    verdict: Verdict::NotChecked,
+                    said: format!(
+                        "not tried: {}",
+                        unsendable.map(|why| why.to_string()).unwrap_or_default()
+                    ),
+                },
                 Ok(other) => {
                     let _ = other.close("conformance checked: Authorize");
                     Finding {
@@ -623,6 +646,24 @@ fn with_patience(mut offer: retp_proto::negotiate::Offer) -> retp_proto::negotia
     offer
 }
 
+/// The `--header` options as the client's list, which checks each one. The
+/// text given is never shown: a value may be a secret.
+fn headers_of(args: &Args) -> Result<ExtraHeaders> {
+    if args.partition.is_some() {
+        anyhow::bail!(
+            "--partition is gone: the data partition is a header like any other. Write `--header data-partition-id=VALUE`"
+        );
+    }
+    let mut headers = ExtraHeaders::new();
+    for given in &args.headers {
+        let (name, value) = given
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--header takes NAME=VALUE (the text given is not shown)"))?;
+        headers = headers.with(name, value)?;
+    }
+    Ok(headers)
+}
+
 /// The run's options, from the command line.
 fn options_of(args: &Args) -> Result<Options> {
     let mut custom_data = std::collections::BTreeMap::new();
@@ -726,18 +767,12 @@ fn resolve_entry(name: &str, args: &Args) -> Result<retp_catalog::Resolved> {
     let overrides = retp_catalog::Overrides {
         url: Some(args.url.clone()),
         rest: Some(args.rest),
-        partition: args.partition.clone(),
+        headers: headers_of(args)?,
         insecure: args.insecure,
         as_browser: false,
     };
     let resolved = found
         .entry
         .resolve(found.name, &retp_catalog::OsSecrets::new(), &overrides)?;
-    if !resolved.headers().is_empty() {
-        anyhow::bail!(
-            "server `{}` defines extra headers, and retp-client has no way to send them yet",
-            found.name
-        );
-    }
     Ok(resolved)
 }

@@ -221,7 +221,10 @@ impl LiveSession {
             &handshake_settings,
         )
         .map_err(|why| ClientError::Transport(TransportError::new(why.to_string())))?;
-        let handshake = connect.endpoint.profile.adapt(handshake);
+        let handshake = connect
+            .endpoint
+            .adapt(handshake)
+            .map_err(crate::native::refused_header)?;
 
         // The client is started here, so the handlers stay on this thread
         // until the client (which is `Send`) carries them: the first message

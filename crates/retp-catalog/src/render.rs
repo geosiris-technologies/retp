@@ -32,9 +32,6 @@ pub fn show(d: &Description) -> String {
         line("rest url", url);
     }
     line("transport", d.transport.as_str());
-    if let Some(partition) = &d.partition {
-        line("partition", partition);
-    }
     line(
         "certificate",
         match d.tls {

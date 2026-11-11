@@ -26,6 +26,7 @@ pub mod channels;
 mod client;
 mod clock;
 pub mod engine;
+mod headers;
 pub mod notifications;
 mod offer;
 mod operations;
@@ -51,6 +52,7 @@ pub use async_client::{AsyncClient, Sink};
 pub use caller::{Blocking, Caller, run as blocking};
 pub use client::{Acknowledged, Client, ClientError, Settings};
 pub use clock::{Clock, SystemClock};
+pub use headers::{ExtraHeaders, HeaderRefusal, sensitive_header};
 pub use offer::{
     EVERY_RELEASE, FORMATS, READING, WRITING, customer_of, described_client, reading_client, writing_client,
 };
@@ -60,7 +62,7 @@ pub use operations::{
     get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
     put_data_objects, put_dataspaces, rollback_transaction, start_transaction,
 };
-pub use profile::{ServerProfile, plain_text_warning};
+pub use profile::plain_text_warning;
 pub use source::{CredentialSource, Fresh, GaveUp, Refused, SourceError, Witness};
 pub use transport::{HandshakeRefusal, Transport, TransportError, browser_fetch_hint};
 

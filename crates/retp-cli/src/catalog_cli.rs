@@ -106,7 +106,7 @@ pub(super) fn endpoint(server: &Server) -> Result<Option<Endpoint>> {
     let overrides = Overrides {
         url: Some(server.url.clone()),
         rest: Some(server.rest),
-        partition: server.partition.clone(),
+        headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
     };
@@ -204,7 +204,7 @@ pub(super) fn plan_save(server: &Server) -> Result<Option<SavePlan>> {
     let connection = Connection {
         url: server.url.clone(),
         rest: server.rest,
-        partition: server.partition.clone(),
+        headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
         keepalive: server.keepalive,
@@ -262,7 +262,8 @@ impl Network for Net {
 
     fn session(&self, endpoint: Endpoint, rest: bool) -> std::result::Result<String, String> {
         if rest {
-            let mut remote = native::Remote::Rest(Box::new(native::rest_client(&endpoint)));
+            let client = native::rest_client(&endpoint);
+            let mut remote = native::Remote::Rest(Box::new(client));
             return match remote.health() {
                 Some(Ok(health)) => Ok(format!("the REST API answers: {health}")),
                 Some(Err(why)) => Err(why.to_string()),
@@ -382,8 +383,8 @@ pub(super) struct AddArgs {
     /// Which transport commands use unless told otherwise: `etp` or `rest`.
     #[arg(long, value_name = "etp|rest")]
     transport: Option<String>,
-    /// An OSDU data partition.
-    #[arg(long)]
+    /// Gone: the data partition is a header. Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
     /// Do not check the certificate (said again at every connection).
     #[arg(long)]
@@ -431,7 +432,8 @@ pub(super) struct AddArgs {
     #[arg(long, value_name = "REF")]
     client_secret_from: Option<String>,
     /// An extra request header with a literal value, `NAME=VALUE`, repeatable. Refused for a name
-    /// that looks secret (`authorization`, `x-api-key`...): use `--header-from`.
+    /// that looks secret (`x-api-key`, `cookie`...): use `--header-from`. `authorization` is
+    /// not an extra header: it is the login (`--auth`).
     #[arg(long = "header", value_name = "NAME=VALUE")]
     headers: Vec<String>,
     /// An extra request header read from a reference, `NAME=env:VAR` or `NAME=file:PATH`, repeatable.
@@ -452,7 +454,11 @@ pub(super) struct AddArgs {
 }
 
 /// `NAME=VALUE`, the value never shown in an error.
-fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
+/// What `--partition` answers now, on every command that had it.
+pub(super) const PARTITION_IS_A_HEADER: &str = "--partition is gone: the data partition is a header like any other. \
+     Write `--header data-partition-id=VALUE`";
+
+pub(super) fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
     options
         .iter()
         .map(|text| {
@@ -464,11 +470,13 @@ fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
 }
 
 fn draft_of(args: &AddArgs, url: String) -> Result<Draft> {
+    if args.partition.is_some() {
+        anyhow::bail!(PARTITION_IS_A_HEADER);
+    }
     Ok(Draft {
         url,
         other_url: args.other_url.clone(),
         transport: args.transport.clone(),
-        partition: args.partition.clone(),
         insecure: args.insecure,
         as_browser: args.as_browser,
         protected: args.protected,
@@ -571,14 +579,8 @@ fn add(args: AddArgs) -> Result<ExitCode> {
             }
         }
     }
-    let has_headers = !entry.headers.is_empty();
     catalog.add(&name, entry, args.force, &reserved())?;
     println!("added `{name}`; check it with `retp server test {name}`");
-    if has_headers {
-        eprintln!(
-            "note: this version of retp cannot send extra headers yet; a connection to `{name}` will say so rather than leave them out"
-        );
-    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -740,7 +742,11 @@ fn guided() -> Result<(String, Draft)> {
             draft.headers.push((header, value));
         }
     }
-    draft.partition = ask_text("OSDU data partition (empty for none)")?;
+    if let Some(partition) =
+        ask_text("OSDU data partition, sent as the header data-partition-id (empty for none)")?
+    {
+        draft.headers.push(("data-partition-id".to_string(), partition));
+    }
     eprintln!(
         "What a dataspace created on this server needs (not secrets; comma-separated, empty for none):"
     );
@@ -805,8 +811,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let location = Location::new(root.join("config.toml"), None);
         let mut catalog = Catalog::init(&location, &root.join("servers"), false).expect("init");
-        let mut spec = ServerSpec::etp("wss://adme.example.com/etp");
-        spec.partition = Some("opendes".into());
+        let spec = ServerSpec::etp("wss://adme.example.com/etp");
         catalog
             .add("azure", Entry::new(spec, AuthSpec::None), false, &reserved())
             .expect("add");
@@ -821,7 +826,7 @@ mod tests {
             EtpCommand::Dataspaces(server) => {
                 assert_eq!(server.url, "wss://adme.example.com/etp");
                 assert_eq!(server.catalog_entry.as_deref(), Some("azure"));
-                assert_eq!(server.partition.as_deref(), Some("opendes"));
+                assert_eq!(server.partition, None, "the rewrite adds no option for a header");
             }
             _ => panic!("not `dataspaces`"),
         }

@@ -222,7 +222,14 @@ fn the_canary_goes_to_the_login_and_nowhere_else() {
                     // Nothing more to do with it.
                 } else {
                     match resolved.obtain_endpoint() {
-                        Ok(opened) => seen.push((format!("notes {name}"), opened.notes.join("\n"))),
+                        Ok(opened) => {
+                            seen.push((format!("notes {name}"), opened.notes.join("\n")));
+                            // The endpoint holds the credentials and the headers read.
+                            seen.push((
+                                format!("debug endpoint {name}"),
+                                format!("{:#?}", opened.endpoint),
+                            ));
+                        }
                         Err(error) => {
                             seen.push((format!("refused {name}"), error.to_string()));
                             seen.push((format!("debug refused {name}"), format!("{error:?}")));

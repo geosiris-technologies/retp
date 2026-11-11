@@ -84,6 +84,9 @@ pub enum Kind {
     /// Something went wrong locally: an object that does not read or write, a
     /// package that does not open.
     Local,
+    /// A failure this version of the bridge has no name for (a case a later
+    /// version of the library added). The base `RetpError`, never a success.
+    Other,
 }
 
 /// A failure, as the bridge reports it: a kind, the library's own words, and
@@ -144,13 +147,19 @@ impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Self {
         let message = error.to_string();
         let kind = match &error {
-            ClientError::Offer(_) | ClientError::Refused(_) => Kind::SessionRefused,
+            // No session opened: the server refused the upgrade (the status is in the message).
+            ClientError::Offer(_) | ClientError::Refused(_) | ClientError::HandshakeRefused { .. } => {
+                Kind::SessionRefused
+            }
             ClientError::AuthorizationNeeded { .. } => Kind::AuthorizationNeeded,
             ClientError::Transport(_) | ClientError::Closed { .. } => Kind::ConnectionLost,
             ClientError::Interrupted { .. } => Kind::OutcomeUnknown,
             ClientError::Send(_) | ClientError::Invalid(_) => Kind::NotSent,
             ClientError::TimedOut { .. } => Kind::TimedOut,
             ClientError::AnswerRefused { .. } => Kind::AnswerRefused,
+            // `ClientError` is non-exhaustive: a case added by a later version of the
+            // library. It is a failure of no named kind, and it keeps the library's text.
+            _ => Kind::Other,
         };
         Failure::new(kind, message)
     }

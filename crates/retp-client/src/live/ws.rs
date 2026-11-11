@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use crate::TransportError;
-use crate::native::{CertificateCheck, header, tls_config};
+use crate::native::{CertificateCheck, handshake_answer, header, tls_config};
 
 /// How long a TCP connection may take to open (as for the blocking client).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -190,23 +190,7 @@ async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, TransportError>
 /// credentials, and says so with the server's challenge (§4.1.3).
 fn refused_handshake(url: &str, error: tungstenite::Error) -> TransportError {
     if let tungstenite::Error::Http(response) = &error {
-        let status = response.status();
-        let challenge = response
-            .headers()
-            .get_all("www-authenticate")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let said = match status.as_u16() {
-            401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
-            401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
-            403 => " - the credentials were understood, and do not give access here".to_string(),
-            _ => String::new(),
-        };
-        return TransportError::new(format!(
-            "the WebSocket handshake with {url} was answered HTTP {status}{said}"
-        ));
+        return handshake_answer(url, response.status().as_u16(), response.headers());
     }
     TransportError::new(format!("the WebSocket handshake with {url} failed: {error}"))
 }

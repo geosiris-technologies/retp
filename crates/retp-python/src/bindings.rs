@@ -107,6 +107,7 @@ pub(crate) fn failed(failure: Failure) -> PyErr {
         Kind::TimedOut => TimedOut::new_err(message),
         Kind::AnswerRefused => AnswerRefused::new_err(message),
         Kind::Local => LocalError::new_err(message),
+        Kind::Other => RetpError::new_err(message),
     };
     if let Some(code) = code {
         Python::attach(|py| {

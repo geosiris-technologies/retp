@@ -32,6 +32,7 @@ mod operations;
 mod profile;
 pub mod rest;
 pub mod resume;
+mod source;
 mod transport;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,7 +61,8 @@ pub use operations::{
     put_data_objects, put_dataspaces, rollback_transaction, start_transaction,
 };
 pub use profile::{ServerProfile, plain_text_warning};
-pub use transport::{Transport, TransportError, browser_fetch_hint};
+pub use source::{CredentialSource, Fresh, GaveUp, Refused, SourceError, Witness};
+pub use transport::{HandshakeRefusal, Transport, TransportError, browser_fetch_hint};
 
 /// Every operation, for any [`Caller`] - the [`AsyncClient`] of a front end among
 /// them. Each is written once, here; the functions of the same name at the

@@ -269,6 +269,34 @@ impl WebSocketTransport {
     }
 }
 
+/// An HTTP answer to the WebSocket upgrade that is not `101`, as a
+/// [`TransportError`] that carries its status and its `WWW-Authenticate`
+/// challenges (one entry per header value, nothing else of the headers).
+pub(crate) fn handshake_answer(
+    url: &str,
+    status: u16,
+    headers: &tungstenite::http::HeaderMap,
+) -> TransportError {
+    let challenges: Vec<String> = headers
+        .get_all("www-authenticate")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let challenge = challenges.join(" | ");
+    let said = match status {
+        401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
+        401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
+        403 => " - the credentials were understood, and do not give access here".to_string(),
+        _ => String::new(),
+    };
+    TransportError::handshake_refused(
+        format!("the WebSocket handshake with {url} was answered HTTP {status}{said}"),
+        status,
+        challenges,
+    )
+}
+
 /// A failed handshake, said as what it means: an HTTP 401 or 403 is about
 /// the credentials, and says so with the server's challenge (§4.1.3).
 fn refused_handshake(
@@ -279,23 +307,7 @@ fn refused_handshake(
         return TransportError::new(format!("the WebSocket handshake with {url} was interrupted"));
     };
     if let tungstenite::Error::Http(response) = &error {
-        let status = response.status();
-        let challenge = response
-            .headers()
-            .get_all("www-authenticate")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let said = match status.as_u16() {
-            401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
-            401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
-            403 => " - the credentials were understood, and do not give access here".to_string(),
-            _ => String::new(),
-        };
-        return TransportError::new(format!(
-            "the WebSocket handshake with {url} was answered HTTP {status}{said}"
-        ));
+        return handshake_answer(url, response.status().as_u16(), response.headers());
     }
     TransportError::new(format!("the WebSocket handshake with {url} failed: {error}"))
 }

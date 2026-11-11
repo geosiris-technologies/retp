@@ -29,6 +29,13 @@ fn cases() -> Vec<(ClientError, Kind)> {
             },
             Kind::AuthorizationNeeded,
         ),
+        (
+            ClientError::HandshakeRefused {
+                status: 403,
+                challenges: vec![],
+            },
+            Kind::SessionRefused,
+        ),
         (ClientError::Closed { reason: "bye".into() }, Kind::ConnectionLost),
         (
             ClientError::Invalid(EtpError::EINVALID_ARGUMENT.with_detail("not canonical")),

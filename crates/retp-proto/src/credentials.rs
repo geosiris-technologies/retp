@@ -13,6 +13,7 @@
 use std::fmt;
 
 use base64::Engine;
+use zeroize::Zeroize;
 
 /// Why credentials could not be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,12 @@ impl std::error::Error for CredentialsRefusal {}
 ///
 /// Its `Debug` shows the scheme and hides the rest: a credential that reaches
 /// a log through a `{:?}` is a leaked credential.
+///
+/// **It is wiped from memory when dropped** (`zeroize`), every clone with it.
+/// That covers the copies this type holds; a copy made by whoever reads
+/// [`Credentials::header`] - an HTTP header map, a message buffer - is theirs
+/// to wipe, and the wiping of a buffer already moved or reallocated is not
+/// something Rust can promise.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials(String);
 
@@ -97,8 +104,64 @@ impl Credentials {
     }
 }
 
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let held = !self.0.is_empty();
+        self.0.zeroize();
+        // The test seam: that the drop wiped something, counted - a safe way to
+        // see it, since the freed memory itself cannot be read without `unsafe`.
+        #[cfg(test)]
+        {
+            if held && self.0.is_empty() {
+                tests::WIPED.with(|wiped| wiped.set(wiped.get() + 1));
+            }
+        }
+    }
+}
+
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Credentials({} …)", self.scheme())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// How many credentials this thread dropped holding something, and
+        /// left empty (see the `Drop` impl).
+        pub(super) static WIPED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// A credential that is dropped is wiped, and so is each clone of it: a
+    /// copy left behind is a token left in memory.
+    #[test]
+    fn a_dropped_credential_is_wiped_with_every_clone() {
+        let before = WIPED.with(Cell::get);
+        let one = Credentials::bearer("fake.token.value").unwrap();
+        let two = one.clone();
+        drop(one);
+        assert_eq!(WIPED.with(Cell::get), before + 1);
+        drop(two);
+        assert_eq!(WIPED.with(Cell::get), before + 2);
+    }
+
+    /// Its `Debug` shows the scheme and nothing of the token.
+    #[test]
+    fn a_credentials_debug_shows_no_token() {
+        let shown = format!("{:?}", Credentials::bearer("fake.token.value").unwrap());
+        assert!(
+            shown.contains("Bearer") && !shown.contains("fake.token.value"),
+            "{shown}"
+        );
+        let basic = format!("{:?}", Credentials::basic("user", "fake-password").unwrap());
+        assert!(
+            !basic.contains("fake-password") && !basic.contains("dXNlcjpmYWtl"),
+            "{basic}"
+        );
     }
 }

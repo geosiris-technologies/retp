@@ -169,7 +169,7 @@ argument.
 | Exception | Meaning | What to do |
 |---|---|---|
 | `Unsupported` | the case is not supported; the message names it | use another route |
-| `SessionRefused` | the session could not be opened | change the offer or the server |
+| `SessionRefused` | the session could not be opened (also a refused WebSocket upgrade: the message gives its HTTP status) | change the offer, the credential or the server |
 | `AuthorizationNeeded` | the server wants credentials | log in again |
 | `ConnectionLost` | the connection is gone | open a new session |
 | `OutcomeUnknown` | the connection fell while a request was out (a `ConnectionLost`) | check before retrying a write |
@@ -212,3 +212,8 @@ supported-type listing, channels, the logins of the command
 line (the bridge takes a token), the REST transport, downloading a dataspace as
 an EPC, and writing arrays. The Rust library has most of them; each is a small
 binding. The list of what Rust must grow first is in the crate's `DESIGN.md`.
+
+Renewing the authorization of an open session, and listening to the session's own events,
+are not bridged yet: `connect(url, token=...)` takes one fixed token and `Session.subscribe`
+carries store notifications only. A Python session therefore ends when its token does; the
+Rust library has both (see [Library usage](client.md)).

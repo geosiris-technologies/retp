@@ -80,3 +80,8 @@ required-features = ["live"]
 name = "live_blocking"
 path = "tests/live_blocking.rs"
 required-features = ["live"]
+
+[[example]]
+name = "renew_on_warning"
+path = "examples/renew_on_warning.rs"
+required-features = ["live"]

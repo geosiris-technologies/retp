@@ -67,6 +67,11 @@ pub struct Opened {
     pub endpoint: Endpoint,
     /// Lines for stderr, already worded: `warning: …` and `credentials: …`.
     pub notes: Vec<String>,
+    /// How long the credentials last, from now, when the authorization server
+    /// said (`expires_in`): the number the `credentials: … for N s` line
+    /// words, given back as a number so that whoever renews them can plan it.
+    /// `None` when there was no login, or the answer carried none.
+    pub expires_in: Option<Duration>,
 }
 
 /// The one place a secret's value leaves its `Secret`: where the login is built.
@@ -349,6 +354,7 @@ impl Resolved {
         {
             notes.push(format!("warning: {warning}"));
         }
+        let mut expires_in = None;
         let credentials = match &self.login {
             Some(login) => {
                 tracing::debug!(server = %self.name, "catalog: logging in to `{}`", self.name);
@@ -357,6 +363,7 @@ impl Resolved {
                     message: self.redact(&error.to_string()),
                 })?;
                 let lasts: Option<Duration> = obtained.expires_in;
+                expires_in = lasts;
                 notes.push(match lasts {
                     Some(lasts) => format!(
                         "credentials: {}, for {} s",
@@ -372,6 +379,7 @@ impl Resolved {
         Ok(Opened {
             endpoint: self.endpoint(credentials),
             notes,
+            expires_in,
         })
     }
 }

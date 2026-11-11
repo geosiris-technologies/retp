@@ -29,7 +29,7 @@
 //! new connection is authorized from the start: nothing of the lost session's
 //! authorization is carried over (the bypass of OSDU's issue #232).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use retp_avro::{Avro, EtpMessage, Reader};
 use retp_types::datatypes::{MessageHeader, Uuid};
@@ -165,6 +165,7 @@ pub enum State {
 /// an allocation per message to save bytes on the rare others.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Event {
     /// The session is open: [`Connection::negotiated`] says with what.
     Opened,
@@ -179,8 +180,27 @@ pub enum Event {
     },
     /// The server warns that the authorization runs out soon
     /// (`EAUTHORIZATION_EXPIRING`, §3.13.5). Renew it with
-    /// [`Connection::authorize`].
+    /// [`Connection::reauthorize`].
     AuthorizationExpiring,
+    /// The server accepted the credentials of a [`Connection::reauthorize`]
+    /// (`AuthorizeResponse` with `success`, §5.3.7): the authorization of the
+    /// open session goes on, the same session.
+    Reauthorized {
+        /// The `Authorize` it answers.
+        request: i64,
+    },
+    /// The server refused the credentials of a [`Connection::reauthorize`]
+    /// (`AuthorizeResponse` without `success`, §5.3.7 - the equivalent of an
+    /// HTTP 401). The session stays open **until the authorization it holds
+    /// runs out** (§3.13.5 point 3): another [`Connection::reauthorize`] with
+    /// other credentials may still be in time. Never carries a credential.
+    AuthorizationRefused {
+        /// The `Authorize` it answers.
+        request: i64,
+        /// `WWW-Authenticate` style challenges; empty when the server gave
+        /// none.
+        challenges: Vec<String>,
+    },
     /// A request of ours had no response in time, or its response stopped
     /// arriving. It is abandoned.
     TimedOut {
@@ -287,6 +307,9 @@ pub struct Connection {
     request: Option<RequestSession>,
     request_id: Option<i64>,
     authorize_id: Option<i64>,
+    /// The `Authorize` of an open session still waiting for its answer
+    /// ([`Connection::reauthorize`]).
+    reauthorizing: BTreeSet<i64>,
     open: Option<OpenSession>,
     resuming: Option<Resumable>,
     resume_id: Option<i64>,
@@ -343,6 +366,7 @@ impl Connection {
             request: None,
             request_id: None,
             authorize_id: None,
+            reauthorizing: BTreeSet::new(),
             open: None,
             resuming: None,
             resume_id: None,
@@ -630,9 +654,11 @@ impl Connection {
         out
     }
 
-    /// Send credentials - for the first authorization, or to renew them
-    /// before they run out (§5.2.2 row 8.4). `Authorize` carries the header
-    /// value as it is, scheme included (§5.3.4).
+    /// Send credentials for the **opening** of the session (§5.2.1.1 steps 2-4).
+    /// `Authorize` carries the header value as it is, scheme included
+    /// (§5.3.4). To renew the authorization of a session that is open, use
+    /// [`Connection::reauthorize`]: its answer is an event of its own, and
+    /// the state of the connection is not touched by a refusal.
     pub fn authorize(&mut self, credentials: &Credentials, now: Micros) -> Outgoing {
         let _ = now;
         self.credentials = Some(credentials.clone());
@@ -646,6 +672,47 @@ impl Connection {
             .expect("Core is always spoken");
         self.authorize_id = Some(out.header.message_id);
         out
+    }
+
+    /// Renew the credentials of the **open** session: an `Authorize` sent at
+    /// any time, to remain authorized for the duration of the session
+    /// (§3.13.5 point 1.b, p.90; the message, §5.3.4 p.121). The server must be
+    /// told *before* the authorization it holds runs out (point 1.a); one that
+    /// is not tells the client with `EAUTHORIZATION_EXPIRED`, then closes
+    /// (point 3), and nothing brings the session back.
+    ///
+    /// The answer is [`Event::Reauthorized`] or [`Event::AuthorizationRefused`]
+    /// (§5.3.7, p.123), or - not answered in the time of any request - an
+    /// [`Event::TimedOut`] for the returned message's id. Several can be out at
+    /// once, each answered under its own id. The authorization method and the
+    /// security principal MUST NOT change and the scope MUST NOT be reduced
+    /// (point 1.c): whether they did is the server's to judge.
+    ///
+    /// Refused when the session is not open: the opening has its own
+    /// authorization ([`Connection::authorize`]).
+    pub fn reauthorize(&mut self, credentials: &Credentials, now: Micros) -> Result<Outgoing, Incident> {
+        if self.state != State::Open {
+            return Err(EtpError::EINVALID_STATE.with_detail(
+                "the session is not open: its opening has its own authorization, and a closed session has none",
+            ));
+        }
+        let out = self
+            .wire
+            .request(&Authorize {
+                authorization: credentials.header().to_string(),
+                supplemental_authorization: BTreeMap::new(),
+            })
+            .expect("Core is always spoken");
+        // Kept in place of the credentials of the opening: they are the ones
+        // the server holds now.
+        self.credentials = Some(credentials.clone());
+        self.credentials_tried = true;
+        let id = out.header.message_id;
+        self.reauthorizing.insert(id);
+        // Waits like any request: an answer that never comes times out.
+        self.requests.insert(id, now);
+        self.last_activity = now;
+        Ok(out)
     }
 
     /// End the session: `CloseSession`, then the WebSocket closes.
@@ -872,6 +939,31 @@ impl Connection {
                 );
                 step.send.push(self.wire.refuse(&delivery, &incident));
             }
+            Message::AuthorizeResponse(response)
+                if self.side == Side::Client && self.state == State::Open =>
+            {
+                // The answer to a renewal (§3.13.5 1.b, §5.3.7): the session is
+                // open and stays so. Putting the machine back to `Authorizing`
+                // here - the state of the opening - would make a refused
+                // renewal look like a session that never opened.
+                match delivery.place {
+                    Place::Answers { request } if self.reauthorizing.remove(&request) => {
+                        step.events.push(if response.success {
+                            Event::Reauthorized { request }
+                        } else {
+                            Event::AuthorizationRefused {
+                                request,
+                                challenges: response.challenges.clone(),
+                            }
+                        });
+                    }
+                    _ => step
+                        .events
+                        .push(Event::Fault(EtpError::EINVALID_STATE.with_detail(
+                            "an AuthorizeResponse that answers no Authorize of an open session",
+                        ))),
+                }
+            }
             Message::AuthorizeResponse(response) if self.side == Side::Client => {
                 if response.success {
                     if self.state != State::Open {
@@ -947,11 +1039,35 @@ impl Connection {
             && self
                 .authorize_id
                 .is_some_and(|id| delivery.place == Place::Answers { request: id });
+        let to_reauthorize = match delivery.place {
+            Place::Answers { request } if self.side == Side::Client => {
+                self.reauthorizing.remove(&request).then_some(request)
+            }
+            _ => None,
+        };
         let incident = || {
             crate::wire::ErrorRegistry::new()
                 .incident(error.code, Some(error.message.clone()))
                 .unwrap_or_else(|| EtpError::EREQUEST_DENIED.with_detail(error.message.clone()))
         };
+        if let Some(request) = to_reauthorize {
+            // A renewal answered by an exception: the session is open, and
+            // stays so. Refused for want of authorization, it is the same as
+            // an `AuthorizeResponse` without `success`; any other error is
+            // the answer refused.
+            if error.code == EtpError::EAUTHORIZATION_REQUIRED.code() {
+                step.events.push(Event::AuthorizationRefused {
+                    request,
+                    challenges: Vec::new(),
+                });
+            } else {
+                step.events.push(Event::AnswerRefused {
+                    request,
+                    incident: incident(),
+                });
+            }
+            return;
+        }
         if (during_negotiation || to_authorize) && error.code == EtpError::EAUTHORIZATION_REQUIRED.code() {
             // CASE 1 with credentials not yet tried; CASE 2 - an empty
             // Authorize asking for the challenges - otherwise (§5.2.1.1 steps 3-4).

@@ -73,8 +73,10 @@ pub enum Method {
     Delete,
 }
 
-/// A request to send.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request to send. Its `Debug` shows the names of its headers and the
+/// length of its body, never a value: the credentials, or a header the
+/// server wants in addition, may be secrets.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// Its method.
     pub method: Method,
@@ -84,6 +86,18 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// Its body, if any.
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &names)
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// What came back.

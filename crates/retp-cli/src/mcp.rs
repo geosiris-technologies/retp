@@ -84,13 +84,20 @@ fn secret_on_the_command_line(login: &LoginArgs) -> Option<(&'static str, &'stat
 /// `cookie`...), by that name, or `None`. A tenant or a region is not a secret
 /// and is accepted.
 ///
-/// A text with no `=` is not looked at: it is refused later as not being
-/// `NAME=VALUE`, without being shown - it may be the secret itself.
+/// A text with no `=`, and one whose part before the `=` is not a header
+/// name, are not looked at: they are refused later, without being shown -
+/// such a text may be the secret itself (`-H "X-Api-Key: abc=="`).
 fn secret_header_on_the_command_line(headers: &[String]) -> Option<&str> {
     headers
         .iter()
         .filter_map(|given| given.split_once('='))
         .map(|(name, _)| name)
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        })
         .find(|name| retp_client::sensitive_header(name))
 }
 
@@ -103,6 +110,14 @@ fn check(args: &McpArgs) -> Result<Limits> {
         anyhow::bail!(
             "{option} is refused by `retp mcp`: a MCP client writes its command line into a configuration file. \
              Pass the secret through ETP_TOKEN / ETP_PASSWORD / ETP_CLIENT_SECRET ({variable} for this one)"
+        );
+    }
+    if let Some(name) = secret_header_on_the_command_line(&args.server.headers)
+        && name.eq_ignore_ascii_case("authorization")
+    {
+        anyhow::bail!(
+            "--header {name} is refused by `retp mcp`: this header is the credentials. Give a login instead, \
+             its secret through ETP_TOKEN / ETP_PASSWORD / ETP_CLIENT_SECRET, or serve a catalogue entry with `--server NAME`"
         );
     }
     if let Some(name) = secret_header_on_the_command_line(&args.server.headers) {
@@ -276,6 +291,19 @@ mod tests {
         // After one that carries nothing secret, too.
         let why = refusal(&["-H", "x-tenant=acme", "-H", "X-Auth-Token=hunter2"]);
         assert!(why.contains("X-Auth-Token"), "{why}");
+        assert!(!why.contains("hunter2"), "the secret was echoed: {why}");
+    }
+
+    #[test]
+    fn a_header_written_as_curl_writes_it_is_not_repeated_and_authorization_is_sent_to_the_login() {
+        // `Name: value` with a `=` in the value: the text before the `=` holds the value.
+        let args = parse(&["-H", "X-Api-Key: hunter2=="]);
+        assert_eq!(secret_header_on_the_command_line(&args.server.headers), None);
+        let why = refusal(&["-H", "authorization=hunter2"]);
+        assert!(
+            why.contains("ETP_TOKEN") && !why.contains("--header-from"),
+            "{why}"
+        );
         assert!(!why.contains("hunter2"), "the secret was echoed: {why}");
     }
 

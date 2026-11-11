@@ -82,8 +82,9 @@ request** to the server: the WebSocket handshake, the probe of
 What is refused, by name, before anything is asked of the network (no login is spent
 on a line that cannot be sent):
 
-- a name that is not letters, digits, `-` and `_`, and a value with a control character
-  (a line break in it would start another header);
+- a name that is not letters, digits, `-` and `_` (the text is not repeated: written as
+  `Name: value`, it would hold the value), and a value with a control character (a line
+  break in it would start another header) or a character that is not ASCII;
 - a header the client writes itself: `authorization` (give credentials, see
   [Logging in](#logging-in)), `etp-encoding`, `maxwebsocketframepayloadsize`,
   `maxwebsocketmessagepayloadsize`, `host`, `connection`, `upgrade`, `accept`,

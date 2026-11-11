@@ -434,7 +434,8 @@ pub(super) struct AddArgs {
     #[arg(long, value_name = "REF")]
     client_secret_from: Option<String>,
     /// An extra request header with a literal value, `NAME=VALUE`, repeatable. Refused for a name
-    /// that looks secret (`authorization`, `x-api-key`...): use `--header-from`.
+    /// that looks secret (`x-api-key`, `cookie`...): use `--header-from`. `authorization` is
+    /// not an extra header: it is the login (`--auth`).
     #[arg(long = "header", value_name = "NAME=VALUE")]
     headers: Vec<String>,
     /// An extra request header read from a reference, `NAME=env:VAR` or `NAME=file:PATH`, repeatable.

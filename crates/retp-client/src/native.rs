@@ -165,11 +165,23 @@ pub(crate) fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
 /// The HTTP client of the probe and of the logins: HTTP errors come back as
 /// responses, so their bodies - which say *why* - can be read.
 pub(crate) fn http_agent(check: CertificateCheck) -> ureq::Agent {
+    http_agent_following(check, REDIRECTS)
+}
+
+/// How many redirections a request follows when it carries no secret but
+/// its credentials, which are not sent on to another address.
+const REDIRECTS: u32 = 10;
+
+/// [`http_agent`], following at most `redirects` redirections. A request
+/// that carries a secret header follows none: only the credentials are
+/// taken off a redirected request, and the header would go to another host.
+fn http_agent_following(check: CertificateCheck, redirects: u32) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .disable_verification(check == CertificateCheck::Skip)
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
+        .max_redirects(redirects)
         .http_status_as_error(false)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(Duration::from_secs(60)))
@@ -468,7 +480,8 @@ impl std::error::Error for ProbeError {}
 pub fn fetch_server_capabilities(endpoint: &Endpoint) -> Result<(String, ServerCapabilities), ProbeError> {
     let url = probe::server_capabilities_url(&endpoint.url).map_err(ProbeError::Url)?;
     let additions = endpoint.additions().map_err(ProbeError::Header)?;
-    let mut request = http_agent(endpoint.certificates)
+    let redirects = if additions.has_secret() { 0 } else { REDIRECTS };
+    let mut request = http_agent_following(endpoint.certificates, redirects)
         .get(&url)
         .header("accept", "avro/binary, application/json;q=0.5");
     for (name, value) in additions.iter() {
@@ -562,11 +575,23 @@ pub struct UreqHttp {
 impl UreqHttp {
     /// An HTTP client checking certificates as `check` says.
     pub fn new(check: CertificateCheck) -> Self {
+        Self::following(check, REDIRECTS)
+    }
+
+    /// [`UreqHttp::new`], for requests that carry a secret header: no
+    /// redirection is followed (the answer comes back as it is), so that the
+    /// header never goes to another host than the one it was given for.
+    pub fn without_redirects(check: CertificateCheck) -> Self {
+        Self::following(check, 0)
+    }
+
+    fn following(check: CertificateCheck, redirects: u32) -> Self {
         let tls = ureq::tls::TlsConfig::builder()
             .disable_verification(check == CertificateCheck::Skip)
             .build();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
+            .max_redirects(redirects)
             .http_status_as_error(false)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(Duration::from_secs(300)))
@@ -668,15 +693,16 @@ impl crate::rest::BlockingHttp for UreqHttp {}
 /// extra headers and certificate check go with every request.
 ///
 /// Refused, before any request, when a header of the endpoint cannot be sent
-/// ([`Endpoint::additions`]).
+/// ([`Endpoint::additions`]). When one of its headers is a secret, no
+/// redirection is followed ([`UreqHttp::without_redirects`]).
 pub fn rest_client(endpoint: &Endpoint) -> Result<RestClient<UreqHttp>, HeaderRefusal> {
-    RestClient::new(
-        UreqHttp::new(endpoint.certificates),
-        &endpoint.url,
-        endpoint.credentials.clone(),
-        None,
-    )
-    .with_headers(endpoint.additions()?)
+    let additions = endpoint.additions()?;
+    let http = if additions.has_secret() {
+        UreqHttp::without_redirects(endpoint.certificates)
+    } else {
+        UreqHttp::new(endpoint.certificates)
+    };
+    RestClient::new(http, &endpoint.url, endpoint.credentials.clone(), None).with_headers(additions)
 }
 
 /// A server, by either transport - what the command line holds: the same

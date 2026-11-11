@@ -34,8 +34,10 @@ line break in a value starts another header, and a second `authorization` or
   session differently.
 - **One door, which checks at the door.** An `ExtraHeaders` cannot hold a header
   that cannot be sent. Refused when it is added, by name (`HeaderRefusal`, which
-  never carries a value): a name that is not letters, digits, `-` and `_`; a
-  value with a control character; a header the client writes itself
+  never carries a value, nor a text given where a name goes): a name that is
+  not letters, digits, `-` and `_`; a value with a control character or a
+  character that is not ASCII (a WebSocket handshake would refuse it after
+  the connection is made, and say it); a header the client writes itself
   (`etp-encoding`, `host`, `sec-websocket-*`...); the same name twice, whatever
   the case. The catalogue checks an entry through the same door when the file is
   read.
@@ -49,9 +51,13 @@ line break in a value starts another header, and a second `authorization` or
   with the advice to give credentials.
 - **A secret is never written in a URL.** The value of a header is a secret when
   it is added as one (`with_secret`: the catalogue does for a reference) or when
-  its name says so. It is then wiped from memory when dropped, absent from every
-  `Debug`, and refused for the handshake of a front end, whose attributes go in
-  the query string: a URL is kept by proxies, servers and histories. The probe is
+  its name says so. It is then wiped from memory when dropped, absent from the
+  `Debug` of the list, of a handshake and of a REST request, and refused for the
+  handshake of a front end, whose attributes go in
+  the query string: a URL is kept by proxies, servers and histories. A request
+  that carries one follows no redirection (the probe, the REST client): only the
+  credentials are taken off a redirected request, and the header would go to
+  another host. The probe is
   an ordinary HTTP request, which a front end's `fetch` can give headers to, so
   it sends headers under either profile.
 - **Refused before the login.** What an endpoint would refuse about its headers
@@ -82,8 +88,10 @@ line break in a value starts another header, and a second `authorization` or
 - `native::rest_client` can refuse (it returns a `Result`), and the probe has a
   refusal of its own (`ProbeError::Header`).
 - The name of a header is written in lower case in a WebSocket handshake, as ETP
-  asks of its own (section 4.3, step 4.c), and as given elsewhere; HTTP does not
-  tell the two apart. A value is always sent as given.
+  asks of its own (section 4.3, step 4.c), and by the HTTP client of this crate
+  for the probe and the REST calls; HTTP does not tell the cases apart. Only an
+  `Http` implementation of the caller's receives the name as given. A value is
+  always sent as given.
 - A catalogue file keeps no order between its headers (a TOML table): they are
   sent in the order of their names.
 - Not in this version: the Python bridge takes the partition and no other

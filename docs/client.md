@@ -65,7 +65,8 @@ endpoint.headers = ExtraHeaders::new()
 `ExtraHeaders` is the one door they come through. Each header is checked when it
 is added, and what cannot be sent is refused there, by name (`HeaderRefusal`,
 which never carries a value): a name that is not letters, digits, `-` and `_`; a
-value with a control character; a header the client writes itself
+value with a control character or a character that is not ASCII; a header the
+client writes itself
 (`authorization`, `etp-encoding`, `sec-websocket-*`...); the same name twice,
 whatever the case. The partition of `ServerProfile::Rddms` is one of these
 headers, `data-partition-id`: given a second time in `headers`, it is refused
@@ -74,8 +75,10 @@ when the endpoint is used (`Endpoint::additions`).
 A value may be a secret. One added with `with_secret`, or whose name says so
 (`sensitive_header`: `cookie`, anything with `authorization`, `key`, `token`,
 `secret` or `password`), is wiped from memory when the list is dropped and is in
-no `Debug`: the list shows its names, and a `Handshake` shows the value of ETP's
-own attributes only. It is never written in a URL either. The handshake of a
+no `Debug` of this crate: the list and a REST `HttpRequest` show the names, and a
+`Handshake` shows the value of ETP's own attributes only. A request that carries
+one follows no redirection, so that it goes to no other host. It is never written
+in a URL either. The handshake of a
 front end (`Profile::Browser`) has no header, its attributes go in the query
 string (ETP 1.2 section 4.3.2), so a header that carries a secret is refused
 there, before the socket is opened (`HeaderRefusal::InTheUrl`). The copy a

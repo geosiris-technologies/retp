@@ -478,7 +478,21 @@ fn main() -> Result<ExitCode> {
         Some(_) => {
             let mut browser = endpoint.clone();
             browser.handshake = Profile::Browser;
+            // A header that carries a secret has no place in the handshake of a front end (it would go in the
+            // URL): the client refuses it before anything is sent. That says nothing of the server.
+            let unsendable = browser.sendable().err();
             match open(&browser).0 {
+                Err(_) if unsendable.is_some() => Finding {
+                    id: "core.authorize",
+                    section: "§4.3.2, §5.3.4",
+                    rule: "A session opens with the credentials sent in Authorize, as a client that cannot set headers sends them",
+                    protocol: None,
+                    verdict: Verdict::NotChecked,
+                    said: format!(
+                        "not tried: {}",
+                        unsendable.map(|why| why.to_string()).unwrap_or_default()
+                    ),
+                },
                 Ok(other) => {
                     let _ = other.close("conformance checked: Authorize");
                     Finding {

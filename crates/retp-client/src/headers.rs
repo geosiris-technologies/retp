@@ -50,10 +50,12 @@ pub fn sensitive_header(name: &str) -> bool {
 #[non_exhaustive]
 pub enum HeaderRefusal {
     /// Not a header name: empty, or a character that is not a letter, a
-    /// digit, `-` or `_`.
-    Name(String),
-    /// The value of this header holds a control character: a line break in
-    /// it would start another header.
+    /// digit, `-` or `_`. The text given is not kept: what is not a name
+    /// may be a value, written where the name goes.
+    Name,
+    /// The value of this header holds a character that cannot be sent: a
+    /// control character (a line break would start another header), or
+    /// one that is not ASCII.
     Value(String),
     /// A header the client writes itself (`authorization`, `etp-encoding`,
     /// `sec-websocket-*`…).
@@ -70,13 +72,12 @@ pub enum HeaderRefusal {
 impl fmt::Display for HeaderRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HeaderRefusal::Name(name) => write!(
-                f,
-                "`{name}` is not a header name: a header name is letters, digits, `-` and `_`"
+            HeaderRefusal::Name => f.write_str(
+                "a header name is letters, digits, `-` and `_`: what was given as a name is not one (it is not shown: it may hold a value)",
             ),
             HeaderRefusal::Value(name) => write!(
                 f,
-                "the value of header `{name}` holds a control character, a line break for instance: it cannot be sent"
+                "the value of header `{name}` holds a character that cannot be sent: a control character (a line break for instance) or one that is not ASCII"
             ),
             HeaderRefusal::Own(name) if name.eq_ignore_ascii_case("authorization") => write!(
                 f,
@@ -114,10 +115,12 @@ impl Drop for Extra {
 
 /// The headers a server wants in addition, each one checked when it is added.
 ///
-/// A header is a name and a value, sent as given. What is refused, by name
-/// ([`HeaderRefusal`]): a name that is not letters, digits, `-` and `_`; a
-/// header the client writes itself; the same name twice, whatever the case; a
-/// value with a control character.
+/// A header is a name and a value. The value is sent as given; the name is
+/// sent in lower case by the transports of this crate (HTTP does not tell
+/// the cases apart). What is refused ([`HeaderRefusal`]): a name that is not
+/// letters, digits, `-` and `_`; a header the client writes itself; the same
+/// name twice, whatever the case; a value with a control character or a
+/// character that is not ASCII.
 ///
 /// **A value may be a secret** (an API key). One added with
 /// [`ExtraHeaders::with_secret`], or whose name says so
@@ -171,7 +174,7 @@ impl ExtraHeaders {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
         if !token {
-            return Err(HeaderRefusal::Name(name.to_string()));
+            return Err(HeaderRefusal::Name);
         }
         let lower = name.to_ascii_lowercase();
         if OWN.contains(&lower.as_str()) || lower.starts_with(OWN_PREFIX) {
@@ -180,12 +183,14 @@ impl ExtraHeaders {
         if self.0.iter().any(|other| other.name.eq_ignore_ascii_case(name)) {
             return Err(HeaderRefusal::Twice(name.to_string()));
         }
-        // What an HTTP header value may hold (RFC 9110 §5.5): no control
-        // character but the tab.
+        // What a header value may hold and every transport can write
+        // (RFC 9110 §5.5): visible ASCII, the space and the tab. A byte
+        // above 0x7f is obsolete text there, and a WebSocket handshake
+        // refuses it after the connection is made.
         let sendable = extra
             .value
             .bytes()
-            .all(|byte| byte == b'\t' || (byte >= 0x20 && byte != 0x7f));
+            .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte));
         if !sendable {
             return Err(HeaderRefusal::Value(name.to_string()));
         }
@@ -199,6 +204,12 @@ impl ExtraHeaders {
         others.0.iter().try_fold(self, |headers, extra| {
             headers.push(extra.name.clone(), extra.value.clone(), extra.secret)
         })
+    }
+
+    /// Whether one of them is held as a secret. A request that carries one
+    /// follows no redirection: the header would go to another host.
+    pub fn has_secret(&self) -> bool {
+        self.0.iter().any(|extra| extra.secret)
     }
 
     /// Whether there is none.

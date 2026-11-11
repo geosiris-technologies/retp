@@ -57,8 +57,14 @@ fn a_name_that_is_not_a_header_name_is_refused() {
         "x=tenant",
     ] {
         let refusal = ExtraHeaders::new().with(name, "acme").expect_err(name);
-        assert_eq!(refusal, HeaderRefusal::Name(name.to_string()));
+        assert_eq!(refusal, HeaderRefusal::Name);
     }
+    // What is given as a name may be a value (`-H "X-Api-Key: abc=="`, split at the `=`): it is not shown.
+    let refusal = ExtraHeaders::new()
+        .with(format!("X-Api-Key: {SECRET}"), "=")
+        .expect_err("not a name");
+    let shown = format!("{refusal} {refusal:?}");
+    assert!(!shown.contains(SECRET), "{shown}");
     let taken = ExtraHeaders::new()
         .with("X-Tenant_1", "acme")
         .expect("letters, digits, `-` and `_`");
@@ -124,6 +130,9 @@ fn a_value_with_a_control_character_is_refused_and_never_shown() {
         format!("{SECRET}\n"),
         format!("{SECRET}\0"),
         format!("{SECRET}\u{7f}"),
+        // Not ASCII: a WebSocket handshake would refuse it after connecting, and say the value.
+        format!("{SECRET}\u{a0}"),
+        format!("{SECRET}\u{e9}"),
     ] {
         let refusal = ExtraHeaders::new()
             .with("x-tenant", value.as_str())

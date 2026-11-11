@@ -891,7 +891,7 @@ impl Entry {
             let name = header.name.as_str();
             match sendable(header) {
                 Ok(()) => {}
-                Err(HeaderRefusal::Name(_)) => {
+                Err(HeaderRefusal::Name) => {
                     return Err(Problem::new(
                         "headers",
                         "a header name is letters, digits, `-` and `_`",

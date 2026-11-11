@@ -62,7 +62,7 @@ pub use operations::{
     get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
     put_data_objects, put_dataspaces, rollback_transaction, start_transaction,
 };
-pub use profile::{ServerProfile, plain_text_warning};
+pub use profile::plain_text_warning;
 pub use source::{CredentialSource, Fresh, GaveUp, Refused, SourceError, Witness};
 pub use transport::{HandshakeRefusal, Transport, TransportError, browser_fetch_hint};
 

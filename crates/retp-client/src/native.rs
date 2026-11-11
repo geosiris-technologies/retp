@@ -30,8 +30,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::rest::{Http, HttpRequest, HttpResponse, Method, RestClient};
 use crate::{
-    Client, ClientError, ExtraHeaders, HeaderRefusal, ServerProfile, Settings, SystemClock, Transport,
-    TransportError,
+    Client, ClientError, ExtraHeaders, HeaderRefusal, Settings, SystemClock, Transport, TransportError,
 };
 
 /// Whether the server's certificate is checked.
@@ -194,10 +193,8 @@ fn http_agent_following(check: CertificateCheck, redirects: u32) -> ureq::Agent 
 pub struct Endpoint {
     /// The server's WebSocket URL.
     pub url: String,
-    /// Its habits.
-    pub profile: ServerProfile,
-    /// The headers it wants in addition - a routing key, a tenant, an API
-    /// key -, sent with every request: the handshake, the probe, each REST
+    /// The headers it wants in addition - a data partition, a routing key, a
+    /// tenant, an API key -, sent with every request: the handshake, the probe, each REST
     /// call. A front end has no header: under [`Profile::Browser`] they go in
     /// the query string, and one that carries a secret is refused.
     pub headers: ExtraHeaders,
@@ -218,7 +215,6 @@ impl Endpoint {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            profile: ServerProfile::Standard,
             headers: ExtraHeaders::new(),
             credentials: None,
             certificates: CertificateCheck::Verify,
@@ -226,30 +222,19 @@ impl Endpoint {
         }
     }
 
-    /// Everything this server wants in addition, as one list: the header of
-    /// its profile - the data partition of a Reservoir DDMS is a header like
-    /// any other -, then its extra headers. A header both give is refused.
-    pub fn additions(&self) -> Result<ExtraHeaders, HeaderRefusal> {
-        let own = match self.profile.header() {
-            Some((name, value)) => ExtraHeaders::new().with(name, value)?,
-            None => ExtraHeaders::new(),
-        };
-        own.and(&self.headers)
-    }
-
-    /// `handshake` with what this server wants in addition
-    /// ([`Endpoint::additions`]) - what [`connect`] sends.
+    /// `handshake` with the headers this server wants in addition - what
+    /// [`connect`] sends. The data partition of OSDU's Reservoir DDMS is one
+    /// of them, `data-partition-id`: a header like any other.
     pub fn adapt(&self, handshake: Handshake) -> Result<Handshake, HeaderRefusal> {
-        self.additions()?.onto(handshake)
+        self.headers.onto(handshake)
     }
 
     /// What a WebSocket connection to this server would refuse about its
-    /// headers, with nothing sent: a header its profile already gives, and
-    /// one that carries a secret when the handshake is a front end's. To be
-    /// asked before a login, which costs a request. The REST API always
-    /// sends headers: for it, [`Endpoint::additions`] is the whole check.
+    /// headers, with nothing sent: one that carries a secret when the
+    /// handshake is a front end's. To be asked before a login, which costs a
+    /// request. The REST API always sends headers, and refuses none here.
     pub fn sendable(&self) -> Result<(), HeaderRefusal> {
-        self.additions()?.fit(self.handshake)
+        self.headers.fit(self.handshake)
     }
 }
 
@@ -456,8 +441,6 @@ pub enum ProbeError {
     Http(String),
     /// The body is not a `ServerCapabilities`.
     Body(probe::ProbeRefusal),
-    /// A header of the endpoint cannot be sent: nothing was asked.
-    Header(HeaderRefusal),
 }
 
 impl std::fmt::Display for ProbeError {
@@ -466,7 +449,6 @@ impl std::fmt::Display for ProbeError {
             ProbeError::Url(why) => write!(f, "{why}"),
             ProbeError::Http(why) => write!(f, "{why}"),
             ProbeError::Body(why) => write!(f, "{why}"),
-            ProbeError::Header(why) => write!(f, "{why}"),
         }
     }
 }
@@ -479,7 +461,7 @@ impl std::error::Error for ProbeError {}
 /// handshake of the WebSocket.
 pub fn fetch_server_capabilities(endpoint: &Endpoint) -> Result<(String, ServerCapabilities), ProbeError> {
     let url = probe::server_capabilities_url(&endpoint.url).map_err(ProbeError::Url)?;
-    let additions = endpoint.additions().map_err(ProbeError::Header)?;
+    let additions = &endpoint.headers;
     let redirects = if additions.has_secret() { 0 } else { REDIRECTS };
     let mut request = http_agent_following(endpoint.certificates, redirects)
         .get(&url)
@@ -689,20 +671,18 @@ impl Http for UreqHttp {
 impl crate::rest::BlockingHttp for UreqHttp {}
 
 /// A client of the Reservoir DDMS REST API: `endpoint.url` is the API's base
-/// (`https://…/api/reservoir-ddms/v2`), and its credentials, OSDU partition,
-/// extra headers and certificate check go with every request.
+/// (`https://…/api/reservoir-ddms/v2`), and its credentials, extra headers
+/// and certificate check go with every request.
 ///
-/// Refused, before any request, when a header of the endpoint cannot be sent
-/// ([`Endpoint::additions`]). When one of its headers is a secret, no
-/// redirection is followed ([`UreqHttp::without_redirects`]).
-pub fn rest_client(endpoint: &Endpoint) -> Result<RestClient<UreqHttp>, HeaderRefusal> {
-    let additions = endpoint.additions()?;
-    let http = if additions.has_secret() {
+/// When one of its headers is a secret, no redirection is followed
+/// ([`UreqHttp::without_redirects`]).
+pub fn rest_client(endpoint: &Endpoint) -> RestClient<UreqHttp> {
+    let http = if endpoint.headers.has_secret() {
         UreqHttp::without_redirects(endpoint.certificates)
     } else {
         UreqHttp::new(endpoint.certificates)
     };
-    RestClient::new(http, &endpoint.url, endpoint.credentials.clone(), None).with_headers(additions)
+    RestClient::new(http, &endpoint.url, endpoint.credentials.clone()).with_headers(endpoint.headers.clone())
 }
 
 /// A server, by either transport - what the command line holds: the same

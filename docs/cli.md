@@ -52,7 +52,6 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 | Option | Effect |
 |---|---|
 | `--header <NAME=VALUE>`, `-H` | a header this server wants in addition, repeatable; see [Headers a server wants](#headers-a-server-wants) |
-| `--partition <P>` | an OSDU data partition, for OSDU's Reservoir DDMS: the same as `--header data-partition-id=<P>` |
 | `--insecure` | do not check the server's certificate. A warning says so every time |
 | `--rest` | the URL is OSDU's Reservoir DDMS REST API, not an ETP WebSocket; the same commands run over it |
 | `--as-browser` | connect as a web page can: no header, attributes in the query string, credentials in an `Authorize` message |
@@ -89,8 +88,7 @@ on a line that cannot be sent):
   [Logging in](#logging-in)), `etp-encoding`, `maxwebsocketframepayloadsize`,
   `maxwebsocketmessagepayloadsize`, `host`, `connection`, `upgrade`, `accept`,
   `content-type`, `content-length`, `transfer-encoding` and every `sec-websocket-*`;
-- the same header twice, whatever the case of its letters; `--partition` counts as
-  `data-partition-id`;
+- the same header twice, whatever the case of its letters;
 - with `--as-browser`, a header that carries a secret: the handshake of a front end has
   no header, so its attributes are written in the query string (ETP 1.2 section 4.3.2),
   and a secret is never written in a URL. A header carries a secret when a catalogue
@@ -145,7 +143,7 @@ retp server add                           # a guided form, on a terminal
 retp server add azure-test wss://adme.example.com/api/reservoir-ddms-etp/v2/ \
     --auth azure --tenant 00000000-0000-0000-0000-000000000000 --client-id APP_ID \
     --scope 'api://APP_ID/.default' --client-secret-from env:RETP_AZURE_TEST_SECRET \
-    --partition opendes --alias az
+    --header data-partition-id=opendes --alias az
 
 retp server test azure-test               # definition, references, /.well-known, login, session
 retp azure                                # a shell on it
@@ -178,7 +176,6 @@ alias = ["az"]
 etp_url = "wss://adme.example.com/api/reservoir-ddms-etp/v2/"
 rest_url = "https://adme.example.com/api/reservoir-ddms/v2"
 transport = "etp"          # which one a command uses unless told otherwise
-partition = "opendes"
 tls = "verify"             # or "skip" (--insecure), said again at every connection
 handshake = "native"       # or "browser" (--as-browser)
 protected = false          # true: a command that writes asks for confirmation
@@ -191,6 +188,7 @@ scope = "api://11111111-1111-1111-1111-111111111111/.default"
 client_secret = { env = "RETP_AZURE_TEST_SECRET" }
 
 [headers]                  # extra request headers (see below)
+data-partition-id = "opendes"   # the data partition of OSDU's Reservoir DDMS
 x-trace = "on"
 x-api-key = { env = "RETP_AZURE_TEST_KEY" }
 
@@ -242,9 +240,9 @@ unless `--force`.
 
 **The guided form.** `retp server add` with no argument, on a terminal, asks for the
 method, the URLs, the method's fields (a secret as a reference, never a value), extra
-headers, the partition, the write defaults, `protected`, then probes `/.well-known`
-before saving (the URL alone: `retp server test` then asks again with the partition and
-the headers of the entry). With arguments the same fields come from the options, and a script is
+headers, the OSDU data partition (kept as the header `data-partition-id`), the write
+defaults, `protected`, then probes `/.well-known` before saving (the URL alone:
+`retp server test` then asks again with the headers of the entry). With arguments the same fields come from the options, and a script is
 never asked: when the input is not a terminal and a field is missing, the command refuses
 and names it.
 
@@ -336,7 +334,7 @@ shell command is a read, and a read can be asked twice).
 `--rest` takes the REST API instead of the WebSocket, with the same commands:
 
 ```sh
-retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --partition PARTITION
+retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --header data-partition-id=PARTITION
 ```
 
 The URL is the API's, never guessed from the WebSocket's. What REST has no

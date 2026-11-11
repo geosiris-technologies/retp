@@ -10,7 +10,9 @@ use crate::common::{CANARY, Sandbox, files_containing};
 fn connection() -> Connection {
     Connection {
         url: "wss://h.example.com/etp".into(),
-        partition: Some("opendes".into()),
+        headers: retp_client::ExtraHeaders::new()
+            .with("data-partition-id", "opendes")
+            .expect("taken"),
         insecure: true,
         ..Connection::default()
     }
@@ -44,7 +46,13 @@ fn a_secret_from_an_ambient_variable_becomes_a_reference_to_that_variable() {
             .iter()
             .any(|a| a.contains("ETP_PASSWORD") && a.contains("shared"))
     );
-    assert_eq!(observed.entry.server.partition.as_deref(), Some("opendes"));
+    assert_eq!(
+        observed.entry.headers,
+        [retp_catalog::Header {
+            name: "data-partition-id".into(),
+            value: retp_catalog::HeaderValue::Literal("opendes".into()),
+        }]
+    );
     assert_eq!(observed.entry.server.tls, retp_catalog::Tls::Skip);
     assert!(!observed.entry.to_toml().contains(CANARY));
     assert!(observed.advice.iter().all(|a| !a.contains(CANARY)));

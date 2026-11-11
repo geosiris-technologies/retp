@@ -23,7 +23,7 @@ Bound, function by function (Python name, then the Rust item it calls):
 
 | Python | Rust |
 |---|---|
-| `retp.connect(url, token, partition=, insecure=, writing=, types=, keepalive=, at_once=)` | `native::connect` over `reading_client` / `writing_client` and `native::fit_to_server`; `Credentials::bearer`; `ServerProfile`; `plain_text_warning`, `CertificateCheck::warning` |
+| `retp.connect(url, token, partition=, insecure=, writing=, types=, keepalive=, at_once=)` | `native::connect` over `reading_client` / `writing_client` and `native::fit_to_server`; `Credentials::bearer`; `ExtraHeaders` (the partition); `plain_text_warning`, `CertificateCheck::warning` |
 | `Session.dataspaces()` | `retp_client::list_dataspaces` |
 | `Session.resources(dataspace, depth=, scope=, types=, edges=, count=)` | `retp_client::list_resources` with a `ResourceQuery`; `dataspace_uri` |
 | `Session.get_object(uri)`, `get_objects(uris)` | `retp_client::get_data_objects` (format `xml`), then `energyml_etp_store::read_object`, then `energyml_core::json::write_string` |

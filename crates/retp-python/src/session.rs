@@ -34,8 +34,8 @@ use energyml_storage::storage::EnergymlStorage;
 use retp_client::arrays::{Array, ArrayFailure, Block, Decoded, array_metadata, read_arrays, read_regions};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
 use retp_client::{
-    ClientError, ResourceQuery, ServerProfile, blocking, dataspace_uri, get_data_objects, list_dataspaces,
-    list_resources, plain_text_warning, reading_client, writing_client,
+    ClientError, ResourceQuery, blocking, dataspace_uri, get_data_objects, list_dataspaces, list_resources,
+    plain_text_warning, reading_client, writing_client,
 };
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
@@ -239,16 +239,18 @@ impl ConnectOptions {
             .into_iter()
             .flatten()
             .collect();
-        let profile = match self.partition {
-            Some(data_partition) => ServerProfile::Rddms { data_partition },
-            None => ServerProfile::Standard,
+        // The data partition of OSDU's Reservoir DDMS is a header of the server, like any other.
+        let headers = match self.partition {
+            Some(partition) => retp_client::ExtraHeaders::new()
+                .with("data-partition-id", partition)
+                .map_err(|why| Failure::bad_argument(format!("the partition is refused: {why}")))?,
+            None => retp_client::ExtraHeaders::new(),
         };
         Ok((
             Endpoint {
                 url: self.url,
-                profile,
-                // Not bridged yet: the partition is the only addition.
-                headers: retp_client::ExtraHeaders::new(),
+                // The other headers are not bridged yet: the partition is the only one.
+                headers,
                 credentials,
                 certificates,
                 handshake: Profile::Native,

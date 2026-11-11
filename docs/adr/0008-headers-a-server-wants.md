@@ -7,8 +7,8 @@
 
 Some servers want a header that ETP does not define. OSDU's Reservoir DDMS wants
 `data-partition-id`; a gateway in front of a server wants a tenant, a routing
-key, an API key. The client knew one of them, by name: the profile
-`ServerProfile::Rddms` added the partition. Any other could be written in a
+key, an API key. The client knew one of them, by name: a server profile
+(`ServerProfile::Rddms`) added the partition. Any other could be written in a
 catalogue entry (`[headers]`), but the client had no way to send it, so a
 connection to such an entry was refused by name (ADR 7).
 
@@ -41,10 +41,16 @@ line break in a value starts another header, and a second `authorization` or
   (`etp-encoding`, `host`, `sec-websocket-*`...); the same name twice, whatever
   the case. The catalogue checks an entry through the same door when the file is
   read.
-- **The partition is a header like any other.** `ServerProfile::Rddms` comes down
-  to `data-partition-id` and is merged into the same list
-  (`Endpoint::additions`); `--partition P` is `--header data-partition-id=P`.
-  Given both ways, it is refused rather than sent twice.
+- **The partition is a header like any other**, `data-partition-id`, and the
+  client no longer knows it by name: the server profile (`ServerProfile`), the
+  `partition` parameter of the REST client, the `partition` key of a catalogue
+  entry and the option `--partition` are gone. One way to say a thing: a second
+  one had to be refused when both were given. What is kept for those who used
+  them: a catalogue file written before, with `partition = "..."` under
+  `[server]`, is still read, as that header, and is written back as a header;
+  and `--partition` still parses, to answer what to write in its place
+  (`--header data-partition-id=VALUE`). The Python bridge keeps its `partition`
+  argument, which gives the same header, until it bridges the headers.
 - **`authorization` is not an extra header.** Credentials have a path of their
   own (`Credentials`, a login, the renewal of an open session). An
   `authorization` given as a header would go around all of it, so it is refused,

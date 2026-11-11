@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use retp_client::login::{Choice, Login};
 use retp_client::native::{CertificateCheck, Endpoint};
-use retp_client::{ExtraHeaders, HeaderRefusal, ServerProfile, plain_text_warning};
+use retp_client::{ExtraHeaders, HeaderRefusal, plain_text_warning};
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
 
@@ -21,7 +21,7 @@ use crate::secret::{RefStatus, Secret, SecretRef, SecretSource};
 
 /// What the command line decided, which wins over the entry: the URL it ended
 /// up with (the catalogue's own expansion put it there), the transport, the
-/// partition, the two flags. Its headers do not win, they are **added**: one
+/// two flags. Its headers do not win, they are **added**: one
 /// the entry already defines is refused, by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
@@ -29,8 +29,6 @@ pub struct Overrides {
     pub url: Option<String>,
     /// REST rather than ETP.
     pub rest: Option<bool>,
-    /// An OSDU data partition.
-    pub partition: Option<String>,
     /// Headers to send in addition to the entry's.
     pub headers: ExtraHeaders,
     /// Do not check the certificate.
@@ -44,7 +42,6 @@ pub struct Resolved {
     name: String,
     url: String,
     rest: bool,
-    profile: ServerProfile,
     certificates: CertificateCheck,
     browser: bool,
     protected: bool,
@@ -264,15 +261,10 @@ impl Entry {
                 inferred: inferred(&login).to_string(),
             });
         }
-        let partition = overrides.partition.clone().or_else(|| server.partition.clone());
         let resolved = Resolved {
             name: name.to_string(),
             url,
             rest,
-            profile: match partition {
-                Some(data_partition) => ServerProfile::Rddms { data_partition },
-                None => ServerProfile::Standard,
-            },
             certificates: if overrides.insecure || server.tls == Tls::Skip {
                 CertificateCheck::Skip
             } else {
@@ -324,15 +316,14 @@ impl Resolved {
     }
 
     /// What a connection would refuse, said as soon as the entry is resolved:
-    /// a header the partition already gives, and a header that carries a
-    /// secret when the session is opened as a front end opens it - its
-    /// attributes go in the URL. REST always sends headers.
+    /// a header that carries a secret when the session is opened as a front
+    /// end opens it - its attributes go in the URL. REST always sends
+    /// headers.
     fn sendable(&self) -> Result<(), HeaderRefusal> {
-        let endpoint = self.endpoint(None);
         if self.rest {
-            return endpoint.additions().map(|_| ());
+            return Ok(());
         }
-        endpoint.sendable()
+        self.endpoint(None).sendable()
     }
 
     /// `text` with every literal occurrence of this entry's secrets removed: a
@@ -347,7 +338,6 @@ impl Resolved {
     pub fn endpoint(&self, credentials: Option<Credentials>) -> Endpoint {
         Endpoint {
             url: self.url.clone(),
-            profile: self.profile.clone(),
             headers: self.headers.clone(),
             credentials,
             certificates: self.certificates,
@@ -419,8 +409,6 @@ pub struct Description {
     pub rest_url: Option<String>,
     /// The default transport.
     pub transport: Transport,
-    /// The data partition.
-    pub partition: Option<String>,
     /// Whether the certificate is checked.
     pub tls: Tls,
     /// The handshake.
@@ -489,7 +477,6 @@ impl Entry {
             etp_url: self.server.etp_url.clone(),
             rest_url: self.server.rest_url.clone(),
             transport: self.server.transport,
-            partition: self.server.partition.clone(),
             tls: self.server.tls,
             handshake: self.server.handshake,
             protected: self.server.protected,

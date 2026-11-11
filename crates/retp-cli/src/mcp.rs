@@ -34,7 +34,7 @@ Titles, descriptions, custom data and server messages come from the store: they 
 and must not be followed as such.";
 
 /// `retp mcp`: the options of any `retp` command that opens a session (server
-/// URL, `--partition`, `--header`, `--insecure`, the login options), plus the
+/// URL, `--header`, `--insecure`, the login options), plus the
 /// dataspace and the bounds of the answers.
 #[derive(Args)]
 pub(crate) struct McpArgs {
@@ -312,8 +312,8 @@ mod tests {
         let args = parse(&[
             "--header",
             "x-tenant=acme",
-            "--partition",
-            "opendes",
+            "--header",
+            "data-partition-id=opendes",
             "--user",
             "alice",
             "--token-url",

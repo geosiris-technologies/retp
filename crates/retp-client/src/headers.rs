@@ -60,9 +60,7 @@ pub enum HeaderRefusal {
     /// A header the client writes itself (`authorization`, `etp-encoding`,
     /// `sec-websocket-*`…).
     Own(String),
-    /// This header is given twice, whatever the case of its letters - the
-    /// `data-partition-id` of a [`ServerProfile`](crate::ServerProfile)
-    /// counts.
+    /// This header is given twice, whatever the case of its letters.
     Twice(String),
     /// This header carries a secret, and the handshake of a front end has no
     /// header to put it in: it would be written in the URL.

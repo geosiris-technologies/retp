@@ -27,14 +27,8 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use retp_client::native::{
-    self, CertificateCheck, Connect, Endpoint, ProbeError, Remote, UreqHttp, connect,
-    fetch_server_capabilities,
-};
-use retp_client::rest::RestClient;
-use retp_client::{
-    ClientError, ExtraHeaders, HeaderRefusal, ServerProfile, reading_client, sensitive_header,
-};
+use retp_client::native::{self, Connect, Endpoint, ProbeError, Remote, connect, fetch_server_capabilities};
+use retp_client::{ClientError, ExtraHeaders, HeaderRefusal, reading_client, sensitive_header};
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::{self, HandshakeSettings, Profile};
 use retp_types::datatypes::Uuid;
@@ -285,97 +279,40 @@ fn a_secret_is_never_written_in_a_url() {
 
 // ---- the partition is a header like any other --------------------------------
 
+/// OSDU's Reservoir DDMS at `url`: its data partition is a header of the server.
 fn rddms(url: impl Into<String>) -> Endpoint {
     Endpoint {
-        profile: ServerProfile::Rddms {
-            data_partition: "opendes".into(),
-        },
+        headers: ExtraHeaders::new()
+            .with("data-partition-id", "opendes")
+            .expect("taken"),
         ..Endpoint::new(url)
     }
 }
 
 #[test]
-fn the_partition_of_a_profile_is_one_of_the_headers() {
+fn the_partition_is_one_header_added_to_the_handshake_and_nothing_else() {
     let settings = HandshakeSettings::default();
     let base = probe::handshake("wss://rddms.example/api/etp", Profile::Native, &settings).expect("a URL");
-
-    // The profile alone: what `ServerProfile::adapt` always did.
-    let endpoint = rddms("wss://rddms.example/api/etp");
+    let adapted = rddms("wss://rddms.example/api/etp")
+        .adapt(base.clone())
+        .expect("sendable");
+    let added: Vec<_> = adapted
+        .headers
+        .iter()
+        .filter(|h| !base.headers.contains(h))
+        .collect();
+    assert_eq!(added, [&("data-partition-id".to_string(), "opendes".to_string())]);
     assert_eq!(
-        endpoint.adapt(base.clone()).expect("sendable"),
-        endpoint.profile.adapt(base.clone())
+        (adapted.url.as_str(), &adapted.subprotocols),
+        (base.url.as_str(), &base.subprotocols)
     );
-    // The same thing said as a header gives the same handshake.
-    let as_header = Endpoint {
-        headers: ExtraHeaders::new()
-            .with("data-partition-id", "opendes")
-            .expect("taken"),
-        ..Endpoint::new("wss://rddms.example/api/etp")
-    };
     assert_eq!(
-        as_header.adapt(base.clone()).expect("sendable"),
-        endpoint.adapt(base.clone()).expect("sendable")
-    );
-
-    // The profile's header first, then the others.
-    let both = Endpoint {
-        headers: ExtraHeaders::new().with("x-tenant", "acme").expect("taken"),
-        ..rddms("wss://rddms.example/api/etp")
-    };
-    assert_eq!(
-        both.additions().expect("sendable").iter().collect::<Vec<_>>(),
-        [("data-partition-id", "opendes"), ("x-tenant", "acme")]
-    );
-    assert!(
         Endpoint::new("wss://etp.example/etp")
-            .additions()
-            .expect("sendable")
-            .is_empty(),
-        "a standard server with no header: nothing added"
+            .adapt(base.clone())
+            .expect("sendable"),
+        base,
+        "a server that wants nothing: nothing added"
     );
-
-    // Given by both, it is refused: which of the two values is meant is not guessed.
-    let twice = Endpoint {
-        headers: ExtraHeaders::new()
-            .with("Data-Partition-Id", "another")
-            .expect("taken"),
-        ..rddms("wss://rddms.example/api/etp")
-    };
-    assert_eq!(
-        twice.additions().expect_err("twice"),
-        HeaderRefusal::Twice("Data-Partition-Id".to_string())
-    );
-    assert_eq!(
-        twice.adapt(base).expect_err("twice"),
-        HeaderRefusal::Twice("Data-Partition-Id".to_string())
-    );
-    assert_eq!(
-        twice.sendable(),
-        Err(HeaderRefusal::Twice("Data-Partition-Id".to_string()))
-    );
-    let refusal = match native::rest_client(&twice) {
-        Ok(_) => panic!("the REST client would send the partition twice"),
-        Err(why) => why,
-    };
-    assert_eq!(refusal, HeaderRefusal::Twice("Data-Partition-Id".to_string()));
-}
-
-#[test]
-fn the_rest_client_refuses_a_partition_given_twice() {
-    let headers = ExtraHeaders::new()
-        .with("Data-Partition-Id", "another")
-        .expect("taken");
-    let client = RestClient::new(
-        UreqHttp::new(CertificateCheck::Verify),
-        "https://rest.example/api",
-        None,
-        Some("opendes".into()),
-    );
-    let refusal = match client.with_headers(headers) {
-        Ok(_) => panic!("the partition would be sent twice"),
-        Err(why) => why,
-    };
-    assert_eq!(refusal, HeaderRefusal::Twice("Data-Partition-Id".to_string()));
 }
 
 // ---- on the wire ---------------------------------------------------------------
@@ -428,10 +365,11 @@ fn request_line(request: &str) -> &str {
 fn demanding(url: String) -> Endpoint {
     Endpoint {
         headers: ExtraHeaders::new()
-            .with("x-tenant", "acme")
+            .with("data-partition-id", "opendes")
+            .and_then(|headers| headers.with("x-tenant", "acme"))
             .and_then(|headers| headers.with("x-api-key", SECRET))
             .expect("taken"),
-        ..rddms(url)
+        ..Endpoint::new(url)
     }
 }
 
@@ -515,7 +453,7 @@ fn the_probe_carries_them_as_headers_whatever_the_handshake() {
 fn a_rest_call_carries_them() {
     let (port, requests) = recording();
     let endpoint = demanding(format!("http://127.0.0.1:{port}/api"));
-    let client = native::rest_client(&endpoint).expect("sendable");
+    let client = native::rest_client(&endpoint);
     let answer = Remote::Rest(Box::new(client)).health().expect("a REST client");
     let request = requests.recv_timeout(WAIT).expect("the REST request");
     assert!(request_line(&request).starts_with("GET /api/"), "{request}");
@@ -545,8 +483,11 @@ fn a_front_end_handshake_writes_them_in_the_query_string() {
     let (port, requests) = recording();
     let endpoint = Endpoint {
         handshake: Profile::Browser,
-        headers: ExtraHeaders::new().with("x-tenant", "acme").expect("taken"),
-        ..rddms(format!("ws://127.0.0.1:{port}/etp"))
+        headers: ExtraHeaders::new()
+            .with("data-partition-id", "opendes")
+            .and_then(|headers| headers.with("x-tenant", "acme"))
+            .expect("taken"),
+        ..Endpoint::new(format!("ws://127.0.0.1:{port}/etp"))
     };
     let _ = refused(endpoint);
     let request = requests.recv_timeout(WAIT).expect("the upgrade request");

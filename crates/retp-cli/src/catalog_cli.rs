@@ -106,7 +106,6 @@ pub(super) fn endpoint(server: &Server) -> Result<Option<Endpoint>> {
     let overrides = Overrides {
         url: Some(server.url.clone()),
         rest: Some(server.rest),
-        partition: server.partition.clone(),
         headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
@@ -205,7 +204,6 @@ pub(super) fn plan_save(server: &Server) -> Result<Option<SavePlan>> {
     let connection = Connection {
         url: server.url.clone(),
         rest: server.rest,
-        partition: server.partition.clone(),
         headers: server.headers()?,
         insecure: server.insecure,
         as_browser: server.as_browser,
@@ -264,7 +262,7 @@ impl Network for Net {
 
     fn session(&self, endpoint: Endpoint, rest: bool) -> std::result::Result<String, String> {
         if rest {
-            let client = native::rest_client(&endpoint).map_err(|why| why.to_string())?;
+            let client = native::rest_client(&endpoint);
             let mut remote = native::Remote::Rest(Box::new(client));
             return match remote.health() {
                 Some(Ok(health)) => Ok(format!("the REST API answers: {health}")),
@@ -385,8 +383,8 @@ pub(super) struct AddArgs {
     /// Which transport commands use unless told otherwise: `etp` or `rest`.
     #[arg(long, value_name = "etp|rest")]
     transport: Option<String>,
-    /// An OSDU data partition.
-    #[arg(long)]
+    /// Gone: the data partition is a header. Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
     /// Do not check the certificate (said again at every connection).
     #[arg(long)]
@@ -456,6 +454,10 @@ pub(super) struct AddArgs {
 }
 
 /// `NAME=VALUE`, the value never shown in an error.
+/// What `--partition` answers now, on every command that had it.
+pub(super) const PARTITION_IS_A_HEADER: &str = "--partition is gone: the data partition is a header like any other. \
+     Write `--header data-partition-id=VALUE`";
+
 pub(super) fn pairs(options: &[String], option: &str) -> Result<Vec<(String, String)>> {
     options
         .iter()
@@ -468,11 +470,13 @@ pub(super) fn pairs(options: &[String], option: &str) -> Result<Vec<(String, Str
 }
 
 fn draft_of(args: &AddArgs, url: String) -> Result<Draft> {
+    if args.partition.is_some() {
+        anyhow::bail!(PARTITION_IS_A_HEADER);
+    }
     Ok(Draft {
         url,
         other_url: args.other_url.clone(),
         transport: args.transport.clone(),
-        partition: args.partition.clone(),
         insecure: args.insecure,
         as_browser: args.as_browser,
         protected: args.protected,
@@ -738,7 +742,11 @@ fn guided() -> Result<(String, Draft)> {
             draft.headers.push((header, value));
         }
     }
-    draft.partition = ask_text("OSDU data partition (empty for none)")?;
+    if let Some(partition) =
+        ask_text("OSDU data partition, sent as the header data-partition-id (empty for none)")?
+    {
+        draft.headers.push(("data-partition-id".to_string(), partition));
+    }
     eprintln!(
         "What a dataspace created on this server needs (not secrets; comma-separated, empty for none):"
     );
@@ -803,8 +811,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let location = Location::new(root.join("config.toml"), None);
         let mut catalog = Catalog::init(&location, &root.join("servers"), false).expect("init");
-        let mut spec = ServerSpec::etp("wss://adme.example.com/etp");
-        spec.partition = Some("opendes".into());
+        let spec = ServerSpec::etp("wss://adme.example.com/etp");
         catalog
             .add("azure", Entry::new(spec, AuthSpec::None), false, &reserved())
             .expect("add");
@@ -819,7 +826,7 @@ mod tests {
             EtpCommand::Dataspaces(server) => {
                 assert_eq!(server.url, "wss://adme.example.com/etp");
                 assert_eq!(server.catalog_entry.as_deref(), Some("azure"));
-                assert_eq!(server.partition.as_deref(), Some("opendes"));
+                assert_eq!(server.partition, None, "the rewrite adds no option for a header");
             }
             _ => panic!("not `dataspaces`"),
         }

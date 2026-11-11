@@ -57,7 +57,7 @@ use retp_client::native::Endpoint;
 
 let mut endpoint = Endpoint::new("wss://host/etp");
 endpoint.headers = ExtraHeaders::new()
-    .with("data-partition-id", "opendes")?    // what `ServerProfile::Rddms` comes down to
+    .with("data-partition-id", "opendes")?    // the data partition of OSDU's Reservoir DDMS
     .with("x-tenant", "acme")?
     .with_secret("x-routing", routing_key)?;  // a secret whatever its name
 ```
@@ -68,9 +68,9 @@ which never carries a value): a name that is not letters, digits, `-` and `_`; a
 value with a control character or a character that is not ASCII; a header the
 client writes itself
 (`authorization`, `etp-encoding`, `sec-websocket-*`...); the same name twice,
-whatever the case. The partition of `ServerProfile::Rddms` is one of these
-headers, `data-partition-id`: given a second time in `headers`, it is refused
-when the endpoint is used (`Endpoint::additions`).
+whatever the case. The data partition of OSDU's Reservoir DDMS is one of these
+headers, `data-partition-id`, and nothing else: the client has no other way to
+give it.
 
 A value may be a secret. One added with `with_secret`, or whose name says so
 (`sensitive_header`: `cookie`, anything with `authorization`, `key`, `token`,

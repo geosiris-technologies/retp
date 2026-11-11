@@ -91,8 +91,6 @@ pub struct ServerSpec {
     pub rest_url: Option<String>,
     /// Which of the two a command uses unless told otherwise.
     pub transport: Transport,
-    /// An OSDU data partition.
-    pub partition: Option<String>,
     /// Whether the certificate is checked.
     pub tls: Tls,
     /// How the handshake is made.
@@ -116,7 +114,6 @@ impl ServerSpec {
             etp_url: Some(url.into()),
             rest_url: None,
             transport: Transport::Etp,
-            partition: None,
             tls: Tls::Verify,
             handshake: Handshake::Native,
             protected: false,
@@ -444,6 +441,8 @@ struct FileServer {
     etp_url: Option<String>,
     rest_url: Option<String>,
     transport: Option<String>,
+    /// The spelling of files written before the data partition became a header like any other: still read, as the
+    /// header `data-partition-id`, and never written.
     partition: Option<String>,
     tls: Option<String>,
     handshake: Option<String>,
@@ -799,7 +798,8 @@ impl Entry {
     /// source of secrets that does not exist yet.
     pub fn parse(text: &str) -> Result<Entry, CatalogError> {
         scan_literals(text)?;
-        let root: FileRoot = read_toml(text).map_err(|(line, why)| CatalogError::entry(None, line, why))?;
+        let mut root: FileRoot =
+            read_toml(text).map_err(|(line, why)| CatalogError::entry(None, line, why))?;
         let located = |problem: Problem| problem.located(Some(text));
         if root.schema != Some(1) {
             return Err(located(Problem::new(
@@ -807,6 +807,7 @@ impl Entry {
                 "`schema` is required and must be 1",
             )));
         }
+        let old_partition = root.server.partition.take();
         let server = server_spec(root.server).map_err(located)?;
         let auth = root.auth;
         let reference = |value: Option<FileRef>, key: &str| value.map(|r| r.into_ref(key)).transpose();
@@ -831,6 +832,29 @@ impl Entry {
                 }
             };
             headers.push(Header { name, value });
+        }
+        // A file written before the data partition became a header: `partition = "x"` under `[server]`. It is the
+        // header `data-partition-id`, and is written back as one.
+        if let Some(partition) = old_partition {
+            if partition.is_empty() {
+                return Err(located(Problem::new("partition", "`partition` cannot be empty")));
+            }
+            if let Some(given) = headers
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(PARTITION_HEADER))
+            {
+                return Err(located(Problem::new(
+                    given.name.as_str(),
+                    "this header is the data partition, which `partition` already gives: keep the header",
+                )));
+            }
+            headers.insert(
+                0,
+                Header {
+                    name: PARTITION_HEADER.to_string(),
+                    value: HeaderValue::Literal(partition),
+                },
+            );
         }
         let entry = Entry {
             headers,
@@ -878,9 +902,6 @@ impl Entry {
             }
             _ => {}
         }
-        if server.partition.as_deref() == Some("") {
-            return Err(Problem::new("partition", "`partition` cannot be empty"));
-        }
         for (index, alias) in self.aliases.iter().enumerate() {
             check_name(alias).map_err(|why| Problem::new("alias", why))?;
             if self.aliases[..index].contains(alias) {
@@ -898,12 +919,6 @@ impl Entry {
                     ));
                 }
                 Err(why) => return Err(Problem::new(name, why.to_string())),
-            }
-            if server.partition.is_some() && name.eq_ignore_ascii_case("data-partition-id") {
-                return Err(Problem::new(
-                    name,
-                    "this header is the data partition, which `partition` already gives: keep one of the two",
-                ));
             }
             if self.headers[..index]
                 .iter()
@@ -970,9 +985,6 @@ impl Entry {
             let _ = writeln!(out, "rest_url = {}", quote(url));
         }
         let _ = writeln!(out, "transport = {}", quote(server.transport.as_str()));
-        if let Some(partition) = &server.partition {
-            let _ = writeln!(out, "partition = {}", quote(partition));
-        }
         let tls = match server.tls {
             Tls::Verify => "verify",
             Tls::Skip => "skip",
@@ -1033,6 +1045,9 @@ impl Entry {
     }
 }
 
+/// The header OSDU's Reservoir DDMS reads its data partition from.
+const PARTITION_HEADER: &str = "data-partition-id";
+
 fn server_spec(file: FileServer) -> Result<ServerSpec, Problem> {
     let transport = match file.transport.as_deref() {
         Some(text) => Transport::parse(text)
@@ -1059,7 +1074,6 @@ fn server_spec(file: FileServer) -> Result<ServerSpec, Problem> {
         etp_url: file.etp_url,
         rest_url: file.rest_url,
         transport,
-        partition: file.partition,
         tls,
         handshake,
         protected: file.protected.unwrap_or(false),
@@ -1082,8 +1096,6 @@ pub struct Draft {
     pub other_url: Option<String>,
     /// `etp` or `rest`; the first URL's by default.
     pub transport: Option<String>,
-    /// An OSDU data partition.
-    pub partition: Option<String>,
     /// Do not check the certificate.
     pub insecure: bool,
     /// Connect as a web page can.
@@ -1214,7 +1226,6 @@ impl Draft {
             etp_url,
             rest_url,
             transport,
-            partition: self.partition,
             tls: if self.insecure { Tls::Skip } else { Tls::Verify },
             handshake: if self.as_browser {
                 Handshake::Browser

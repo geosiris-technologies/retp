@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use retp_client::login::Choice;
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote, WebSocketTransport};
-use retp_client::{ExtraHeaders, ServerProfile, SystemClock, writing_client};
+use retp_client::{ExtraHeaders, SystemClock, writing_client};
 use retp_conformance::renewing::Renewing;
 use retp_conformance::{Finding, Options, Report, Verdict, checks, raw};
 use retp_proto::credentials::Credentials;
@@ -75,8 +75,8 @@ struct Args {
     /// The scope to ask the token for.
     #[arg(long)]
     oauth_scope: Option<String>,
-    /// An OSDU data partition (`data-partition-id`).
-    #[arg(long)]
+    /// Gone: the data partition is a header (`--header data-partition-id=VALUE`). Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
     /// A header the server wants in addition, `NAME=VALUE`, sent with every
     /// request. Repeatable.
@@ -148,12 +148,6 @@ fn main() -> Result<ExitCode> {
     };
     let mut endpoint = Endpoint {
         url: args.url.clone(),
-        profile: match &args.partition {
-            Some(data_partition) => ServerProfile::Rddms {
-                data_partition: data_partition.clone(),
-            },
-            None => ServerProfile::Standard,
-        },
         // A catalogue server: its own headers, and the command line's with them.
         headers: match &resolved {
             Some(resolved) => resolved.headers().clone(),
@@ -163,8 +157,6 @@ fn main() -> Result<ExitCode> {
         certificates,
         handshake: Profile::Native,
     };
-    // What the headers refuse is said before the login, which costs a request.
-    endpoint.additions()?;
     let login = match &resolved {
         // A catalogue server: the ambient `ETP_*` variables are ignored.
         Some(resolved) => resolved.login().cloned(),
@@ -542,7 +534,7 @@ fn over_rest(args: &Args, endpoint: Endpoint, mut report: Report, options: Optio
         });
     }
     let insecure = args.insecure;
-    let mut remote = Remote::Rest(Box::new(native::rest_client(&endpoint)?));
+    let mut remote = Remote::Rest(Box::new(native::rest_client(&endpoint)));
     // The first request is the TLS handshake's witness, as the WebSocket's
     // opening is over ETP.
     match retp_conformance::Session::ping(&mut remote) {
@@ -657,6 +649,11 @@ fn with_patience(mut offer: retp_proto::negotiate::Offer) -> retp_proto::negotia
 /// The `--header` options as the client's list, which checks each one. The
 /// text given is never shown: a value may be a secret.
 fn headers_of(args: &Args) -> Result<ExtraHeaders> {
+    if args.partition.is_some() {
+        anyhow::bail!(
+            "--partition is gone: the data partition is a header like any other. Write `--header data-partition-id=VALUE`"
+        );
+    }
     let mut headers = ExtraHeaders::new();
     for given in &args.headers {
         let (name, value) = given
@@ -770,7 +767,6 @@ fn resolve_entry(name: &str, args: &Args) -> Result<retp_catalog::Resolved> {
     let overrides = retp_catalog::Overrides {
         url: Some(args.url.clone()),
         rest: Some(args.rest),
-        partition: args.partition.clone(),
         headers: headers_of(args)?,
         insecure: args.insecure,
         as_browser: false,

@@ -31,8 +31,6 @@ pub struct Connection {
     pub url: String,
     /// REST rather than ETP.
     pub rest: bool,
-    /// The OSDU data partition.
-    pub partition: Option<String>,
     /// The headers given in addition (`--header`). Their `Debug` shows the
     /// names only.
     pub headers: ExtraHeaders,
@@ -189,7 +187,6 @@ pub fn observe(
     } else {
         Transport::Etp
     };
-    server.partition = connection.partition.clone();
     server.tls = if connection.insecure {
         Tls::Skip
     } else {

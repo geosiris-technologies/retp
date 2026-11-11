@@ -24,9 +24,9 @@ use retp_client::login::{Choice, Login};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen};
 use retp_client::resume::{Retry, RunEvent, Setback};
 use retp_client::{
-    ClientError, ExtraHeaders, ResourceQuery, ServerProfile, dataspace_uri, delete_dataspaces,
-    described_client, get_data_objects, list_dataspaces, list_resources, list_supported_types,
-    object_file_name, plain_text_warning, put_dataspaces, reading_client, writing_client,
+    ClientError, ExtraHeaders, ResourceQuery, dataspace_uri, delete_dataspaces, described_client,
+    get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
+    plain_text_warning, put_dataspaces, reading_client, writing_client,
 };
 use retp_proto::describe::OfferDescription;
 use retp_proto::negotiate::protocol_name;
@@ -153,10 +153,9 @@ struct Server {
     rest: bool,
     #[command(flatten)]
     login: LoginArgs,
-    /// An OSDU data partition: talks to the server as OSDU's Reservoir DDMS,
-    /// which wants a `data-partition-id` header. The same as
-    /// `--header data-partition-id=VALUE`.
-    #[arg(long)]
+    /// Gone: the data partition is a header (`--header data-partition-id=VALUE`).
+    /// Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
     /// A header the server wants in addition, as `NAME=VALUE`; repeat the
     /// option for several. It goes with every request to the server: the
@@ -177,7 +176,7 @@ struct Server {
     #[arg(long)]
     ack: bool,
     /// Connect as a front end can: no header at all - ETP's attributes, the
-    /// OSDU partition and every `--header` in the query string, the
+    /// headers of `--header` in the query string, the
     /// credentials in an `Authorize` once connected (§4.1.4.1, §4.3.2). A
     /// header that carries a secret is refused: it would be written in the
     /// URL. Says whether a server will take the front end.
@@ -202,7 +201,7 @@ struct Server {
     /// 4 by default; `1` sends them one after the other.
     #[arg(long, alias = "parallel", value_name = "N")]
     at_once: Option<usize>,
-    /// A server of the catalogue (`retp server list`) instead of a URL: its URL, partition,
+    /// A server of the catalogue (`retp server list`) instead of a URL: its URL, headers,
     /// login and options come from its entry. `retp NAME COMMAND` and `retp @NAME COMMAND`
     /// mean the same. Read before the arguments are parsed, so this field is never set.
     #[arg(long, short = 's', alias = "serveur", value_name = "NAME")]
@@ -289,17 +288,11 @@ impl LoginArgs {
 }
 
 impl Server {
-    fn profile(&self) -> ServerProfile {
-        match &self.partition {
-            Some(data_partition) => ServerProfile::Rddms {
-                data_partition: data_partition.clone(),
-            },
-            None => ServerProfile::Standard,
-        }
-    }
-
     /// The `--header` options as the library's list, which checks each one.
     fn headers(&self) -> Result<ExtraHeaders> {
+        if self.partition.is_some() {
+            anyhow::bail!(catalog_cli::PARTITION_IS_A_HEADER);
+        }
         Ok(ExtraHeaders::from_pairs(catalog_cli::pairs(
             &self.headers,
             "--header",
@@ -320,7 +313,6 @@ impl Server {
         };
         let mut endpoint = Endpoint {
             url: self.url.clone(),
-            profile: self.profile(),
             headers: self.headers()?,
             credentials: None,
             certificates,
@@ -332,9 +324,7 @@ impl Server {
         };
         // What the headers refuse is said before anything is asked of the
         // network: the login costs a request. REST always sends headers.
-        if self.rest {
-            endpoint.additions()?;
-        } else {
+        if !self.rest {
             endpoint.sendable()?;
         }
         for warning in [plain_text_warning(&self.url), certificates.warning(&self.url)]
@@ -468,7 +458,7 @@ impl Server {
                 );
             }
         }
-        let mut client = native::rest_client(&self.endpoint()?)?;
+        let mut client = native::rest_client(&self.endpoint()?);
         if let Some(at_once) = self.at_once {
             client = client.with_at_once(at_once);
         }
@@ -2522,21 +2512,32 @@ mod tests {
         const SECRET: &str = "s3cret-of-the-client";
         const KEY: &str = "k3y-of-the-header";
         let key = format!("x-api-key={KEY}");
-        let cases: [(&[&str], &str); 3] = [
+        let cases: [(&[&str], &str); 5] = [
             // The partition is a header: given twice.
             (
-                &["--partition", "opendes", "--header", "data-partition-id=other"],
+                &[
+                    "--header",
+                    "data-partition-id=opendes",
+                    "--header",
+                    "data-partition-id=other",
+                ],
                 "data-partition-id",
             ),
             (
                 &[
                     "--rest",
-                    "--partition",
-                    "opendes",
+                    "-H",
+                    "data-partition-id=opendes",
                     "-H",
                     "data-partition-id=other",
                 ],
                 "data-partition-id",
+            ),
+            // The option of before is gone, and says what to write.
+            (&["--partition", "opendes"], "--header data-partition-id=VALUE"),
+            (
+                &["--rest", "--partition", "opendes"],
+                "--header data-partition-id=VALUE",
             ),
             // A front end has no header: a secret would be written in the URL.
             (&["--as-browser", "--header", &key], "x-api-key"),

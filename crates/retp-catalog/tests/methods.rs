@@ -5,9 +5,9 @@
 use retp_catalog::{
     AuthSpec, CatalogError, Entry, Handshake, OsSecrets, Overrides, SecretRef, ServerSpec, Tls,
 };
+use retp_client::ExtraHeaders;
 use retp_client::login::{Login, azure_token_url};
 use retp_client::native::CertificateCheck;
-use retp_client::{ExtraHeaders, ServerProfile};
 use retp_proto::probe::Profile;
 
 use crate::common::{CANARY, MemorySecrets};
@@ -252,9 +252,8 @@ fn credentials_go_to_the_entrys_own_urls_only() {
 }
 
 #[test]
-fn the_command_line_settles_partition_certificate_and_handshake() {
+fn the_command_line_settles_certificate_and_handshake() {
     let mut server = ServerSpec::etp(URL);
-    server.partition = Some("from-entry".into());
     server.tls = Tls::Skip;
     let entry = Entry::new(server.clone(), AuthSpec::None);
 
@@ -262,9 +261,6 @@ fn the_command_line_settles_partition_certificate_and_handshake() {
         .resolve("t", &secrets(), &Overrides::default())
         .expect("resolved");
     let endpoint = from_entry.endpoint(None);
-    assert!(
-        matches!(&endpoint.profile, ServerProfile::Rddms { data_partition } if data_partition == "from-entry")
-    );
     assert_eq!(endpoint.certificates, CertificateCheck::Skip);
     assert!(matches!(endpoint.handshake, Profile::Native));
     assert_eq!(endpoint.url, URL);
@@ -274,16 +270,12 @@ fn the_command_line_settles_partition_certificate_and_handshake() {
             "t",
             &secrets(),
             &Overrides {
-                partition: Some("from-line".into()),
                 as_browser: true,
                 ..Overrides::default()
             },
         )
         .expect("resolved");
     let endpoint = overridden.endpoint(None);
-    assert!(
-        matches!(&endpoint.profile, ServerProfile::Rddms { data_partition } if data_partition == "from-line")
-    );
     assert!(matches!(endpoint.handshake, Profile::Browser));
 
     server.tls = Tls::Verify;
@@ -363,12 +355,7 @@ fn the_headers_of_an_entry_go_with_the_endpoint() {
     let opened = resolved.obtain_endpoint().expect("no login to do");
     assert_eq!(&opened.endpoint.headers, resolved.headers());
     assert_eq!(
-        opened
-            .endpoint
-            .additions()
-            .expect("sendable")
-            .iter()
-            .collect::<Vec<_>>(),
+        opened.endpoint.headers.iter().collect::<Vec<_>>(),
         [("x-routing", "tok"), ("x-tenant", "acme")]
     );
     // And no value is shown, the literal no more than the one read.
@@ -414,14 +401,18 @@ fn the_command_line_adds_its_headers_to_the_entry_s() {
 }
 
 #[test]
-fn the_partition_is_not_given_a_second_time_as_a_header() {
-    // On the line: `--partition` and `--header data-partition-id=…`.
-    let error = Entry::new(ServerSpec::etp(URL), AuthSpec::None)
+fn the_partition_is_a_header_like_any_other_and_is_not_given_twice() {
+    // The entry's header and the line's.
+    let mut entry = Entry::new(ServerSpec::etp(URL), AuthSpec::None);
+    entry.headers = vec![retp_catalog::Header {
+        name: "data-partition-id".into(),
+        value: retp_catalog::HeaderValue::Literal("opendes".into()),
+    }];
+    let error = entry
         .resolve(
             "t",
             &secrets(),
             &Overrides {
-                partition: Some("opendes".into()),
                 headers: line(&[("Data-Partition-Id", "another")]),
                 ..Overrides::default()
             },
@@ -433,22 +424,14 @@ fn the_partition_is_not_given_a_second_time_as_a_header() {
         "{said}"
     );
 
-    // The entry's partition and the line's header.
-    let mut server = ServerSpec::etp(URL);
-    server.partition = Some("opendes".into());
-    let error = Entry::new(server, AuthSpec::None)
-        .resolve(
-            "t",
-            &secrets(),
-            &Overrides {
-                headers: line(&[("data-partition-id", "another")]),
-                ..Overrides::default()
-            },
-        )
-        .expect_err("refused by name");
-    assert!(error.to_string().contains("data-partition-id"), "{error}");
-
-    // As a header alone, it is the partition: the endpoint sends it once.
+    // Given once, by the entry or by the line, the endpoint sends it.
+    let resolved = entry
+        .resolve("t", &secrets(), &Overrides::default())
+        .expect("resolved");
+    assert_eq!(
+        resolved.endpoint(None).headers.iter().collect::<Vec<_>>(),
+        [("data-partition-id", "opendes")]
+    );
     let resolved = Entry::new(ServerSpec::etp(URL), AuthSpec::None)
         .resolve(
             "t",
@@ -460,12 +443,7 @@ fn the_partition_is_not_given_a_second_time_as_a_header() {
         )
         .expect("resolved");
     assert_eq!(
-        resolved
-            .endpoint(None)
-            .additions()
-            .expect("sendable")
-            .iter()
-            .collect::<Vec<_>>(),
+        resolved.endpoint(None).headers.iter().collect::<Vec<_>>(),
         [("data-partition-id", "opendes")]
     );
 }

@@ -42,7 +42,17 @@ fn a_valid_file_is_read() {
     );
     let entry = Entry::parse(&text).expect("valid");
     assert_eq!(entry.aliases, ["az"]);
-    assert_eq!(entry.server.partition.as_deref(), Some("opendes"));
+    // `partition` under `[server]` is the spelling of older files: it is read as the header, and written back as one.
+    assert_eq!(
+        entry.headers,
+        [Header {
+            name: "data-partition-id".into(),
+            value: HeaderValue::Literal("opendes".into()),
+        }]
+    );
+    let written = entry.to_toml();
+    assert!(!written.contains("partition = "), "{written}");
+    assert_eq!(Entry::parse(&written).expect("valid"), entry);
     match entry.auth {
         AuthSpec::Azure { client_secret, .. } => {
             assert_eq!(
@@ -182,7 +192,8 @@ fn a_header_that_looks_secret_takes_a_reference_and_not_a_literal() {
     let reference =
         file("[auth]\nmethod = \"none\"\n[headers]\nx-api-key = { env = \"KEY\" }\nx-trace = \"on\"\n");
     let entry = Entry::parse(&reference).expect("valid");
-    assert_eq!(entry.headers.len(), 2);
+    // The two of the file, and the data partition of the test server.
+    assert_eq!(entry.headers.len(), 3);
 }
 
 #[test]
@@ -210,7 +221,7 @@ fn a_header_the_client_could_not_send_is_refused_when_the_file_is_read() {
         !message.contains("x-injected"),
         "the value is not shown: {message}"
     );
-    // The data partition is `partition`, given once (the test server has one).
+    // The data partition of an older file (`partition`, which the test server has) and the header: one of the two.
     let message = refusal(&with("Data-Partition-Id = \"another\""));
     assert!(
         message.contains("Data-Partition-Id") && message.contains("partition"),
@@ -219,14 +230,19 @@ fn a_header_the_client_could_not_send_is_refused_when_the_file_is_read() {
     // Without `partition`, the header is the partition, like any other header.
     let alone = with("data-partition-id = \"opendes\"").replace("partition = \"opendes\"\n", "");
     let entry = Entry::parse(&alone).expect("valid");
-    assert_eq!(entry.server.partition, None);
     assert_eq!(entry.headers.len(), 1);
+    // An empty `partition` is still refused.
+    let message =
+        refusal(&with("x-tenant = \"acme\"").replace("partition = \"opendes\"", "partition = \"\""));
+    assert!(
+        message.contains("partition") && message.contains("empty"),
+        "{message}"
+    );
 }
 
 fn full(auth: AuthSpec) -> Entry {
     let mut server = ServerSpec::etp("wss://h.example.com/etp");
     server.rest_url = Some("https://h.example.com/rest".into());
-    server.partition = Some("opendes".into());
     server.tls = Tls::Skip;
     server.handshake = Handshake::Browser;
     server.protected = true;

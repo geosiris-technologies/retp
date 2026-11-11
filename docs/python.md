@@ -38,7 +38,7 @@ with retp.connect("wss://etp.example.org/", token=token) as session:
 |---|---|
 | `url` | `ws://` or `wss://` URL of the ETP endpoint. A REST URL is refused by name (`retp.Unsupported`); the REST transport is not bridged yet |
 | `token` | an OAuth 2.0 bearer token, without its scheme. It is handed to the Rust client and kept nowhere else: not in `repr`, not in `url`, not in an error |
-| `partition` | an OSDU data partition: talks to the server as OSDU's Reservoir DDMS |
+| `partition` | an OSDU data partition, for OSDU's Reservoir DDMS: sent as the header `data-partition-id`. The other headers a server may want are not bridged yet |
 | `insecure` | do not check the certificate (said in `session.warnings`) |
 | `writing` | announce that this session writes (adds the Transaction protocol). A session without it refuses to write, by name |
 | `types` | qualified types to ask for (`resqml22.*`); every release when empty, plus what the server announces |

@@ -59,10 +59,10 @@ pub use crate::convert::arrays::values_of;
 
 /// Blocks and declarations of arrays, for the writer.
 mod blocks;
-/// The reading additions on a dataspace: what the server states (store times,
-/// edge kinds), contexts answered natively, objects as bytes, deletions.
 mod containment;
 pub mod convert;
+/// The reading additions on a dataspace: what the server states (store times,
+/// edge kinds), contexts answered natively, objects as bytes, deletions.
 pub mod discovery;
 pub mod pack;
 pub mod push;

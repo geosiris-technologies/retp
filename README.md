@@ -84,9 +84,25 @@ A Python client over the Rust stack: sessions, dataspaces, EnergyML objects as
 dictionaries, arrays as numpy arrays. It carries nothing the Rust library does
 not have. See [docs/python.md](docs/python.md).
 
+## Claude Code plugin
+
+A [Claude Code](https://code.claude.com) plugin, `retp`, teaches Claude to work with ETP servers
+through the `retp` command line - probe, list, read, download as EPC, check conformance, serve
+a dataspace over MCP - without a credential ever passing through the conversation, and with no
+write to a server unless the user says yes. It lives in
+[geosiris-technologies/claude-plugins](https://github.com/geosiris-technologies/claude-plugins):
+
+```sh
+claude plugin marketplace add geosiris-technologies/claude-plugins
+claude plugin install retp@geosiris-technologies
+```
+
+See [docs/claude-plugin.md](docs/claude-plugin.md).
+
 ## Documentation
 
 - [Library usage](docs/client.md), [command line](docs/cli.md) and [Docker](docs/docker.md)
+- [The Claude Code plugin](docs/claude-plugin.md)
 - [What the conformance checker judges](docs/conformance.md)
 - [Architecture decisions](docs/adr/README.md)
 

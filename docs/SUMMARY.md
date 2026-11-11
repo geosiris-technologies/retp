@@ -3,6 +3,7 @@
 - [Library usage](client.md)
 - [Command line](cli.md)
 - [MCP server](mcp.md)
+- [Claude Code plugin](claude-plugin.md)
 - [Docker](docker.md)
 - [Conformance checker](conformance.md)
 - [Python bridge](python.md)

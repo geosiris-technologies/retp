@@ -9,6 +9,8 @@
 //! | `dataspaces` | Dataspace (24), `GetDataspaces` |
 //! | `resources`, `headers` | Discovery (3), `GetResources` - a header's title is the resource's name, no object is read |
 //! | `get_objects` | Store (4), `GetDataObjects`, then the registry |
+//! | `references` | the objects that hold nothing by value (the parts), read once each; see `containment.rs` |
+//! | `contained_in`, `Edge::by_value` | derived, proved from the container's own text; see `containment.rs` |
 //! | `supported_types` | SupportedTypes (25), `GetSupportedTypes` |
 //! | `arrays_of` | nothing: `energyml_storage::array::locate_with` over the object, proxies resolved from the listing |
 //! | `array_metadata`, `read_array` | DataArray (9), metadata first, then whole or by sub-arrays |
@@ -57,9 +59,10 @@ pub use crate::convert::arrays::values_of;
 
 /// Blocks and declarations of arrays, for the writer.
 mod blocks;
+mod containment;
+pub mod convert;
 /// The reading additions on a dataspace: what the server states (store times,
 /// edge kinds), contexts answered natively, objects as bytes, deletions.
-pub mod convert;
 pub mod discovery;
 pub mod pack;
 pub mod push;
@@ -81,6 +84,9 @@ pub struct EtpStore<T: Transport, C: Clock> {
     registry: Arc<Registry>,
     mode: ReadMode,
     listing: Mutex<Option<Vec<Resource>>>,
+    /// What the dataspace holds by value, derived from the listing, the edges
+    /// and the containers (`containment.rs`); forgotten with the listing.
+    containment: Mutex<Option<Arc<containment::Containment>>>,
     diagnostics: Mutex<Vec<Diagnostic>>,
     /// The transaction `EnergymlWriter::begin` opened on the server, if any:
     /// its `transactionUuid` and what was asked.
@@ -150,6 +156,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
             registry,
             mode: ReadMode::Tolerant,
             listing: Mutex::new(None),
+            containment: Mutex::new(None),
             diagnostics: Mutex::new(Vec::new()),
             writer_transaction: None,
             write_format: push::WriteFormat::Xml,
@@ -317,7 +324,7 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
         let mut out = Vec::with_capacity(listed.len());
         for resource in &listed {
             match self.summary(resource) {
-                Some(summary) => out.push(summary),
+                Some(summary) => out.push(self.with_containers(summary)),
                 None => self.record(Diagnostic::warning(
                     &resource.uri,
                     "listed, and not a data object URI this store can address; left out",
@@ -347,7 +354,7 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
                 })?;
                 let object_version = EtpUri::parse(uri).ok().and_then(|u| u.object_version);
                 Ok({
-                    let mut header = ObjectHeader::new(summary);
+                    let mut header = ObjectHeader::new(self.with_containers(summary));
                     header.title = Some(resource.name.clone()).filter(|t| !t.is_empty());
                     header.object_version = object_version;
                     header
@@ -357,44 +364,7 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
     }
 
     async fn get_objects(&self, uris: &[String]) -> Vec<Result<Box<dyn DynObject>>> {
-        // Discovery and Store take canonical URIs (§3.7.4): anything else is
-        // that URI's own error, and the others are still asked.
-        let (asked, refused_here): (Vec<&String>, Vec<&String>) = uris
-            .iter()
-            .partition(|uri| check_uri(uri, UriUse::CanonicalOnly, false).is_ok());
-        let wanted: Vec<String> = asked.into_iter().cloned().collect();
-        let answers = if wanted.is_empty() {
-            Ok(Default::default())
-        } else {
-            retp_client::blocking(get_data_objects_in_batches(
-                &mut *self.client(),
-                &wanted,
-                "xml",
-                pack::BATCH,
-            ))
-        };
-        let answers = match answers {
-            Ok(answers) => answers,
-            Err(why) => {
-                let reason = why.to_string();
-                return uris.iter().map(|_| Err(remote(&reason))).collect();
-            }
-        };
-        uris.iter()
-            .map(|uri| {
-                if refused_here.contains(&uri) {
-                    return Err(Error::BadUri {
-                        uri: uri.clone(),
-                        reason: "not a canonical URI (§3.7.4)".into(),
-                    });
-                }
-                match answers.get(uri) {
-                    Some(Ok(object)) => self.read(uri, &object.data),
-                    Some(Err(error)) => Err(refused(uri, error)),
-                    None => Err(Error::NotFound(uri.clone())),
-                }
-            })
-            .collect()
+        self.read_objects(uris)
     }
 
     async fn supported_types(&self) -> Vec<&'static TypeInfo> {
@@ -585,6 +555,12 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlStorage for EtpStore<T, C> {
         self.native_resources_in(context)
     }
 
+    /// The references the objects write, the contained objects' own
+    /// attributed to them and none repeated (`containment.rs`).
+    async fn references(&self, uris: &[String]) -> Result<Vec<energyml_storage::graph::Edge>> {
+        self.native_references(uris)
+    }
+
     /// One request instead of reading every object: what the storage trait
     /// asks an ETP client to do.
     async fn edges(&self, uris: &[String]) -> Result<Vec<energyml_storage::graph::Edge>> {
@@ -647,4 +623,50 @@ pub fn read_object(
     said.extend(departures.defaulted.into_iter().map(|item| item.to_string()));
     said.extend(departures.repaired.into_iter().map(|item| item.to_string()));
     Ok((object, said))
+}
+
+impl<T: Transport, C: Clock> EtpStore<T, C> {
+    /// `GetDataObjects` for each URI, one result per URI in order: the
+    /// synchronous door of `get_objects`, also used by the code that derives a
+    /// fact from the objects themselves (containment).
+    pub(crate) fn read_objects(&self, uris: &[String]) -> Vec<Result<Box<dyn DynObject>>> {
+        // Discovery and Store take canonical URIs (§3.7.4): anything else is
+        // that URI's own error, and the others are still asked.
+        let (asked, refused_here): (Vec<&String>, Vec<&String>) = uris
+            .iter()
+            .partition(|uri| check_uri(uri, UriUse::CanonicalOnly, false).is_ok());
+        let wanted: Vec<String> = asked.into_iter().cloned().collect();
+        let answers = if wanted.is_empty() {
+            Ok(Default::default())
+        } else {
+            retp_client::blocking(get_data_objects_in_batches(
+                &mut *self.client(),
+                &wanted,
+                "xml",
+                pack::BATCH,
+            ))
+        };
+        let answers = match answers {
+            Ok(answers) => answers,
+            Err(why) => {
+                let reason = why.to_string();
+                return uris.iter().map(|_| Err(remote(&reason))).collect();
+            }
+        };
+        uris.iter()
+            .map(|uri| {
+                if refused_here.contains(&uri) {
+                    return Err(Error::BadUri {
+                        uri: uri.clone(),
+                        reason: "not a canonical URI (§3.7.4)".into(),
+                    });
+                }
+                match answers.get(uri) {
+                    Some(Ok(object)) => self.read(uri, &object.data),
+                    Some(Err(error)) => Err(refused(uri, error)),
+                    None => Err(Error::NotFound(uri.clone())),
+                }
+            })
+            .collect()
+    }
 }

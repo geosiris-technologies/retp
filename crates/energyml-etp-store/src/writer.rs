@@ -93,6 +93,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     /// Forget what the dataspace was last listed as holding.
     fn forget_listing(&self) {
         *self.listing.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.containment.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Refuse a write inside a transaction that only reads.

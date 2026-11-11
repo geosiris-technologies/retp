@@ -459,6 +459,7 @@ dependencies = [
  "energyml-geometry",
  "energyml-resqml-2-0-1",
  "energyml-resqml-2-2",
+ "energyml-schemas",
  "energyml-storage",
  "futures-executor",
  "retp-avro",

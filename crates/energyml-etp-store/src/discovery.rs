@@ -316,14 +316,14 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
         let mut resources = Vec::with_capacity(gathered.resources.len());
         for resource in &gathered.resources {
             match self.summary_of(resource) {
-                Some(summary) => resources.push(summary),
+                Some(summary) => resources.push(self.with_containers(summary)),
                 None => self.record(Diagnostic::warning(
                     &resource.uri,
                     "listed, and not a data object URI this store can address; left out",
                 )),
             }
         }
-        let edges = self.convert_edges(&gathered.edges);
+        let edges = self.mark_containment(self.convert_edges(&gathered.edges));
         let held: HashSet<&str> = resources.iter().map(|summary| summary.uri.as_str()).collect();
         let (kept, dropped): (Vec<Edge>, Vec<Edge>) = edges
             .into_iter()
@@ -343,6 +343,13 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
         Ok(found)
     }
 
+    /// `edges`: [`EtpStore::stated_edges`], the by-value containments among
+    /// them marked ([`EtpStore::mark_containment`]).
+    pub(crate) fn native_edges(&self, uris: &[String]) -> Result<Vec<Edge>> {
+        let stated = self.stated_edges(uris)?;
+        Ok(self.mark_containment(stated))
+    }
+
     /// `edges`: the edges the server states, from its own index and no object
     /// read.
     ///
@@ -352,7 +359,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     /// that object - what deriving them from the object's references gives. An
     /// object the server does not have is that URI's `NotFound`, where the
     /// derived default would leave it out silently.
-    pub(crate) fn native_edges(&self, uris: &[String]) -> Result<Vec<Edge>> {
+    pub(crate) fn stated_edges(&self, uris: &[String]) -> Result<Vec<Edge>> {
         if uris.is_empty() {
             let context = Context::dataspace(self.dataspace.clone());
             let request = resources_request(&context, true)?;

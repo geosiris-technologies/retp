@@ -8,9 +8,9 @@
 //! `<thing>_from_etp` and `<thing>_to_etp`, side by side, and the tests play every pair
 //! both ways (`tests/convert_objects.rs`, `tests/convert_arrays.rs`).
 //!
-//! - [`objects`](crate::convert::objects): resources, edges, dataspaces, contexts, supported types, deleted
+//! - [`objects`]: resources, edges, dataspaces, contexts, supported types, deleted
 //!   resources, errors;
-//! - [`arrays`](crate::convert::arrays): array metadata, identifiers and locations, array values.
+//! - [`arrays`]: array metadata, identifiers and locations, array values.
 
 pub mod arrays;
 pub mod objects;

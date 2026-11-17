@@ -191,6 +191,28 @@ fn an_edge_of_unstated_kind_is_the_inverse_of_both_and_is_refused_when_checked()
     ));
 }
 
+// Break it: make `edge_to_etp_checked` refuse every edge whose `basis` is `Default`
+// (the kind a store gives where no rule applies), or send `Secondary` for it.
+#[test]
+fn an_edge_the_library_gives_a_default_kind_is_stated_as_primary_and_one_it_leaves_unknown_is_refused() {
+    use energyml_storage::kinds::Judged;
+    // energyml 0.4: every edge a store judges has a kind, primary by default
+    // where no rule applies, labelled so (`KindBasis::Default`).
+    let by_default = Edge::new(points_uri(), crs_uri(), "Grid2dPatch.SupportingRepresentation")
+        .with_judgement(Judged::by_default("no rule applies"));
+    assert_eq!(by_default.kind, Some(EdgeKind::Primary));
+    assert!(by_default.basis.as_ref().is_some_and(|basis| basis.is_default()));
+    let etp = edge_to_etp_checked(&by_default).unwrap();
+    assert_eq!(etp.relationship_kind, RelationshipKind::Primary);
+    // A caller's rules may still leave a kind unknown: refused by name, never guessed.
+    let unknown = Edge::new(points_uri(), crs_uri(), "").with_judgement(Judged::unknown("no rule"));
+    assert_eq!(unknown.kind, None);
+    assert!(matches!(
+        edge_to_etp_checked(&unknown),
+        Err(Error::Unsupported { .. })
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Dataspaces
 // ---------------------------------------------------------------------------

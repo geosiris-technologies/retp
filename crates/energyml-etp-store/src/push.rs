@@ -461,12 +461,8 @@ pub fn well_known_kinds(
 /// citation the dictionary carries on every kind, the fields the compaction
 /// kept. What the compaction dropped (the description) is not made up.
 fn kind_xml(kind: &energyml_domain::property_kind::DictionaryKind) -> String {
-    let escape = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
+    // The one door for XML text written by hand (core's `xml::escape_attr`).
+    let escape = energyml_core::xml::escape_attr;
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <eml:PropertyKind xmlns:eml=\"http://www.energistics.org/energyml/data/commonv2\" schemaVersion=\"2.3\" uuid=\"{}\">\

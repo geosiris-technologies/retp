@@ -118,12 +118,7 @@ fn refused(uri: &str, error: &ErrorInfo) -> Error {
 
 /// `resqml20.obj_PointSetRepresentation` from a canonical object URI.
 pub(crate) fn qualified_type_of(uri: &EtpUri) -> Option<String> {
-    Some(format!(
-        "{}{}.{}",
-        uri.domain.as_deref()?,
-        uri.version.as_deref()?,
-        uri.object_type.as_deref()?
-    ))
+    uri.qualified_type().map(|qualified| qualified.to_string())
 }
 
 /// The storage's name for an element type.

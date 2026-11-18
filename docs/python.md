@@ -208,7 +208,75 @@ is an array's, `code` the ETP error code the store answered with (`None` when
 the refusal is this side's, an array that could not be read). A
 `ProtocolException` that answered the whole request is every object's answer.
 `report["stopped"]` quotes the first in a sentence; read the list, not the
-sentence.
+sentence. Each refusal also carries `"cause"`, what its words name (below).
+
+`report["stop"]` says why the push stopped, sorted for a program to act on:
+`None` when every island went through, or
+
+```python
+{
+    "island": 3,              # its rank in report["islands"]
+    "kind": "refused",        # "refused", "failed", "timeout", "gave_up" or "journal"
+    "message": "2 Missing reference(s)",  # a refusal: the store's own words
+    "code": None,             # the ETP error code, when there is one
+    "cause": {"kind": "missing_reference", "count": 2, "space": None},
+    "candidates": [(from_uri, to_uri), ...],
+}
+```
+
+- `kind`: `timeout` is a request with no answer in time (the session may still
+  stand); `failed` is a connection that fell or a session that closed;
+  `gave_up`, a push that reconnected as many times as allowed; `journal`, a
+  journal that would not serve;
+- `message`: for a refusal, the store's words **alone**, without the hint
+  `report["stopped"]` may add about the references that leave the package;
+- `cause` (a refusal only, `None` otherwise) is read from those words, and only
+  from the messages open-etp-server (the OSDU Reservoir DDMS server) is
+  documented in its sources to use at commit or on a write outside a
+  transaction: `missing_reference` (`count`, and `space` outside a
+  transaction), `orphan_reference`, `missing_array`, `orphan_array` (with
+  `count`), `missing_array_container` (with `containers`). Any other words are
+  `{"kind": "unknown"}`: nothing is guessed for another server;
+- `candidates`, for a missing reference: the `report["dangling"]` pairs whose
+  `from` is in the island that stopped. **This is the client's deduction, not
+  the server's statement** (the server counts the missing references and names
+  none): every target the package holds is sent before what references it, so
+  a reference from that island can only miss when its target leaves the
+  package, and every such reference is in `dangling`, `only=` included. A target
+  already in the dataspace is not missing, so there may be more candidates than
+  the server counts.
+
+`report["stopped"]` is unchanged, for the code that reads it.
+
+### The plan, without a session
+
+`retp.plan_push` says what `push_epc` would send, with no session and nothing
+written: the package is read, written and weighed as the push does it, and
+planned by the same code (`energyml_etp_store::push::dry_run`).
+
+```python
+plan = retp.plan_push("model.epc", "demo", objects_per_island=50, journal="model.push.jsonl")
+for rank, island in enumerate(plan["islands"]):
+    print(rank, island["objects"], island["arrays"], island["bytes"], island["cycles"])
+    for source_uri, there in zip(island["uris"], island["destinations"]):
+        print("   ", source_uri, "->", there)
+print(plan["left_out"], plan["dangling"], plan["skipped"])
+```
+
+Its keywords are `push_epc`'s, with the same defaults, for what decides the
+plan: `objects_per_island`, `bytes_per_island`, `only`, `well_known`, `json`,
+`journal`. The dataspace is required: the destination URIs are in it, and a
+journal is kept for one dataspace. A journal is read, never created nor
+repaired; what it records is left out, in `plan["skipped"]`. `skip_present`
+needs the server and raises `ValueError`.
+
+Each island is a row of `report["islands"]` (`"state"` is `"planned"`), with
+`"destinations"`: its objects' URIs in the dataspace, in the order of `"uris"`
+(the package's). The rows of a push's report and of a plan both carry
+`"objects"`, `"units"` (one object, or one cycle: a unit of more than one
+object is a cycle) and `"cycles"` (the URIs of each cycle). A cycle is always
+sent whole, whatever the budget. A push follows the plan unless the store
+refuses an island and `split=` cuts it, or the connection keeps falling on one.
 
 `put_objects` and `push_epc` take the command line's `push-epc` options:
 

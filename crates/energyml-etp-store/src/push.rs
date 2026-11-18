@@ -61,6 +61,19 @@
 //! because a model half sent is acceptable, but because carrying on would
 //! send islands whose references point at the one that failed.
 //!
+//! [`Report::diagnosis`] sorts the stop for a caller that acts on it: its
+//! kind (refused, failed, timed out, gave up, journal), the store's own words
+//! and code apart from the hint this side adds, what those words name when a
+//! known server is documented to use them ([`Cause`]), and, for a missing
+//! reference, the references that may be missing ([`Diagnosis::candidates`]).
+//!
+//! # The plan, without a session
+//!
+//! [`dry_run`] is the same push up to the point where it would ask the
+//! destination anything: the islands it would send, with their cycles, their
+//! objects' URIs in the destination, what is left out and what leaves the
+//! source - one code path, so that the plan is the one the push follows.
+//!
 //! # Starting again
 //!
 //! Four things, each the caller's choice and each off by default, make a
@@ -305,12 +318,45 @@ pub struct Weight {
 /// One transaction's worth of objects.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Island {
-    /// In the order they are sent - targets before sources.
+    /// In the order they are sent - targets before sources -, each by its
+    /// URI in the **source**.
     pub uris: Vec<String>,
     /// What they weigh together.
     pub bytes: u64,
     /// How many arrays go with them.
     pub arrays: usize,
+    /// The sizes of the units the island is made of, in the order of
+    /// `uris`: a unit is one object, or one **cycle** - objects that
+    /// reference each other, which no order can send apart and no
+    /// [`Split`] cuts. A unit of more than one object is a cycle; they add
+    /// up to `uris.len()`. Empty for an island built by hand, which then
+    /// says nothing of its cycles.
+    pub units: Vec<usize>,
+}
+
+impl Island {
+    /// The URIs of each unit, in order (see [`Island::units`]).
+    pub fn unit_uris(&self) -> Vec<&[String]> {
+        let mut at = 0;
+        let mut out = Vec::with_capacity(self.units.len());
+        for &size in &self.units {
+            let Some(unit) = self.uris.get(at..at + size) else {
+                break;
+            };
+            out.push(unit);
+            at += size;
+        }
+        out
+    }
+
+    /// The cycles of the island - its units of more than one object -, each
+    /// by its URIs in the source, in order.
+    pub fn cycles(&self) -> Vec<&[String]> {
+        self.unit_uris()
+            .into_iter()
+            .filter(|unit| unit.len() > 1)
+            .collect()
+    }
 }
 
 /// Cut a store into islands. Pure: the graph and the weights in, the plan
@@ -318,6 +364,7 @@ pub struct Island {
 ///
 /// `resources` gives the order ties are broken in - the source's own -, and
 /// every object of `weights` that the resources do not list is left out.
+/// Each island says which of its objects form a cycle ([`Island::units`]).
 pub fn islands(
     resources: &[ObjectSummary],
     graph: &Graph,
@@ -325,19 +372,15 @@ pub fn islands(
     budget: &Budget,
 ) -> Vec<Island> {
     plan(resources, graph, weights, budget)
-        .into_iter()
-        .map(|(island, _)| island)
-        .collect()
 }
 
-/// [`islands`], each with the sizes of the units it is made of, in order: a
-/// unit is one object, or one cycle - what a [`Split`] never cuts.
+/// [`islands`]: the one function both [`push`] and [`dry_run`] plan with.
 fn plan(
     resources: &[ObjectSummary],
     graph: &Graph,
     weights: &BTreeMap<String, Weight>,
     budget: &Budget,
-) -> Vec<(Island, Vec<usize>)> {
+) -> Vec<Island> {
     let uris: Vec<&str> = resources.iter().map(|one| one.uri.as_str()).collect();
     let index: BTreeMap<&str, usize> = uris.iter().enumerate().map(|(i, uri)| (*uri, i)).collect();
     // `from` references `to`: an edge, in the direction a reference points.
@@ -411,7 +454,7 @@ fn plan(
         }
     }
 
-    let mut out: Vec<(Island, Vec<usize>)> = Vec::new();
+    let mut out: Vec<Island> = Vec::new();
     for c in order {
         let component = &components[c];
         let weight = weigh(component);
@@ -422,17 +465,17 @@ fn plan(
         };
         let open = match out.last() {
             // The kind changing cuts an island; the order is never touched.
-            Some((last, _)) if (last.arrays > 0) == carries && fits(last) => true,
+            Some(last) if (last.arrays > 0) == carries && fits(last) => true,
             _ => false,
         };
         if !open {
-            out.push((Island::default(), Vec::new()));
+            out.push(Island::default());
         }
-        let (island, units) = out.last_mut().expect("just pushed");
+        let island = out.last_mut().expect("just pushed");
         island.uris.extend(component.iter().map(|&i| uris[i].to_string()));
         island.bytes += weight.bytes;
         island.arrays += weight.arrays;
-        units.push(component.len());
+        island.units.push(component.len());
     }
     out
 }
@@ -440,12 +483,8 @@ fn plan(
 /// An island cut into pieces, its units never apart: `None` when it is one
 /// unit - one object, or one cycle -, which nothing can cut. The pieces keep
 /// the island's order, so targets still go before sources.
-fn cut(
-    island: &Island,
-    units: &[usize],
-    weights: &BTreeMap<String, Weight>,
-    how: Split,
-) -> Option<Vec<(Island, Vec<usize>)>> {
+fn cut(island: &Island, weights: &BTreeMap<String, Weight>, how: Split) -> Option<Vec<Island>> {
+    let units = &island.units;
     if units.len() < 2 {
         return None;
     }
@@ -468,7 +507,12 @@ fn cut(
                 let w = weights.get(uri).copied().unwrap_or_default();
                 (bytes + w.bytes, arrays + w.arrays)
             });
-            (Island { uris, bytes, arrays }, group)
+            Island {
+                uris,
+                bytes,
+                arrays,
+                units: group,
+            }
         })
         .collect();
     Some(pieces)
@@ -742,6 +786,233 @@ pub struct Stopped {
     pub island: usize,
     /// Why.
     pub why: Stop,
+    /// What the store said when it refused, **in its own words and alone** -
+    /// [`Stop::Refused`] may add this side's hint to them ([`Report::dangling`]),
+    /// this never does. `None` when the stop is not the store's refusal, or
+    /// when the refusal is this side's (a conflict, a listing cut short).
+    pub said: Option<Said>,
+}
+
+/// What a store said when it refused: its words, and its code when it gave one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Said {
+    /// The ETP error code (`ErrorInfo.code`, ETP v1.2 section 24.1) - `None`
+    /// for a refused commit or transaction, whose answer carries a reason
+    /// and no code (`CommitTransactionResponse.failureReason`), or for a
+    /// refusal of an array this side could not read.
+    pub code: Option<i32>,
+    /// The words, as they came (`retp_client` replaces an empty reason by
+    /// a sentence of its own saying so).
+    pub message: String,
+}
+
+/// The kind of a stop, for a caller that acts on it rather than reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopKind {
+    /// The store refused ([`Stop::Refused`]).
+    Refused,
+    /// The client could not go on ([`Stop::Failed`]), for another reason than
+    /// a request that timed out: the connection fell, the session closed.
+    Failed,
+    /// A request had no answer in time (`ClientError::TimedOut`): the session
+    /// may still stand, and the island's outcome is unknown.
+    Timeout,
+    /// [`push_resumable`] reopened the session as many times as it was
+    /// allowed to ([`Stop::GaveUp`]).
+    GaveUp,
+    /// The journal would not serve ([`Stop::Journal`]).
+    Journal,
+}
+
+impl StopKind {
+    /// Its name in a report: `refused`, `failed`, `timeout`, `gave_up`,
+    /// `journal`.
+    pub fn name(self) -> &'static str {
+        match self {
+            StopKind::Refused => "refused",
+            StopKind::Failed => "failed",
+            StopKind::Timeout => "timeout",
+            StopKind::GaveUp => "gave_up",
+            StopKind::Journal => "journal",
+        }
+    }
+}
+
+/// What a store's refusal says is wrong, **when the words are ones a known
+/// server is documented to use** - and [`Cause::Unknown`] for everything
+/// else, never a guess.
+///
+/// The words recognised are open-etp-server's (the OSDU Reservoir DDMS
+/// server), read in its sources: the checks of its `CommitTransaction`
+/// (`src/lib/oes/eml/openkv/TransProto.cpp`, lines 267-336 of the `main`
+/// branch read on 2026-10-15) and the check a write outside a transaction
+/// makes at once (`StoreProto.cpp`, the `local_tx.isLocal()` block after
+/// line 1799). The line numbers move with the server.
+///
+/// TODO(verify): the same words on the wire from a live open-etp-server - the
+/// shapes are read from its sources, not captured from a session; in
+/// particular that a per-object refusal's `ErrorInfo.message` carries the
+/// words alone, with no prefix (this library's own server side writes the
+/// error's name first, which this match does not read as the words).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cause {
+    /// `"{N} Missing reference(s)"` at commit (`TransProto.cpp:267-290`): `N`
+    /// objects written reference something the dataspace does not hold. Or,
+    /// outside a transaction, `EINVALID_STATE` `"{N} Missing reference(s) in
+    /// space {space}"` at once (`StoreProto.cpp`). The server names no
+    /// target: see [`Diagnosis::candidates`].
+    MissingReference {
+        /// How many, as the server counts them.
+        count: u64,
+        /// The space it names, outside a transaction.
+        space: Option<String>,
+    },
+    /// `"{N} Orphan reference(s)"` at commit (`TransProto.cpp:277,292-298`).
+    OrphanReference {
+        /// How many.
+        count: u64,
+    },
+    /// `"{N} Missing array(s)"` at commit (`TransProto.cpp:317-327`): arrays
+    /// an object written names, that were never written.
+    MissingArray {
+        /// How many.
+        count: u64,
+    },
+    /// `"{N} Orphan array(s)"` at commit (`TransProto.cpp:329-336`): arrays
+    /// written that no object written claims.
+    OrphanArray {
+        /// How many.
+        count: u64,
+    },
+    /// `EINVALID_STATE` `"Missing array container(s): ..."` at commit
+    /// (`TransProto.cpp:279-281,300-304`): arrays whose object the dataspace
+    /// does not hold.
+    MissingArrayContainer {
+        /// What follows the colon, as the server wrote it.
+        containers: String,
+    },
+    /// Words this library knows no server to use.
+    Unknown,
+}
+
+impl Cause {
+    /// The cause a store's words name: the **whole** message, trimmed, must
+    /// have one of the documented shapes - a message that merely contains one
+    /// is not read as it, since nothing documents such a message.
+    pub fn of(message: &str) -> Cause {
+        let text = message.trim();
+        if let Some(containers) = text.strip_prefix("Missing array container(s): ") {
+            return Cause::MissingArrayContainer {
+                containers: containers.to_string(),
+            };
+        }
+        let Some((digits, rest)) = text.split_once(' ') else {
+            return Cause::Unknown;
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Cause::Unknown;
+        }
+        let Ok(count) = digits.parse::<u64>() else {
+            return Cause::Unknown;
+        };
+        match rest {
+            "Missing reference(s)" => Cause::MissingReference { count, space: None },
+            "Orphan reference(s)" => Cause::OrphanReference { count },
+            "Missing array(s)" => Cause::MissingArray { count },
+            "Orphan array(s)" => Cause::OrphanArray { count },
+            _ => match rest.strip_prefix("Missing reference(s) in space ") {
+                Some(space) if !space.is_empty() => Cause::MissingReference {
+                    count,
+                    space: Some(space.to_string()),
+                },
+                _ => Cause::Unknown,
+            },
+        }
+    }
+
+    /// Its name in a report: `missing_reference`, `orphan_reference`,
+    /// `missing_array`, `orphan_array`, `missing_array_container`, `unknown`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Cause::MissingReference { .. } => "missing_reference",
+            Cause::OrphanReference { .. } => "orphan_reference",
+            Cause::MissingArray { .. } => "missing_array",
+            Cause::OrphanArray { .. } => "orphan_array",
+            Cause::MissingArrayContainer { .. } => "missing_array_container",
+            Cause::Unknown => "unknown",
+        }
+    }
+}
+
+/// Why a push stopped, sorted - [`Report::diagnosis`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnosis {
+    /// The island that did not go through, by rank in [`Report::islands`].
+    pub island: usize,
+    /// What kind of stop.
+    pub kind: StopKind,
+    /// For a refusal, the store's own words ([`Stopped::said`]) when it gave
+    /// any, this side's sentence otherwise; for any other stop, what stopped
+    /// it, in words.
+    pub message: String,
+    /// The ETP error code, when there is one: the store's for a refusal,
+    /// the client error's for a failure or a timeout.
+    pub code: Option<i32>,
+    /// For a refusal, what the store's words name ([`Cause::of`] on
+    /// [`Stopped::said`], never on the hint this side adds); `None` for a
+    /// stop that is not a refusal.
+    pub cause: Option<Cause>,
+    /// For [`Cause::MissingReference`], the references that may be missing:
+    /// the [`Report::dangling`] pairs whose `from` is in the stopped island.
+    ///
+    /// **This side's deduction, not the server's statement** - the server
+    /// counts the missing references and names none. It holds because the
+    /// plan sends every target the source holds *before* what references it
+    /// (targets go in earlier islands, or earlier in the same one, a cycle
+    /// whole), so a reference from the stopped island can only miss when its
+    /// target leaves the source - and every such reference is in `dangling`,
+    /// including those `only` cut, since `only` removes its objects from the
+    /// source before `dangling` is computed. A target already in the
+    /// dataspace is not missing, so the candidates may be more than the
+    /// server's count. They may also be fewer: a target the source holds and
+    /// that could not be sent ([`Report::left_out`]) is not in `dangling`, and
+    /// the server may count a reference its own reading found and this
+    /// library's did not. Empty for any other cause.
+    pub candidates: Vec<(String, String)>,
+}
+
+impl Stopped {
+    /// Its kind: a [`Stop::Failed`] on a request that timed out is a
+    /// [`StopKind::Timeout`], apart from a lost connection.
+    pub fn kind(&self) -> StopKind {
+        match &self.why {
+            Stop::Refused(_) => StopKind::Refused,
+            Stop::Failed(ClientError::TimedOut { .. }) => StopKind::Timeout,
+            Stop::Failed(_) => StopKind::Failed,
+            Stop::GaveUp { .. } => StopKind::GaveUp,
+            Stop::Journal(_) => StopKind::Journal,
+        }
+    }
+}
+
+/// The ETP error code a client error carries, when it carries one.
+fn code_of(error: &ClientError) -> Option<i32> {
+    match error {
+        ClientError::Refused(incident)
+        | ClientError::Invalid(incident)
+        | ClientError::TimedOut { incident, .. }
+        | ClientError::AnswerRefused { incident, .. } => Some(incident.code()),
+        _ => None,
+    }
+}
+
+impl Refusal {
+    /// What its message names ([`Cause::of`]): the store's own words, so
+    /// the same shapes as a refused commit's - a write outside a transaction
+    /// refused at once for a missing reference, most of all.
+    pub fn cause(&self) -> Cause {
+        Cause::of(&self.message)
+    }
 }
 
 /// What a push came to.
@@ -800,6 +1071,55 @@ pub struct Report {
     /// Either way the island that was cut was sent again whole: a resumed
     /// session knows nothing of what was in flight.
     pub reopened: Vec<Came>,
+}
+
+impl Report {
+    /// Why the push stopped, sorted ([`Diagnosis`]); `None` when every
+    /// island went through.
+    pub fn diagnosis(&self) -> Option<Diagnosis> {
+        let stopped = self.stopped.as_ref()?;
+        let kind = stopped.kind();
+        let (message, code) = match (&stopped.why, &stopped.said) {
+            (Stop::Refused(_), Some(said)) => (said.message.clone(), said.code),
+            (Stop::Refused(why), None) => (why.clone(), None),
+            (Stop::Failed(error), _) => (error.to_string(), code_of(error)),
+            (Stop::GaveUp { last, .. }, _) => (last.clone(), None),
+            (Stop::Journal(why), _) => (why.clone(), None),
+        };
+        let cause = match kind {
+            // The store's words alone: never the sentence the hint was added to.
+            StopKind::Refused => Some(
+                stopped
+                    .said
+                    .as_ref()
+                    .map_or(Cause::Unknown, |said| Cause::of(&said.message)),
+            ),
+            _ => None,
+        };
+        let candidates = match &cause {
+            Some(Cause::MissingReference { .. }) => {
+                let island: BTreeSet<&str> = self
+                    .islands
+                    .get(stopped.island)
+                    .map(|one| one.uris.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                self.dangling
+                    .iter()
+                    .filter(|(from, _)| island.contains(from.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        Some(Diagnosis {
+            island: stopped.island,
+            kind,
+            message,
+            code,
+            cause,
+            candidates,
+        })
+    }
 }
 
 /// An object left out because it is there already.
@@ -944,18 +1264,192 @@ struct Prepared {
     /// What goes, in the source's order.
     listed: Vec<ObjectSummary>,
     graph: Graph,
-    /// What the reading found to say: `left_out`, `dangling`.
+    /// What the reading found to say: `left_out`, `dangling` - and, once
+    /// the journal is read, `skipped`.
     report: Report,
+}
+
+impl Prepared {
+    /// What the journal is keyed by ([`journal::fingerprint`]): what leaves,
+    /// as it leaves.
+    fn fingerprint(&self) -> String {
+        journal::fingerprint(self.ready.values().map(|one| {
+            (
+                one.uri.as_str(),
+                one.xml.as_slice(),
+                one.arrays
+                    .iter()
+                    .map(|array| {
+                        (
+                            array.id.uri.as_str(),
+                            array.id.path_in_resource.as_str(),
+                            array.dimensions.as_slice(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }))
+    }
+
+    /// Leave out what the journal records as committed - by URI in the
+    /// destination -, each object named in `report.skipped`. What [`push`]
+    /// does with a journal before it plans, and [`dry_run`] too.
+    fn leave_out(&mut self, committed: &BTreeSet<String>) {
+        let listed = std::mem::take(&mut self.listed);
+        for one in listed {
+            let there = self
+                .ready
+                .get(&one.uri)
+                .is_some_and(|ready| committed.contains(&ready.uri));
+            if there && let Some(gone) = self.ready.remove(&one.uri) {
+                self.report.skipped.push(Skipped {
+                    uri: gone.uri,
+                    why: SkipReason::Journal,
+                });
+            } else {
+                self.listed.push(one);
+            }
+        }
+    }
 }
 
 /// How many arrays one `GetDataArrayMetadata` asks about when
 /// [`Options::skip_present`] checks what is there.
 const METADATA_BATCH: usize = 100;
 
+/// What a push would send, worked out without a session ([`dry_run`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// The destination, as a dataspace URI.
+    pub dataspace: String,
+    /// The islands, in the order a push sends them, each object by its URI
+    /// in the **source**, each with its units ([`Island::units`], so its
+    /// cycles).
+    pub islands: Vec<Island>,
+    /// Each object of `islands`, by its URI in the source: its URI in the
+    /// destination dataspace, as the push addresses it.
+    pub destinations: BTreeMap<String, String>,
+    /// Objects of the source that could not be sent at all, with why
+    /// ([`Report::left_out`]).
+    pub left_out: Vec<String>,
+    /// References that leave the source, `(from, to)` ([`dangling`]).
+    pub dangling: Vec<(String, String)>,
+    /// The objects the journal records as committed ([`Options::journal`]),
+    /// left out of the plan, by their URI in the destination - always
+    /// [`SkipReason::Journal`].
+    pub skipped: Vec<Skipped>,
+}
+
+impl Plan {
+    /// The destination URIs of an island's objects, in its order.
+    pub fn destinations_of(&self, island: &Island) -> Vec<&str> {
+        island
+            .uris
+            .iter()
+            .filter_map(|uri| self.destinations.get(uri).map(String::as_str))
+            .collect()
+    }
+}
+
+/// Why [`dry_run`] made no plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoPlan {
+    /// An option only the destination can honour - [`Options::skip_present`],
+    /// [`Options::expected`] -: a plan made without it would not be the one
+    /// the push follows, and a caller who asked for it expects it applied.
+    NeedsDestination(String),
+    /// The source could not be read.
+    Source(String),
+    /// The journal would not serve ([`Stop::Journal`] in a push).
+    Journal(String),
+}
+
+impl std::fmt::Display for NoPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoPlan::NeedsDestination(why) | NoPlan::Source(why) => f.write_str(why),
+            NoPlan::Journal(why) => write!(f, "the journal: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for NoPlan {}
+
+/// What [`push`] would send into `dataspace`, **without a session**: the
+/// source read and written as the push writes it, the arrays located and
+/// weighed, what cannot be sent named (`left_out`), the references that
+/// leave the source (`dangling`), what the journal records left out - and
+/// the islands of the same planning, under the same budget. Nothing is
+/// asked of any server, and nothing is written: the journal is read, never
+/// created nor repaired.
+///
+/// The same code as the push, step by step, so that the plan cannot drift
+/// from what it sends: the push then follows these islands, unless the store
+/// refuses one and [`Options::split`] cuts it, or the connection keeps
+/// falling on one ([`push_resumable`] halves it). [`Options::grouping`],
+/// `split`, `split_limit` and `overwrite` change how islands travel, not
+/// which, and are not read.
+///
+/// The dataspace is **required**: the destination URIs are in it, and a
+/// journal is written for one dataspace and refused for another.
+///
+/// What needs the destination is refused by name ([`NoPlan::NeedsDestination`]):
+/// [`Options::skip_present`] (what the dataspace holds) and
+/// [`Options::expected`] (what it changed since).
+pub async fn dry_run(
+    source: &(dyn EnergymlStorage + Sync),
+    dataspace: &str,
+    options: &Options<'_>,
+) -> Result<Plan, NoPlan> {
+    if options.skip_present {
+        return Err(NoPlan::NeedsDestination(
+            "skip_present asks the destination what it holds already, and a plan asks it nothing: plan without it, or push with it".to_string(),
+        ));
+    }
+    if options.expected.is_some() {
+        return Err(NoPlan::NeedsDestination(
+            "expected asks the destination what it changed since, and a plan asks it nothing: plan without it, or push with it".to_string(),
+        ));
+    }
+    let mut prepared = prepare(source, dataspace, options)
+        .await
+        .map_err(NoPlan::Source)?;
+    if let Some(path) = options.journal {
+        let committed =
+            journal::recorded(path, &prepared.space, &prepared.fingerprint()).map_err(NoPlan::Journal)?;
+        prepared.leave_out(&committed);
+    }
+    let islands = plan(
+        &prepared.listed,
+        &prepared.graph,
+        &prepared.weights,
+        &options.budget,
+    );
+    let destinations = islands
+        .iter()
+        .flat_map(|island| island.uris.iter())
+        .filter_map(|uri| prepared.ready.get(uri).map(|one| (uri.clone(), one.uri.clone())))
+        .collect();
+    Ok(Plan {
+        dataspace: prepared.space,
+        islands,
+        destinations,
+        left_out: prepared.report.left_out,
+        dangling: prepared.report.dangling,
+        skipped: prepared.report.skipped,
+    })
+}
+
+/// A source that could not be read, as [`push`] has always said it: not
+/// sent.
+fn not_sent(why: String) -> ClientError {
+    ClientError::Invalid(EtpError::EINVALID_ARGUMENT.with_detail(why))
+}
+
 /// Send everything `source` holds into `dataspace`, island by island, over
 /// one session: a connection that falls stops the push there
 /// ([`Stop::Failed`]). [`push_resumable`] opens a new session instead and
-/// goes on.
+/// goes on. [`dry_run`] says which islands, with no session.
 pub async fn push<K: Caller>(
     client: &mut K,
     source: &(dyn EnergymlStorage + Sync),
@@ -963,7 +1457,7 @@ pub async fn push<K: Caller>(
     options: &Options<'_>,
     mut progress: impl FnMut(Progress),
 ) -> Result<Report, ClientError> {
-    let prepared = prepare(source, dataspace, options).await?;
+    let prepared = prepare(source, dataspace, options).await.map_err(not_sent)?;
     let mut pushing = Pushing::new(source, options, prepared);
     while !pushing.done() {
         let advanced = pushing.advance(client, false).await;
@@ -1005,7 +1499,7 @@ pub fn push_resumable<C: Connector>(
     retry: &Retry,
     on_event: impl FnMut(RunEvent<Progress>),
 ) -> Result<Report, ClientError> {
-    let prepared = retp_client::blocking(prepare(source, dataspace, options))?;
+    let prepared = retp_client::blocking(prepare(source, dataspace, options)).map_err(not_sent)?;
     let mut pushing = Pushing::new(source, options, prepared);
     if pushing.done() {
         return Ok(pushing.report);
@@ -1042,19 +1536,18 @@ pub fn reconnecting(times: u32, first_pause: Duration) -> Retry {
 
 /// Read the source: each object written as it will leave, its arrays
 /// located and weighed, what cannot be sent named. Nothing is asked of the
-/// destination.
+/// destination. The first step of [`push`] and of [`dry_run`] alike.
 async fn prepare(
     source: &(dyn EnergymlStorage + Sync),
     dataspace: &str,
     options: &Options<'_>,
-) -> Result<Prepared, ClientError> {
+) -> Result<Prepared, String> {
     let format = options.format;
     let space = dataspace_uri(dataspace);
-    let not_sent = |why: String| ClientError::Invalid(EtpError::EINVALID_ARGUMENT.with_detail(why));
     let mut resources = source
         .resources()
         .await
-        .map_err(|why| not_sent(format!("the source could not be listed: {why}")))?;
+        .map_err(|why| format!("the source could not be listed: {why}"))?;
     // The whole listing stays for what an array needs to be addressed - a
     // RESQML 2.0.1 proxy that is not among the chosen objects still names
     // where their numbers hang - and only the chosen ones are read and sent.
@@ -1068,7 +1561,7 @@ async fn prepare(
     let mut graph = source
         .derived_graph(&[])
         .await
-        .map_err(|why| not_sent(format!("the source's graph could not be read: {why}")))?;
+        .map_err(|why| format!("the source's graph could not be read: {why}"))?;
     let uris: Vec<String> = resources.iter().map(|one| one.uri.clone()).collect();
     let mut objects = source.get_objects(&uris).await;
 
@@ -1209,8 +1702,6 @@ struct Pushing<'a> {
     graph: Graph,
     journal: Option<journal::Journal>,
     report: Report,
-    /// For each island of `report.islands`, the sizes of its units.
-    units: Vec<Vec<usize>>,
     /// For each island of `report.islands`, how many more times it may be
     /// split for a refusal.
     splits_left: Vec<u32>,
@@ -1229,58 +1720,22 @@ impl<'a> Pushing<'a> {
     /// The push, the journal opened when there is one, and what it records
     /// left out. A journal that does not match stops the push before
     /// anything is asked of the destination.
-    fn new(source: &'a (dyn EnergymlStorage + Sync), options: &Options<'a>, prepared: Prepared) -> Self {
-        let Prepared {
-            space,
-            mut ready,
-            weights,
-            mut listed,
-            graph,
-            mut report,
-        } = prepared;
+    fn new(source: &'a (dyn EnergymlStorage + Sync), options: &Options<'a>, mut prepared: Prepared) -> Self {
         let mut stopped = false;
         let journal = match options.journal {
             None => None,
             Some(path) => {
-                let print = journal::fingerprint(ready.values().map(|one| {
-                    (
-                        one.uri.as_str(),
-                        one.xml.as_slice(),
-                        one.arrays
-                            .iter()
-                            .map(|array| {
-                                (
-                                    array.id.uri.as_str(),
-                                    array.id.path_in_resource.as_str(),
-                                    array.dimensions.as_slice(),
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                }));
-                match journal::Journal::open(path, &space, &print, ready.len()) {
+                let print = prepared.fingerprint();
+                match journal::Journal::open(path, &prepared.space, &print, prepared.ready.len()) {
                     Ok((journal, committed)) => {
-                        let mut kept = Vec::with_capacity(listed.len());
-                        for one in listed {
-                            let there = ready
-                                .get(&one.uri)
-                                .is_some_and(|ready| committed.contains(&ready.uri));
-                            if there && let Some(gone) = ready.remove(&one.uri) {
-                                report.skipped.push(Skipped {
-                                    uri: gone.uri,
-                                    why: SkipReason::Journal,
-                                });
-                            } else {
-                                kept.push(one);
-                            }
-                        }
-                        listed = kept;
+                        prepared.leave_out(&committed);
                         Some(journal)
                     }
                     Err(why) => {
-                        report.stopped = Some(Stopped {
+                        prepared.report.stopped = Some(Stopped {
                             island: 0,
                             why: Stop::Journal(why),
+                            said: None,
                         });
                         stopped = true;
                         None
@@ -1288,6 +1743,14 @@ impl<'a> Pushing<'a> {
                 }
             }
         };
+        let Prepared {
+            space,
+            ready,
+            weights,
+            listed,
+            graph,
+            report,
+        } = prepared;
         Pushing {
             source,
             options: options.clone(),
@@ -1298,7 +1761,6 @@ impl<'a> Pushing<'a> {
             graph,
             journal,
             report,
-            units: Vec::new(),
             splits_left: Vec::new(),
             checked: false,
             stopped,
@@ -1374,13 +1836,8 @@ impl<'a> Pushing<'a> {
                 Err(why) => refusal = Some(why),
             }
         }
-        let planned = plan(&self.listed, &self.graph, &self.weights, &self.options.budget);
-        self.report.islands.clear();
-        self.units.clear();
-        for (island, units) in planned {
-            self.report.islands.push(island);
-            self.units.push(units);
-        }
+        // The plan [`dry_run`] makes too, from what is left.
+        self.report.islands = plan(&self.listed, &self.graph, &self.weights, &self.options.budget);
         self.splits_left = vec![self.options.split_limit; self.report.islands.len()];
         self.progress.push(Progress::Planned {
             islands: self.report.islands.len(),
@@ -1388,6 +1845,7 @@ impl<'a> Pushing<'a> {
         });
         self.checked = true;
         match refusal {
+            // This side's refusal: the store said nothing.
             Some(why) => self.stop_at(0, Stop::Refused(why)),
             None => self.report.without_transactions = !self.transactional(client),
         }
@@ -1424,9 +1882,13 @@ impl<'a> Pushing<'a> {
             {
                 Opened::Open(transaction) => Some(transaction),
                 Opened::Refused(why) => {
-                    self.stop_at(
+                    self.refused_at(
                         rank,
-                        Stop::Refused(format!("the transaction would not open: {why}")),
+                        format!("the transaction would not open: {why}"),
+                        Some(Said {
+                            code: None,
+                            message: why,
+                        }),
                     );
                     return Ok(());
                 }
@@ -1453,9 +1915,15 @@ impl<'a> Pushing<'a> {
                 None => self.committed(rank, &island),
                 Some(transaction) => match commit_transaction(client, transaction).await? {
                     Ended::Done => self.committed(rank, &island),
-                    Ended::Refused(why) => {
-                        let why = with_hint(format!("the commit was refused: {why}"), &self.report.dangling);
-                        self.refused(rank, why, Vec::new());
+                    Ended::Refused(said) => {
+                        // The store's words kept apart from the hint, so that
+                        // what classifies them never reads ours.
+                        let why = with_hint(format!("the commit was refused: {said}"), &self.report.dangling);
+                        let said = Said {
+                            code: None,
+                            message: said,
+                        };
+                        self.refused(rank, why, Some(said), Vec::new());
                     }
                 },
             },
@@ -1463,6 +1931,12 @@ impl<'a> Pushing<'a> {
                 stop: Stop::Refused(why),
                 refusals,
             }) => {
+                // The first refusal, as the store said it: the sentence quotes
+                // it, and the hint may follow.
+                let said = refusals.first().map(|first| Said {
+                    code: first.code,
+                    message: first.message.clone(),
+                });
                 let why = match &transaction {
                     Some(transaction) => {
                         let _ = rollback_transaction(client, transaction).await;
@@ -1475,7 +1949,7 @@ impl<'a> Pushing<'a> {
                         &self.report.dangling,
                     ),
                 };
-                self.refused(rank, why, refusals);
+                self.refused(rank, why, said, refusals);
             }
             Err(Halt {
                 stop: Stop::Failed(why),
@@ -1531,20 +2005,21 @@ impl<'a> Pushing<'a> {
 
     /// The store refused the island at `rank` as a whole: split, when asked
     /// and still allowed, or the push stops there.
-    fn refused(&mut self, rank: usize, why: String, refusals: Vec<Refusal>) {
+    /// `said` is the store's own words, apart from the sentence `why`.
+    fn refused(&mut self, rank: usize, why: String, said: Option<Said>, refusals: Vec<Refusal>) {
         let how = self.options.split;
         if how != Split::Off && self.splits_left[rank] > 0 {
             match self.split_at(rank, how, why, refusals, true) {
                 Ok(()) => return,
                 Err((why, refusals)) => {
                     self.report.refusals = refusals;
-                    self.stop_at(rank, Stop::Refused(why));
+                    self.refused_at(rank, why, said);
                     return;
                 }
             }
         }
         self.report.refusals = refusals;
-        self.stop_at(rank, Stop::Refused(why));
+        self.refused_at(rank, why, said);
     }
 
     /// Put the pieces of the island at `rank` in its place - or give `why`
@@ -1559,7 +2034,7 @@ impl<'a> Pushing<'a> {
         spend: bool,
     ) -> Result<(), (String, Vec<Refusal>)> {
         let island = &self.report.islands[rank];
-        let Some(pieces) = cut(island, &self.units[rank], &self.weights, how) else {
+        let Some(pieces) = cut(island, &self.weights, how) else {
             return Err((why, refusals));
         };
         let left = if spend {
@@ -1575,9 +2050,7 @@ impl<'a> Pushing<'a> {
             why,
             refusals,
         });
-        let (islands, units): (Vec<Island>, Vec<Vec<usize>>) = pieces.into_iter().unzip();
-        self.report.islands.splice(rank..=rank, islands);
-        self.units.splice(rank..=rank, units);
+        self.report.islands.splice(rank..=rank, pieces);
         self.splits_left
             .splice(rank..=rank, std::iter::repeat_n(left, into));
         self.progress.push(Progress::Split { island: rank, into });
@@ -1586,7 +2059,22 @@ impl<'a> Pushing<'a> {
 
     /// The push stops at the island of rank `island`, for `why`.
     fn stop_at(&mut self, island: usize, why: Stop) {
-        self.report.stopped = Some(Stopped { island, why });
+        self.report.stopped = Some(Stopped {
+            island,
+            why,
+            said: None,
+        });
+        self.stopped = true;
+    }
+
+    /// The store refused the island at `island`: the sentence, and the
+    /// store's own words apart ([`Stopped::said`]).
+    fn refused_at(&mut self, island: usize, why: String, said: Option<Said>) {
+        self.report.stopped = Some(Stopped {
+            island,
+            why: Stop::Refused(why),
+            said,
+        });
         self.stopped = true;
     }
 }
@@ -2230,13 +2718,19 @@ mod tests {
         let w = weighing(&[("a", 10, 0), ("b", 20, 0), ("c", 30, 0), ("d", 40, 0)]);
         let planned = plan(&listed, &g, &w, &Budget::default());
         assert_eq!(planned.len(), 1, "{planned:?}");
-        let (island, units) = &planned[0];
-        assert_eq!(units, &[2, 1, 1], "the cycle is one unit: {island:?}");
+        let island = &planned[0];
+        assert_eq!(island.units, [2, 1, 1], "the cycle is one unit: {island:?}");
+        let cycles: Vec<&[String]> = island.cycles();
+        assert_eq!(
+            cycles,
+            [&["a".to_string(), "b".to_string()][..]],
+            "and it is named"
+        );
 
-        let halves = cut(island, units, &w, Split::Halve).expect("three units cut");
+        let halves = cut(island, &w, Split::Halve).expect("three units cut");
         let uris: Vec<Vec<&str>> = halves
             .iter()
-            .map(|(piece, _)| piece.uris.iter().map(String::as_str).collect())
+            .map(|piece| piece.uris.iter().map(String::as_str).collect())
             .collect();
         assert_eq!(
             uris.concat(),
@@ -2244,18 +2738,21 @@ mod tests {
             "the order is kept"
         );
         assert_eq!(halves.len(), 2);
-        assert_eq!(halves[0].1, [2, 1], "the cycle whole, in the first half");
-        assert_eq!(halves[0].0.bytes, 10 + 20 + 30);
-        assert_eq!(halves[1].0.uris, ["d"]);
+        assert_eq!(halves[0].units, [2, 1], "the cycle whole, in the first half");
+        assert_eq!(halves[0].bytes, 10 + 20 + 30);
+        assert_eq!(halves[1].uris, ["d"]);
 
-        let single = cut(island, units, &w, Split::Single).expect("three units cut");
+        let single = cut(island, &w, Split::Single).expect("three units cut");
         assert_eq!(single.len(), 3);
-        assert_eq!(single[0].0.uris.len(), 2, "the cycle is never cut");
+        assert_eq!(single[0].uris.len(), 2, "the cycle is never cut");
 
-        let cycle = &halves[0].0;
-        assert!(cut(&single[0].0, &single[0].1, &w, Split::Halve).is_none());
-        assert!(cut(cycle, &[3], &w, Split::Single).is_none());
-        assert!(cut(island, units, &w, Split::Off).is_none());
+        let one_unit = Island {
+            units: vec![3],
+            ..halves[0].clone()
+        };
+        assert!(cut(&single[0], &w, Split::Halve).is_none());
+        assert!(cut(&one_unit, &w, Split::Single).is_none());
+        assert!(cut(island, &w, Split::Off).is_none());
     }
 
     /// An edge to something the source does not list is not a reason to lose

@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use energyml_etp_store::push::{
-    Options, Progress, SkipReason, Split, Stop, WellKnown, WriteFormat, chosen, push, push_resumable,
-    reconnecting,
+    Budget, Cause, NoPlan, Options, Progress, SkipReason, Split, Stop, StopKind, WellKnown, WriteFormat,
+    chosen, dry_run, islands, push, push_resumable, reconnecting,
 };
 use retp_avro::{Avro, EtpMessage, Reader, Role};
 use retp_client::memory::{ManualClock, MemoryTransport};
@@ -84,6 +84,9 @@ struct Log {
     /// End every `GetResources` with this `EREQUEST_DENIED` - a listing the
     /// store cuts short.
     refuse_listing: Option<&'static str>,
+    /// Never answer a `PutDataObjects`: the client's request times out,
+    /// and the session stands.
+    silent_puts: bool,
     /// The `(protocol, messageType)` of every message a client put on a
     /// connection to this store, over every session, in order - the one a
     /// connection falls on included, and the session's own (`RequestSession`
@@ -146,6 +149,7 @@ impl Handler for Receiving {
                 let out = responder.wire().respond(delivery, &response).unwrap();
                 responder.send(out);
             }
+            Message::PutDataObjects(_) if log.silent_puts => {}
             Message::PutDataObjects(request) => {
                 let too_many = log
                     .refuse_more_than
@@ -1868,4 +1872,469 @@ fn a_push_not_asked_to_never_sends_resume_session() {
         assert_eq!(sent(&log, RESUME_SESSION), 0, "{answers:?}");
         assert_eq!(sent(&log, REQUEST_SESSION), 2, "{answers:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The plan without a session (`dry_run`), and why a push stopped, sorted
+// ---------------------------------------------------------------------------
+
+/// A dry run of `source` and a push of it into a receiving store, with the
+/// same options: the plan must be the islands the push followed, its
+/// destination URIs what the store received, in that order.
+fn the_plan_is_the_push(
+    source: &(dyn energyml_storage::storage::EnergymlStorage + Sync),
+    options: &Options<'_>,
+    what: &str,
+) {
+    let plan = block(dry_run(source, "there", options)).unwrap_or_else(|why| panic!("{what}: {why}"));
+    let (mut client, log) = receiving(None);
+    let report = block(push(&mut client, source, "there", options, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{what}: {:?}", report.stopped);
+    assert!(
+        !plan.islands.is_empty(),
+        "{what}: a plan of nothing proves nothing"
+    );
+    assert_eq!(
+        plan.islands, report.islands,
+        "{what}: the islands, their units included"
+    );
+    assert_eq!(plan.dataspace, THERE, "{what}");
+    assert_eq!(plan.dangling, report.dangling, "{what}");
+    assert_eq!(plan.left_out, report.left_out, "{what}");
+    let planned: Vec<&str> = plan
+        .islands
+        .iter()
+        .flat_map(|island| plan.destinations_of(island))
+        .collect();
+    let log = log.lock().unwrap();
+    let received: Vec<&str> = log.objects.iter().map(|(uri, _)| uri.as_str()).collect();
+    assert_eq!(
+        planned, received,
+        "{what}: the destination URIs, in the order sent"
+    );
+}
+
+/// **A dry run plans the islands the push follows** - the same reading, the
+/// same planning, the same budget -, for each option that decides a plan:
+/// none, a budget of one object, `only`, JSON, the dictionary's kinds.
+#[test]
+fn a_dry_run_plans_the_islands_the_push_follows() {
+    let source = store();
+    the_plan_is_the_push(&source, &Options::default(), "by default");
+
+    let one_each = Options {
+        budget: Budget {
+            objects: 1,
+            ..Budget::default()
+        },
+        ..Default::default()
+    };
+    the_plan_is_the_push(&source, &one_each, "one object per island");
+
+    let listed = block(energyml_storage::storage::EnergymlStorage::resources(&source)).unwrap();
+    let points = listed
+        .iter()
+        .find(|one| one.qualified_type.contains("PointSetRepresentation"))
+        .unwrap()
+        .uri
+        .clone();
+    let only = [points];
+    let some = Options {
+        only: Some(&only),
+        ..Default::default()
+    };
+    the_plan_is_the_push(&source, &some, "only the point set");
+
+    let json = Options {
+        format: WriteFormat::Json,
+        ..Default::default()
+    };
+    the_plan_is_the_push(&source, &json, "as JSON");
+
+    let registry = registry();
+    let kinds = Options {
+        well_known: WellKnown::Push(&registry),
+        ..Default::default()
+    };
+    the_plan_is_the_push(&store_with_kind(), &kinds, "with the dictionary's kinds");
+}
+
+/// **A dry run leaves out what the journal records, and writes nothing**:
+/// after a push that committed its first island, the plan names the CRS and
+/// the proxy as skipped by the journal and plans the point set alone; the
+/// journal is the same file after it, byte for byte. A journal that is not
+/// there records nothing, and is not created; one written for another
+/// dataspace is refused by name.
+#[test]
+fn a_dry_run_leaves_out_what_the_journal_records_and_writes_nothing() {
+    let source = store();
+    let path = journal_path("plan");
+    let options = Options {
+        journal: Some(&path),
+        ..Default::default()
+    };
+    let plan = block(dry_run(&source, "there", &options)).unwrap();
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+    assert_eq!(plan.islands.len(), 2, "{:?}", plan.islands);
+    assert!(!path.exists(), "a dry run created the journal");
+
+    let (mut client, _) = receiving_with(Log {
+        refuse_arrays: Some("no room for arrays"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(report.sent, 1, "{:?}", report.stopped);
+    let before = std::fs::read(&path).unwrap();
+
+    let plan = block(dry_run(&source, "there", &options)).unwrap();
+    let mut skipped: Vec<String> = plan
+        .skipped
+        .iter()
+        .inspect(|one| assert_eq!(one.why, SkipReason::Journal))
+        .map(|one| one.uri.clone())
+        .collect();
+    skipped.sort();
+    let mut expected = vec![crs_there(), proxy_there()];
+    expected.sort();
+    assert_eq!(skipped, expected);
+    let planned: Vec<&str> = plan
+        .islands
+        .iter()
+        .flat_map(|island| plan.destinations_of(island))
+        .collect();
+    assert_eq!(planned, [points_there()], "only what the journal does not record");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a dry run wrote to the journal"
+    );
+
+    // And the push started again follows that plan.
+    let (mut client, _) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(plan.islands, report.islands);
+
+    match block(dry_run(&source, "elsewhere", &options)) {
+        Err(NoPlan::Journal(why)) => assert!(why.contains("written for a push into"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **What only the destination can answer is refused by name** - not
+/// planned without: a caller who asks to skip what is there, or to check
+/// what changed there, expects it applied.
+#[test]
+fn a_dry_run_refuses_what_needs_the_destination() {
+    let source = store();
+    let skipping = Options {
+        skip_present: true,
+        ..Default::default()
+    };
+    match block(dry_run(&source, "there", &skipping)) {
+        Err(NoPlan::NeedsDestination(why)) => assert!(why.contains("skip_present"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let expected: BTreeMap<String, i64> = [(points_there(), T0)].into_iter().collect();
+    let checking = Options {
+        expected: Some(&expected),
+        ..Default::default()
+    };
+    match block(dry_run(&source, "there", &checking)) {
+        Err(NoPlan::NeedsDestination(why)) => assert!(why.contains("expected"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **A cycle is flagged**: two objects that reference each other are one
+/// unit of their island, named as its cycle; an object alone is a unit of
+/// one, and an island without a cycle names none.
+#[test]
+fn a_cycle_is_flagged_in_the_plan() {
+    use energyml_storage::graph::{Edge, Graph};
+    use energyml_storage::resource::ObjectSummary;
+    let listed: Vec<ObjectSummary> = ["a", "b", "c"]
+        .iter()
+        .map(|uri| ObjectSummary::new(*uri, *uri, String::new()))
+        .collect();
+    let graph = Graph {
+        nodes: Vec::new(),
+        edges: vec![
+            Edge::new("a", "b", String::new()),
+            Edge::new("b", "a", String::new()),
+            Edge::new("c", "a", String::new()),
+        ],
+    };
+    let planned = islands(&listed, &graph, &BTreeMap::new(), &Budget::default());
+    assert_eq!(planned.len(), 1, "{planned:?}");
+    assert_eq!(planned[0].units, [2, 1]);
+    let cycles = planned[0].cycles();
+    assert_eq!(cycles.len(), 1);
+    assert_eq!(cycles[0], ["a".to_string(), "b".to_string()]);
+
+    let none = islands(
+        &listed,
+        &Graph {
+            nodes: Vec::new(),
+            edges: vec![Edge::new("c", "a", String::new())],
+        },
+        &BTreeMap::new(),
+        &Budget::default(),
+    );
+    assert!(none.iter().all(|island| island.cycles().is_empty()), "{none:?}");
+    assert!(
+        none.iter()
+            .all(|island| island.units.iter().all(|&size| size == 1))
+    );
+}
+
+/// **The words open-etp-server is documented to use are recognised, and
+/// nothing else.** Each shape as its sources write it - the checks of
+/// `CommitTransaction` in `src/lib/oes/eml/openkv/TransProto.cpp` (lines
+/// 267-336 of `main` as read on 2026-10-15) and the check outside a
+/// transaction in `StoreProto.cpp` -, then words that resemble them and are
+/// not them: another case, a prefix, a suffix, a count that is no count.
+#[test]
+fn the_documented_refusals_are_classified_and_nothing_else() {
+    // "{} Missing reference(s)", TransProto.cpp:267-290.
+    assert_eq!(
+        Cause::of("3 Missing reference(s)"),
+        Cause::MissingReference {
+            count: 3,
+            space: None
+        }
+    );
+    // "{} Missing reference(s) in space {}", StoreProto.cpp, outside a transaction.
+    assert_eq!(
+        Cause::of("1 Missing reference(s) in space demo"),
+        Cause::MissingReference {
+            count: 1,
+            space: Some("demo".into())
+        }
+    );
+    // "{} Orphan reference(s)", TransProto.cpp:277,292-298.
+    assert_eq!(
+        Cause::of("2 Orphan reference(s)"),
+        Cause::OrphanReference { count: 2 }
+    );
+    // "{} Missing array(s)", TransProto.cpp:317-327.
+    assert_eq!(Cause::of("4 Missing array(s)"), Cause::MissingArray { count: 4 });
+    // "{} Orphan array(s)", TransProto.cpp:329-336.
+    assert_eq!(Cause::of("5 Orphan array(s)"), Cause::OrphanArray { count: 5 });
+    // "Missing array container(s): ...", TransProto.cpp:279-281,300-304.
+    assert_eq!(
+        Cause::of("Missing array container(s): a, b"),
+        Cause::MissingArrayContainer {
+            containers: "a, b".into()
+        }
+    );
+    // Surrounding blanks are not words.
+    assert_eq!(Cause::of(" 3 Missing reference(s)\n").name(), "missing_reference");
+
+    for not_documented in [
+        "",
+        "reference missing",
+        "3 missing reference(s)",
+        "Missing reference(s)",
+        "-3 Missing reference(s)",
+        "three Missing reference(s)",
+        "3 Missing references",
+        "3 Missing reference(s) in space ",
+        "the commit was refused: 3 Missing reference(s)",
+        "3 Missing reference(s) - 2 reference(s) leave the source",
+        "3 Orphan array(s) and more",
+        "Missing array container(s):",
+        "the store gave no reason",
+    ] {
+        assert_eq!(Cause::of(not_documented), Cause::Unknown, "{not_documented:?}");
+    }
+    assert_eq!(Cause::Unknown.name(), "unknown");
+}
+
+/// **A refused commit is classified from the store's words, never from the
+/// hint.** Only the point set is pushed, so its references to the CRS and
+/// the proxy leave the source: the sentence carries the hint, the store's
+/// words are kept apart and alone, and the candidates are those two
+/// references - this side's deduction, from the island that stopped.
+#[test]
+fn a_refused_commit_is_classified_from_the_stores_words_not_the_hint() {
+    let source = store();
+    let listed = block(energyml_storage::storage::EnergymlStorage::resources(&source)).unwrap();
+    let points = listed
+        .iter()
+        .find(|one| one.qualified_type.contains("PointSetRepresentation"))
+        .unwrap()
+        .uri
+        .clone();
+    let only = [points.clone()];
+    let options = Options {
+        only: Some(&only),
+        ..Default::default()
+    };
+    let (mut client, _) = receiving(Some("2 Missing reference(s)"));
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+
+    let stopped = report.stopped.as_ref().expect("the push stopped");
+    match &stopped.why {
+        Stop::Refused(why) => assert!(why.contains("leave the source"), "the hint is said: {why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        stopped.said.as_ref().map(|said| said.message.as_str()),
+        Some("2 Missing reference(s)"),
+        "the store's words, alone"
+    );
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.kind, StopKind::Refused);
+    assert_eq!(diagnosis.message, "2 Missing reference(s)");
+    assert_eq!(diagnosis.code, None, "a commit's answer carries no code");
+    assert_eq!(
+        diagnosis.cause,
+        Some(Cause::MissingReference {
+            count: 2,
+            space: None
+        })
+    );
+    assert_eq!(report.dangling.len(), 2, "{:?}", report.dangling);
+    assert_eq!(diagnosis.candidates, report.dangling);
+    assert!(diagnosis.candidates.iter().all(|(from, _)| *from == points));
+}
+
+/// **The candidates are the stopped island's alone.** With the CRS hidden,
+/// the point set's reference to it leaves the source; every commit is
+/// refused, so the push stops at the first island - the proxy's -, which
+/// references nothing outside: no candidate, though `dangling` is not empty.
+#[test]
+fn the_candidates_are_those_of_the_island_that_stopped() {
+    let source = store_hiding(CRS);
+    let (mut client, _) = receiving(Some("1 Missing reference(s)"));
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert_eq!(report.dangling.len(), 1, "{:?}", report.dangling);
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.island, 0);
+    assert!(
+        report.islands[0].uris.iter().all(|uri| !uri.contains(POINTS)),
+        "{:?}",
+        report.islands
+    );
+    assert_eq!(
+        diagnosis.cause,
+        Some(Cause::MissingReference {
+            count: 1,
+            space: None
+        })
+    );
+    assert!(diagnosis.candidates.is_empty(), "{:?}", diagnosis.candidates);
+}
+
+/// **A refused object carries the cause of its own words**, and so does the
+/// stop, with the store's code - the first refusal, as the store wrote it.
+///
+/// The test server writes an error's message as `retp-proto` does, its
+/// name first (`EINVALID_OBJECT: ...`): the documented words inside other
+/// words are not read as them, so its refusal is `unknown`. The words alone,
+/// as open-etp-server writes a write refused at once outside a transaction
+/// (`EINVALID_STATE`, `StoreProto.cpp`), name the missing reference. Words
+/// of no documented shape are `unknown`, and still a refusal.
+#[test]
+fn a_refused_object_is_classified_from_its_own_words() {
+    use energyml_etp_store::push::{Island, Refusal, Report, Said, Stopped};
+    let source = store();
+    let (mut client, _) = receiving_with(Log {
+        refuse_one: Some((CRS, "2 Missing reference(s) in space there")),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert_eq!(report.refusals.len(), 1, "{:?}", report.refusals);
+    let first = &report.refusals[0];
+    assert_eq!(
+        first.message,
+        "EINVALID_OBJECT: 2 Missing reference(s) in space there"
+    );
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.code, Some(14), "EINVALID_OBJECT, ETP v1.2 section 24.3");
+    assert_eq!(diagnosis.message, first.message, "the first refusal's words");
+    assert_eq!(first.cause(), Cause::Unknown);
+    assert_eq!(diagnosis.cause, Some(Cause::Unknown));
+
+    // The words alone.
+    let expected = Cause::MissingReference {
+        count: 2,
+        space: Some("there".into()),
+    };
+    let alone = Refusal {
+        uri: "eml:///dataspace('there')/resqml20.obj_PointSetRepresentation(p)".into(),
+        array: None,
+        code: Some(15),
+        message: "2 Missing reference(s) in space there".into(),
+    };
+    assert_eq!(alone.cause(), expected);
+    let report = Report {
+        islands: vec![Island {
+            uris: vec!["points".into()],
+            units: vec![1],
+            ..Island::default()
+        }],
+        stopped: Some(Stopped {
+            island: 0,
+            why: Stop::Refused("points: 2 Missing reference(s) in space there (15)".into()),
+            said: Some(Said {
+                code: alone.code,
+                message: alone.message.clone(),
+            }),
+        }),
+        dangling: vec![("points".into(), "crs".into()), ("other".into(), "kind".into())],
+        refusals: vec![alone],
+        ..Report::default()
+    };
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.code, Some(15));
+    assert_eq!(diagnosis.cause, Some(expected));
+    assert_eq!(diagnosis.candidates, [("points".to_string(), "crs".to_string())]);
+
+    let (mut client, _) = receiving_with(Log {
+        refuse_objects: Some("this dataspace is published"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.kind, StopKind::Refused);
+    assert_eq!(diagnosis.cause, Some(Cause::Unknown));
+    assert!(diagnosis.candidates.is_empty());
+    assert!(report.refusals.iter().all(|one| one.cause() == Cause::Unknown));
+}
+
+/// **A request that timed out is a timeout, a connection that fell is a
+/// failure** - both `Stop::Failed`, told apart: after a timeout the session
+/// may stand, after a fall it does not. Neither names a cause, which is a
+/// refusal's.
+#[test]
+fn a_timeout_is_told_from_a_lost_connection() {
+    let source = store();
+    let (mut client, _) = receiving_with(Log {
+        silent_puts: true,
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.kind, StopKind::Timeout, "{:?}", report.stopped);
+    assert_eq!(diagnosis.kind.name(), "timeout");
+    assert_eq!(diagnosis.code, Some(26), "ETIMED_OUT, ETP v1.2 section 24.3");
+    assert_eq!(diagnosis.cause, None);
+
+    let log = Arc::new(Mutex::new(Log::default()));
+    let mut client = session(
+        &log,
+        &[3, 4, 9, 18],
+        Fall::OnThe {
+            nth: 1,
+            protocol: PutDataObjects::PROTOCOL,
+            message_type: PutDataObjects::MESSAGE_TYPE,
+        },
+    );
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.kind, StopKind::Failed, "{:?}", report.stopped);
+    assert_eq!(diagnosis.kind.name(), "failed");
+    assert_eq!(diagnosis.cause, None);
 }

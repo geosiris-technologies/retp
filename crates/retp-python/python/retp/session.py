@@ -40,6 +40,11 @@ Methods, and the Rust function each one calls:
     reauthorize           Remote::reauthorize
     ping, close           Remote::ping, Remote::close
 
+`retp.plan_push(path, dataspace)` is energyml_etp_store::push::dry_run: what
+`push_epc` would send, with no session. A push's report says why it stopped in
+`report["stop"]` (push::Report::diagnosis), beside the sentence of
+`report["stopped"]`.
+
 `retp.uri(dataspace, qualified_type, uuid)` builds an object's canonical URI
 (energyml_core::identifiers::EtpUri::object_versioned).
 

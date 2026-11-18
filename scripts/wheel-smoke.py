@@ -24,6 +24,8 @@ is exercised:
     a writing one refuses what the bridge cannot convert (a customData value,
     an empty island) and takes a renewed token;
   * `retp.uri`, the canonical URI of an object;
+  * `retp.plan_push`, which needs no session: its refusals before any package
+    is planned (a package that is not there, an island of no object);
   * one session called from two threads: the second is refused by name
     (`SessionBusy`) while the first request is out, against a loopback server
     that never answers;
@@ -148,6 +150,14 @@ check(
 )
 err = raised(lambda: retp.uri("demo", "resqml20.obj_HorizonInterpretation", "not-a-uuid"), ValueError)
 check(err is not None, "retp.uri refuses what is not a uuid (ValueError)")
+
+# The plan of a push, with no session: refusals the Rust code makes before any
+# package is planned. No package ships with this script, so the plan itself is
+# tested in Rust (energyml-etp-store's push tests, retp-python's tests/push.rs).
+err = raised(lambda: retp.plan_push("no-such-package.epc", "demo"), retp.LocalError)
+check(err is not None and "no-such-package.epc" in str(err), "plan_push of a missing package is a LocalError")
+err = raised(lambda: retp.plan_push("in.epc", "demo", objects_per_island=0), ValueError)
+check(err is not None and "objects" in str(err), "plan_push refuses an island of no object (ValueError)")
 
 # One session, two threads: a REST request goes to a loopback server that takes
 # the connection and never answers, so the first thread holds the session; the

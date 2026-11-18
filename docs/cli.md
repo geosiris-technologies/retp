@@ -24,7 +24,7 @@ is not compiled for wasm.
 | `download <url> <dataspace>` | a whole dataspace into a directory; reconnects by itself | progress, then written, already there, failed |
 | `download-epc <url> <dataspace>` | a dataspace as an EPC, arrays in HDF5 files beside it; `--out`, `--only`, `--with-references`, `--no-arrays` | the package, and what was `left out:` |
 | `create-dataspace`, `delete-dataspace` | create a dataspace; delete one **and everything in it** | the dataspace |
-| `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions | every island; the exit code says whether all went |
+| `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions; `--plan` prints the islands and sends nothing | every island; the exit code says whether all went |
 | `shell <url>` | **one** session, then commands one per line | what each command prints |
 | `mcp <url>` | an MCP server over stdio, on one dataspace (feature `mcp`); see [MCP server](mcp.md) | nothing on stdout but the MCP protocol; logs on stderr |
 | `server add\|list\|show\|remove\|test\|default` | the [server catalogue](#server-catalogue): servers by name, secrets by reference | one line per server; a verdict per step |
@@ -273,6 +273,28 @@ declared in one message and filled block by block. `--one-by-one` sends each
 array in its own message, for a store that mishandles several in one.
 `--well-known` also sends the official dictionary's property kinds the package
 references without holding.
+
+`--plan` prints what the push would send and sends nothing: no session is
+opened and the server is not reached. Each island in order, with its objects,
+arrays, bytes and cycles (objects that reference each other, always sent
+together), each object's URI in the package and in the dataspace, then what the
+journal leaves out, what is left out and what leaves the package. The flags
+that decide the plan count (`--objects`, `--bytes`, `--only`, `--well-known`,
+`--json` or `--rest`, `--journal`, read and never written); `--skip-present`
+needs the server and is refused. The exit code fails when something would be
+left out, as a push's does.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --plan --objects 50
+```
+
+When a push stops on a refusal whose words open-etp-server (the OSDU Reservoir
+DDMS server) is documented to use (`{N} Missing reference(s)`, `{N} Orphan
+reference(s)`, `{N} Missing array(s)`, `{N} Orphan array(s)`, `Missing array
+container(s): ...`), a `cause:` line names it; for a missing reference, `may
+be missing:` lines list the references leaving the island that stopped. Those
+are the client's deduction from what leaves the package: the server names no
+target. Other words get no cause line.
 
 A push that stopped can start again, each with its own flag, all off by default:
 

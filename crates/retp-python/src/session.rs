@@ -42,8 +42,8 @@ use energyml_core::identifiers::{EtpUri, QualifiedType, normalize_uuid};
 use energyml_core::registry::{ReadMode, Registry};
 use energyml_etp_store::pack::{Packed, Wanted, pack};
 use energyml_etp_store::push::{
-    Budget, Options, Refusal, SkipReason, Split, SplitIsland, Stop, WellKnown, WriteFormat, chosen, push,
-    push_resumable, reconnecting,
+    Budget, Diagnosis, Island, NoPlan, Options, Plan, Refusal, SkipReason, Skipped, Split, SplitIsland, Stop,
+    WellKnown, WriteFormat, chosen, dry_run, push, push_resumable, reconnecting,
 };
 use energyml_etp_store::{DEFAULT_MESSAGE, read_object};
 use energyml_storage::EpcStore;
@@ -517,14 +517,152 @@ pub struct ArrayRead {
 /// One island of a push, as planned and as it went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IslandRow {
-    /// `committed`, `refused` or `not sent`.
+    /// `committed`, `refused` or `not sent` in a report; `planned` in a
+    /// plan.
     pub state: &'static str,
-    /// The objects in it.
+    /// The objects in it, by their URI in the source.
     pub uris: Vec<String>,
+    /// How many objects (`uris.len()`).
+    pub objects: usize,
     /// How many arrays go with them.
     pub arrays: usize,
     /// What they weigh.
     pub bytes: u64,
+    /// The sizes of its units, in order: one object, or one cycle
+    /// (`energyml_etp_store::push::Island::units`).
+    pub units: Vec<usize>,
+    /// Its cycles, each by its URIs in the source
+    /// (`energyml_etp_store::push::Island::cycles`).
+    pub cycles: Vec<Vec<String>>,
+    /// The objects by their URI in the destination, in the order of
+    /// `uris` - in a plan only.
+    pub destinations: Option<Vec<String>>,
+}
+
+impl IslandRow {
+    /// The library's island, with its state.
+    fn of(island: &Island, state: &'static str) -> Self {
+        IslandRow {
+            state,
+            uris: island.uris.clone(),
+            objects: island.uris.len(),
+            arrays: island.arrays,
+            bytes: island.bytes,
+            units: island.units.clone(),
+            cycles: island.cycles().into_iter().map(<[String]>::to_vec).collect(),
+            destinations: None,
+        }
+    }
+}
+
+/// The reasons of the skipped objects as words: `present`, `journal`.
+fn skipped_rows(skipped: Vec<Skipped>) -> Vec<(String, &'static str)> {
+    skipped
+        .into_iter()
+        .map(|one| {
+            let why = match one.why {
+                SkipReason::Present => "present",
+                SkipReason::Journal => "journal",
+            };
+            (one.uri, why)
+        })
+        .collect()
+}
+
+/// What a push would send - `energyml_etp_store::push::Plan`, flattened, its
+/// islands in the rows of a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushPlan {
+    /// The destination, as a dataspace URI.
+    pub dataspace: String,
+    /// The islands in the order a push sends them, each `planned`, with
+    /// its destination URIs.
+    pub islands: Vec<IslandRow>,
+    /// Objects that could not be sent at all, with why.
+    pub left_out: Vec<String>,
+    /// References that leave the source, `(from, to)`.
+    pub dangling: Vec<(String, String)>,
+    /// What the journal records, left out: `(uri, "journal")`.
+    pub skipped: Vec<(String, &'static str)>,
+}
+
+impl PushPlan {
+    /// The library's plan, flattened.
+    pub fn of(plan: Plan) -> Self {
+        let islands = plan
+            .islands
+            .iter()
+            .map(|island| IslandRow {
+                destinations: Some(
+                    plan.destinations_of(island)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                ..IslandRow::of(island, "planned")
+            })
+            .collect();
+        PushPlan {
+            dataspace: plan.dataspace,
+            islands,
+            left_out: plan.left_out,
+            dangling: plan.dangling,
+            skipped: skipped_rows(plan.skipped),
+        }
+    }
+}
+
+impl From<NoPlan> for Failure {
+    fn from(refused: NoPlan) -> Self {
+        let message = refused.to_string();
+        match refused {
+            // What the caller asked for, or the journal it named.
+            NoPlan::NeedsDestination(_) | NoPlan::Journal(_) => Failure::bad_argument(message),
+            NoPlan::Source(_) => Failure::local(message),
+        }
+    }
+}
+
+/// What a push of the EPC at `path` into `dataspace` would send, with no
+/// session: `energyml_etp_store::push::dry_run`, with the options `push_epc`
+/// builds from the same words (`PushChoices::options`). The words that act
+/// on the session alone (`one_by_one`, `split`, `reconnect`) change nothing
+/// in it; `skip_present` is refused by the library, by name.
+pub fn plan_epc(path: &str, dataspace: &str, choices: &PushChoices) -> Result<PushPlan, Failure> {
+    choices.check()?;
+    let registry = Arc::new(energyml_schemas::all());
+    let store = EpcStore::open(path, registry.clone())
+        .map_err(|why| Failure::local(format!("cannot open {path}: {why}")))?;
+    plan_store(&store, &registry, dataspace, choices)
+}
+
+/// [`plan_epc`] of a package already open - and what tests call with a
+/// package staged in memory.
+pub fn plan_store(
+    store: &EpcStore,
+    registry: &Registry,
+    dataspace: &str,
+    choices: &PushChoices,
+) -> Result<PushPlan, Failure> {
+    choices.check()?;
+    let source: &(dyn EnergymlStorage + Sync) = store;
+    let only = only_of(source, choices)?;
+    let options = choices.options(registry, only.as_deref());
+    let plan = blocking(dry_run(source, dataspace, &options))?;
+    Ok(PushPlan::of(plan))
+}
+
+/// `only=`, matched against the source's own URIs (`push::chosen`).
+fn only_of(
+    source: &(dyn EnergymlStorage + Sync),
+    choices: &PushChoices,
+) -> Result<Option<Vec<String>>, Failure> {
+    match &choices.only {
+        Some(names) => Ok(Some(
+            blocking(chosen(source, names)).map_err(Failure::bad_argument)?,
+        )),
+        None => Ok(None),
+    }
 }
 
 /// What a push came to - `energyml_etp_store::push::Report`, flattened.
@@ -542,6 +680,8 @@ pub struct PushReport {
     pub without_transactions: bool,
     /// Why the push stopped, `None` when every island went through.
     pub stopped: Option<String>,
+    /// The same stop, sorted (`energyml_etp_store::push::Report::diagnosis`).
+    pub stop: Option<Diagnosis>,
     /// Every object or array of the island that stopped that the store
     /// refused, with its code (`energyml_etp_store::push::Report::refusals`).
     pub refusals: Vec<Refusal>,
@@ -574,8 +714,8 @@ impl PushReport {
             .islands
             .iter()
             .enumerate()
-            .map(|(rank, island)| IslandRow {
-                state: if rank < report.sent {
+            .map(|(rank, island)| {
+                let state = if rank < report.sent {
                     "committed"
                 } else if report
                     .stopped
@@ -585,12 +725,11 @@ impl PushReport {
                     "refused"
                 } else {
                     "not sent"
-                },
-                uris: island.uris.clone(),
-                arrays: island.arrays,
-                bytes: island.bytes,
+                };
+                IslandRow::of(island, state)
             })
             .collect();
+        let stop = report.diagnosis();
         let stopped = report.stopped.as_ref().map(|stopped| match &stopped.why {
             Stop::Refused(why) => format!("island {} was refused: {why}", stopped.island + 1),
             Stop::Failed(why) => format!(
@@ -610,18 +749,9 @@ impl PushReport {
             dangling: report.dangling,
             without_transactions: report.without_transactions,
             stopped,
+            stop,
             refusals: report.refusals,
-            skipped: report
-                .skipped
-                .into_iter()
-                .map(|one| {
-                    let why = match one.why {
-                        SkipReason::Present => "present",
-                        SkipReason::Journal => "journal",
-                    };
-                    (one.uri, why)
-                })
-                .collect(),
+            skipped: skipped_rows(report.skipped),
             splits: report.splits,
             reconnections: report.reconnections,
             reopened: report.reopened,
@@ -975,10 +1105,7 @@ impl Session {
         choices: &PushChoices,
     ) -> Result<PushReport, Failure> {
         let source: &(dyn EnergymlStorage + Sync) = store;
-        let only = match &choices.only {
-            Some(names) => Some(blocking(chosen(source, names)).map_err(Failure::bad_argument)?),
-            None => None,
-        };
+        let only = only_of(source, choices)?;
         // Its own handle: the options borrow it while the session is borrowed to send.
         let registry = self.registry.clone();
         let options = choices.options(&registry, only.as_deref());

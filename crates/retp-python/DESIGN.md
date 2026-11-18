@@ -30,7 +30,8 @@ Bound, function by function (Python name, then the Rust item it calls):
 | `Session.resources(dataspace, depth=, scope=, types=, edges=, count=)` | `retp_client::list_resources` with a `ResourceQuery`; `dataspace_uri` |
 | `Session.get_object(uri)`, `get_objects(uris)` | `retp_client::get_data_objects` (format `xml`), then `energyml_etp_store::read_object`, then `energyml_core::json::write_string` |
 | `Session.put_objects(dataspace, objects, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=, skip_present=, journal=, split=, split_limit=, reconnect=, reconnect_pause=, resume_session=)` | `energyml_core::json::read_string`, `EpcStore::put` (in memory), then `energyml_etp_store::push::push` (see gap G1), as `push_epc` |
-| `Session.push_epc(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=, skip_present=, journal=, split=, split_limit=, reconnect=, reconnect_pause=, resume_session=)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` with the `Options` the command line's `push` builds (`PushChoices::options`, `retp-cli`'s `push_options`); `push::chosen` for `only`; with `reconnect`, `push::push_resumable` over `native::Resuming` (`PushChoices::resuming`), whose sessions are opened as `connect` opened this one, and `push::reconnecting` for the `Retry`; with `resume_session`, `Resuming::ask`, so that each new connection is `LiveSession::connect_resuming` (OSDU's `ResumeSession`, an extension, off by default); the report's `refusals`, `skipped`, `splits`, `reconnections`, `reopened` are `push::Report`'s |
+| `Session.push_epc(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=, skip_present=, journal=, split=, split_limit=, reconnect=, reconnect_pause=, resume_session=)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` with the `Options` the command line's `push` builds (`PushChoices::options`, `retp-cli`'s `push_options`); `push::chosen` for `only`; with `reconnect`, `push::push_resumable` over `native::Resuming` (`PushChoices::resuming`), whose sessions are opened as `connect` opened this one, and `push::reconnecting` for the `Retry`; with `resume_session`, `Resuming::ask`, so that each new connection is `LiveSession::connect_resuming` (OSDU's `ResumeSession`, an extension, off by default); the report's `refusals`, `skipped`, `splits`, `reconnections`, `reopened` are `push::Report`'s; `stop` is `push::Report::diagnosis` (its `cause` `push::Cause`), each refusal's `cause` `push::Refusal::cause`; the island rows' `units` and `cycles` are `push::Island::units` and `Island::cycles` |
+| `retp.plan_push(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, json=, skip_present=, journal=)` | no session: `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::dry_run` with the `Options` `push_epc` builds (`PushChoices::options`); `push::chosen` for `only`; `skip_present` refused by `dry_run` (`NoPlan::NeedsDestination`, a `ValueError`); the island rows' `destinations` are `push::Plan::destinations_of` |
 | `Session.reauthorize(token)` | `Credentials::bearer`, then `native::Remote::reauthorize`; accepted, the credentials a push that reconnects opens its sessions with |
 | `retp.uri(dataspace, qualified_type, uuid, version=)` | `EtpUri::object_versioned`, read back by `EtpUri::parse` |
 | `Session.array_metadata(uri, paths)` | `retp_client::arrays::array_metadata` |
@@ -296,8 +297,11 @@ TODO(verify): that this works on Linux, macOS and Windows.
 - `tests/push.rs`: the push keywords' conversions (`split`,
   `reconnect_pause`, `journal`, `resume_session` and the connector's `ask`,
   the library's `Options` and their defaults) and the report's `skipped`,
-  `splits`, `reconnections`, `reopened` and a
-  push that gave up; what a push does is tested in `energyml-etp-store`.
+  `splits`, `reconnections`, `reopened`, a
+  push that gave up, the sorted `stop` beside the sentence; a plan's rows
+  (destinations, units, cycles) and `plan_push`'s refusals (`skip_present`,
+  a package that is not there). What a push and a plan do is tested in
+  `energyml-etp-store`.
 - `tests/scope.rs`: the dependency allow-list.
 - `tests/live.rs`: three read-only checks against a real server, behind the
   `live-server` feature and `#[ignore]`.

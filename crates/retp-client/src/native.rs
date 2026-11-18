@@ -728,6 +728,27 @@ impl Remote {
         }
     }
 
+    /// Renew the authorization with `credentials`, whatever the transport -
+    /// the one door a caller that holds a [`Remote`] goes through.
+    ///
+    /// Over ETP, an `Authorize` on the open session and the wait for its
+    /// answer ([`Client::reauthorize`], ETP v1.2 section 3.13.5): a refusal is
+    /// [`ClientError::AuthorizationNeeded`], and the session is still open.
+    /// Over REST there is no session to renew: every request from now on
+    /// carries these credentials ([`RestClient::reauthorize`]), and the server
+    /// judges them at the next one.
+    pub fn reauthorize(&mut self, credentials: &Credentials) -> Result<(), ClientError> {
+        match self {
+            Remote::Etp(client) => client.reauthorize(credentials),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.reauthorize(credentials),
+            Remote::Rest(rest) => {
+                rest.reauthorize(credentials.clone());
+                Ok(())
+            }
+        }
+    }
+
     /// What the REST server says of its build; `None` over a WebSocket.
     pub fn health(&mut self) -> Option<Result<String, ClientError>> {
         match self {

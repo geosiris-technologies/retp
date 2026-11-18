@@ -1185,6 +1185,7 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
         // from the server, is the one that checks.
         expected: None,
         overwrite: false,
+        ..Options::default()
     };
     let report = retp_client::blocking(push(
         session,
@@ -1196,6 +1197,7 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
                 eprintln!("plan	{islands} island(s), {objects} object(s)")
             }
             PushProgress::Sent { island, of } => eprintln!("sent	island {}/{of}", island + 1),
+            PushProgress::Split { island, into } => eprintln!("split	island {} into {into}", island + 1),
         },
     ))?;
     for (rank, island) in report.islands.iter().enumerate() {
@@ -1240,6 +1242,11 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
                 "stopped at island {}: {why} (the island's outcome is unknown)",
                 stopped.island + 1
             ),
+            Stop::GaveUp { attempts, last } => eprintln!(
+                "stopped at island {}: the connection fell {attempts} time(s) in a row, and the push gave up: {last} (the island's outcome is unknown)",
+                stopped.island + 1
+            ),
+            Stop::Journal(why) => eprintln!("stopped at island {}: the journal: {why}", stopped.island + 1),
         }
     }
     for refused in &report.refusals {

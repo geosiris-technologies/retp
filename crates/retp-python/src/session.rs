@@ -575,6 +575,11 @@ impl PushReport {
                 "island {} stopped: {why} (the island's outcome is unknown)",
                 stopped.island + 1
             ),
+            Stop::GaveUp { attempts, last } => format!(
+                "island {} stopped: the connection fell {attempts} time(s) in a row, and the push gave up: {last} (the island's outcome is unknown)",
+                stopped.island + 1
+            ),
+            Stop::Journal(why) => format!("stopped before island {}: the journal: {why}", stopped.island + 1),
         });
         PushReport {
             islands,
@@ -928,6 +933,7 @@ impl Session {
             // A file knows no `storeLastWrite`: nothing to compare against.
             expected: None,
             overwrite: false,
+            ..Options::default()
         };
         let report = blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?;
         Ok(PushReport::of(report))

@@ -8,24 +8,33 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use energyml_etp_store::push::{Options, Progress, Stop, WellKnown, WriteFormat, chosen, push};
-use retp_avro::Role;
+use energyml_etp_store::push::{
+    Options, Progress, SkipReason, Split, Stop, WellKnown, WriteFormat, chosen, push, push_resumable,
+};
+use retp_avro::{Avro, EtpMessage, Reader, Role};
 use retp_client::memory::{ManualClock, MemoryTransport};
+use retp_client::resume::{Connector, Retry, RunEvent, Setback};
 use retp_client::{Client, Settings, writing_client};
 use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder};
 use retp_proto::negotiate::{Offer, ProtocolOffer};
 use retp_proto::wire::{Body, Delivery, EtpError};
+use retp_types::datatypes::MessageHeader;
+use retp_types::datatypes::data_array_types::DataArrayMetadata;
 use retp_types::datatypes::object::PutResponse;
 use retp_types::datatypes::{AnyArrayItem, SupportedDataObject, Uuid};
 use retp_types::dispatch::Message;
 use retp_types::protocol::data_array::{
-    PutDataArraysResponse, PutDataSubarraysResponse, PutUninitializedDataArraysResponse,
+    GetDataArrayMetadataResponse, PutDataArraysResponse, PutDataSubarraysResponse,
+    PutUninitializedDataArraysResponse,
 };
-use retp_types::protocol::store::PutDataObjectsResponse;
+use retp_types::protocol::store::{PutDataObjects, PutDataObjectsResponse};
 use retp_types::protocol::transaction::{
-    CommitTransactionResponse, RollbackTransactionResponse, StartTransactionResponse,
+    CommitTransaction, CommitTransactionResponse, RollbackTransactionResponse, StartTransactionResponse,
 };
 
 use common::*;
@@ -60,11 +69,18 @@ struct Log {
     /// `StartTransaction` - what some REST APIs do, naming the transaction
     /// `null`.
     no_transactions: bool,
-    /// What this store wrote on its own, and when - listed by Discovery
-    /// after a `storeLastWriteFilter`.
+    /// What this store holds or wrote on its own, and when - listed by
+    /// Discovery, after a `storeLastWriteFilter` when there is one.
     changed: Vec<(String, i64)>,
     /// What it deleted, and when.
     gone: Vec<(String, i64)>,
+    /// Answer a `PutDataObjects` of more objects than this with one
+    /// `ProtocolException` for the whole request, `EREQUEST_DENIED` - a store
+    /// that takes small requests and refuses big ones.
+    refuse_more_than: Option<usize>,
+    /// End every `GetResources` with this `EREQUEST_DENIED` - a listing the
+    /// store cuts short.
+    refuse_listing: Option<&'static str>,
 }
 
 /// A store that takes writes and remembers them - the destination.
@@ -123,6 +139,17 @@ impl Handler for Receiving {
                 responder.send(out);
             }
             Message::PutDataObjects(request) => {
+                let too_many = log
+                    .refuse_more_than
+                    .is_some_and(|most| request.data_objects.len() > most);
+                if too_many {
+                    let out = responder.wire().refuse(
+                        delivery,
+                        &EtpError::EREQUEST_DENIED.with_detail("too many objects at once".to_string()),
+                    );
+                    responder.send(out);
+                    return Ok(Handled::Answered);
+                }
                 if let Some(why) = log.refuse_request {
                     let out = responder
                         .wire()
@@ -287,6 +314,47 @@ impl Handler for Receiving {
                     .unwrap();
                 responder.send_all(out);
             }
+            Message::GetDataArrayMetadata(request) => {
+                // What it holds of each array, by `(uri, path)`; an array it
+                // does not hold is `ENOT_FOUND`.
+                let mut reply = responder
+                    .wire()
+                    .begin_response(delivery)
+                    .for_keys(request.data_arrays.keys().cloned());
+                let mut array_metadata = BTreeMap::new();
+                for (key, id) in &request.data_arrays {
+                    match log.arrays.get(&(id.uri.clone(), id.path_in_resource.clone())) {
+                        Some((dimensions, _)) => {
+                            reply.answered(key.clone()).unwrap();
+                            array_metadata.insert(
+                                key.clone(),
+                                DataArrayMetadata {
+                                    dimensions: dimensions.clone(),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        None => reply
+                            .failed(
+                                key.clone(),
+                                &EtpError::ENOT_FOUND.with_detail("no such array".to_string()),
+                            )
+                            .unwrap(),
+                    }
+                }
+                let out = responder
+                    .wire()
+                    .last(&mut reply, &GetDataArrayMetadataResponse { array_metadata })
+                    .unwrap();
+                responder.send_all(out);
+            }
+            Message::GetResources(_) if log.refuse_listing.is_some() => {
+                let why = log.refuse_listing.unwrap_or_default();
+                let out = responder
+                    .wire()
+                    .refuse(delivery, &EtpError::EREQUEST_DENIED.with_detail(why.to_string()));
+                responder.send(out);
+            }
             Message::GetResources(request) => {
                 // What was written after the filter (strict, §3.12.8); every
                 // change when no filter is given.
@@ -347,6 +415,28 @@ fn receiving_speaking(
     protocols: &[i32],
 ) -> (Client<MemoryTransport, ManualClock>, Arc<Mutex<Log>>) {
     let log = Arc::new(Mutex::new(log));
+    (session(&log, protocols, Fall::Never), log)
+}
+
+/// Where a session's connection falls.
+#[derive(Debug, Clone, Copy)]
+enum Fall {
+    /// It does not.
+    Never,
+    /// On the `nth` message (counted from 1) of this protocol and type it
+    /// sends, which is not delivered.
+    OnThe {
+        nth: usize,
+        protocol: i32,
+        message_type: i32,
+    },
+    /// On every `PutDataObjects` of more objects than this - a server that
+    /// hangs up on a request too heavy for it.
+    OnMoreObjectsThan(usize),
+}
+
+/// A writing session with the store whose log is `log`.
+fn session(log: &Arc<Mutex<Log>>, protocols: &[i32], fall: Fall) -> Client<MemoryTransport, ManualClock> {
     let mut offer = Offer::new("a receiving store", "0.1", Uuid([3; 16]));
     // Both forms, so that a push may say which: the session agrees the
     // intersection, and a JSON push into a store that agreed XML alone is
@@ -364,12 +454,34 @@ fn receiving_speaking(
         .map(|p| {
             Box::new(Receiving {
                 protocol: *p,
-                log: Arc::clone(&log),
+                log: Arc::clone(log),
             }) as Box<dyn Handler>
         })
         .collect();
     let server = Connection::server(offer, handlers, None, Uuid([0xBC; 16]), T0).unwrap();
     let clock = ManualClock::new(T0);
+    let transport = MemoryTransport::new(server, clock.clone());
+    let transport = match fall {
+        Fall::Never => transport,
+        Fall::OnThe {
+            nth,
+            protocol,
+            message_type,
+        } => {
+            let seen = AtomicUsize::new(0);
+            transport.falls_when(move |message| {
+                let header = MessageHeader::read(&mut Reader::new(message)).unwrap();
+                (header.protocol, header.message_type) == (protocol, message_type)
+                    && seen.fetch_add(1, Ordering::SeqCst) + 1 == nth
+            })
+        }
+        Fall::OnMoreObjectsThan(most) => transport.falls_when(move |message| {
+            let mut input = Reader::new(message);
+            let header = MessageHeader::read(&mut input).unwrap();
+            (header.protocol, header.message_type) == (PutDataObjects::PROTOCOL, PutDataObjects::MESSAGE_TYPE)
+                && PutDataObjects::read(&mut input).unwrap().data_objects.len() > most
+        }),
+    };
     let (offer, handlers) = writing_client(
         "the push's tests",
         "0.1",
@@ -380,16 +492,7 @@ fn receiving_speaking(
             "eml23.*".to_string(),
         ],
     );
-    let client = Client::open(
-        MemoryTransport::new(server, clock.clone()),
-        clock,
-        offer,
-        handlers,
-        None,
-        Settings::default(),
-    )
-    .unwrap();
-    (client, log)
+    Client::open(transport, clock, offer, handlers, None, Settings::default()).unwrap()
 }
 
 const THERE: &str = "eml:///dataspace('there')";
@@ -1041,4 +1144,493 @@ fn an_object_changed_on_the_store_since_it_was_taken_is_not_overwritten() {
     );
     assert!(report.stopped.is_some());
     assert!(log.lock().unwrap().objects.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Starting again: what is there, the journal, the splits, the reconnection
+// ---------------------------------------------------------------------------
+
+fn crs_there() -> String {
+    format!("{THERE}/resqml20.obj_LocalDepth3dCrs({CRS})")
+}
+
+fn proxy_there() -> String {
+    format!("{THERE}/eml20.obj_EpcExternalPartReference({PROXY})")
+}
+
+fn points_there() -> String {
+    format!("{THERE}/resqml20.obj_PointSetRepresentation({POINTS})")
+}
+
+/// A journal file of its own for one test, removed first: written by the
+/// test, read by the test, never a file from outside.
+fn journal_path(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("retp-push-{name}-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn lines_of(path: &PathBuf) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// **What the destination holds already is left out, when asked** - and
+/// only what it holds whole. Listed there with its array of the same
+/// dimensions, an object is skipped and named; listed there with an array of
+/// other dimensions, it is sent again, since skipping it would lose it.
+/// Without the option, everything goes, as before.
+#[test]
+fn what_the_destination_holds_already_is_left_out_when_asked() {
+    let source = store();
+    let held = |dimensions: Vec<i64>| Log {
+        changed: vec![(crs_there(), T0), (proxy_there(), T0), (points_there(), T0)],
+        arrays: [((proxy_there(), "/points".to_string()), (dimensions, vec![0.0; 6]))]
+            .into_iter()
+            .collect(),
+        ..Log::default()
+    };
+    let skipping = Options {
+        skip_present: true,
+        ..Default::default()
+    };
+
+    // All there, the array whole: nothing is written.
+    let (mut client, log) = receiving_with(held(vec![2, 3]));
+    let report = block(push(&mut client, &source, "there", &skipping, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    let skipped: Vec<(&str, SkipReason)> = report
+        .skipped
+        .iter()
+        .map(|one| (one.uri.as_str(), one.why))
+        .collect();
+    assert_eq!(skipped.len(), 3, "{skipped:?}");
+    assert!(skipped.iter().all(|(_, why)| *why == SkipReason::Present));
+    assert!(report.islands.is_empty(), "{:?}", report.islands);
+    assert!(log.lock().unwrap().objects.is_empty());
+
+    // The array there under other dimensions: the point set goes again.
+    let (mut client, log) = receiving_with(held(vec![3, 2]));
+    let report = block(push(&mut client, &source, "there", &skipping, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    let skipped: Vec<&str> = report.skipped.iter().map(|one| one.uri.as_str()).collect();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert!(!skipped.contains(&points_there().as_str()), "{skipped:?}");
+    let sent: Vec<String> = log
+        .lock()
+        .unwrap()
+        .objects
+        .iter()
+        .map(|(uri, _)| uri.clone())
+        .collect();
+    assert_eq!(sent, [points_there()]);
+
+    // Not asked: everything goes.
+    let (mut client, log) = receiving_with(held(vec![2, 3]));
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert!(report.skipped.is_empty());
+    assert_eq!(log.lock().unwrap().objects.len(), 3);
+}
+
+/// **A listing the store cut short cannot say what is not there**: the push
+/// asked to skip what is there stops by name, before anything is written.
+#[test]
+fn a_listing_cut_short_stops_a_push_that_skips_what_is_there() {
+    let source = store();
+    let (mut client, log) = receiving_with(Log {
+        refuse_listing: Some("listing denied"),
+        ..Log::default()
+    });
+    let options = Options {
+        skip_present: true,
+        ..Default::default()
+    };
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    let stopped = report.stopped.as_ref().expect("stopped before writing");
+    assert!(
+        matches!(&stopped.why, Stop::Refused(why) if why.contains("cut short") && why.contains("listing denied")),
+        "{:?}",
+        stopped.why
+    );
+    assert_eq!(report.sent, 0);
+    assert!(log.lock().unwrap().objects.is_empty());
+}
+
+/// **A journal lets a stopped push go on where it stopped.** The first push
+/// commits the island without arrays and is refused the next: the journal
+/// records the first, by the objects' URIs in the destination. Started again
+/// with the same journal, the push leaves those out, names them, sends the
+/// rest, and records it too.
+#[test]
+fn a_journal_lets_a_stopped_push_go_on_where_it_stopped() {
+    let source = store();
+    let path = journal_path("go-on");
+    let options = Options {
+        journal: Some(&path),
+        ..Default::default()
+    };
+
+    let (mut client, _) = receiving_with(Log {
+        refuse_arrays: Some("no room for arrays"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(report.sent, 1, "{:?}", report.stopped);
+    let lines = lines_of(&path);
+    assert_eq!(lines.len(), 2, "the header and one island: {lines:?}");
+    assert_eq!(lines[0]["dataspace"], THERE);
+    let mut committed: Vec<String> = lines[1]["committed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|uri| uri.as_str().unwrap().to_string())
+        .collect();
+    committed.sort();
+    let mut expected = vec![crs_there(), proxy_there()];
+    expected.sort();
+    assert_eq!(committed, expected);
+
+    let (mut client, log) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    let mut skipped: Vec<String> = report
+        .skipped
+        .iter()
+        .inspect(|one| assert_eq!(one.why, SkipReason::Journal))
+        .map(|one| one.uri.clone())
+        .collect();
+    skipped.sort();
+    assert_eq!(skipped, expected);
+    let sent: Vec<String> = log
+        .lock()
+        .unwrap()
+        .objects
+        .iter()
+        .map(|(uri, _)| uri.clone())
+        .collect();
+    assert_eq!(sent, [points_there()], "only what the journal does not record");
+    assert_eq!(lines_of(&path).len(), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A journal for another dataspace, or another package, is refused by
+/// name**, before anything is written: what it records would be taken for
+/// what is there. Another selection of the same package is another package.
+#[test]
+fn a_journal_for_another_dataspace_or_package_is_refused() {
+    let source = store();
+    let path = journal_path("other");
+    let options = Options {
+        journal: Some(&path),
+        ..Default::default()
+    };
+    let (mut client, _) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+
+    let (mut client, log) = receiving(None);
+    let report = block(push(&mut client, &source, "elsewhere", &options, |_| {})).unwrap();
+    assert!(
+        matches!(&report.stopped.as_ref().unwrap().why, Stop::Journal(why) if why.contains("written for a push into")),
+        "{:?}",
+        report.stopped
+    );
+    assert!(log.lock().unwrap().objects.is_empty());
+
+    let listed = block(energyml_storage::storage::EnergymlStorage::resources(&source)).unwrap();
+    let only = [listed[0].uri.clone()];
+    let fewer = Options {
+        journal: Some(&path),
+        only: Some(&only),
+        ..Default::default()
+    };
+    let (mut client, log) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &fewer, |_| {})).unwrap();
+    assert!(
+        matches!(&report.stopped.as_ref().unwrap().why, Stop::Journal(why) if why.contains("another package")),
+        "{:?}",
+        report.stopped
+    );
+    assert!(log.lock().unwrap().objects.is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A line cut while it was written is dropped**, and its island sent
+/// again: the journal never says more than what is known to be there.
+#[test]
+fn a_journal_line_cut_while_written_is_dropped() {
+    let source = store();
+    let path = journal_path("cut");
+    let options = Options {
+        journal: Some(&path),
+        ..Default::default()
+    };
+    let (mut client, _) = receiving(None);
+    block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    // The last island's line, cut before its end of line.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let cut = &text[..text.len() - 10];
+    std::fs::write(&path, cut).unwrap();
+
+    let (mut client, log) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    let sent: Vec<String> = log
+        .lock()
+        .unwrap()
+        .objects
+        .iter()
+        .map(|(uri, _)| uri.clone())
+        .collect();
+    assert_eq!(sent, [points_there()], "the island whose line was cut");
+    assert_eq!(lines_of(&path).len(), 3, "and the journal reads whole again");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A refused island is split, when asked, and its pieces go.** The store
+/// refuses any request of more than one object: as before, the push stops
+/// at the first island; halved, or one object at a time, it goes through,
+/// the split named with what the store said. A split limit of nothing is no
+/// split.
+#[test]
+fn a_refused_island_is_split_when_asked_and_its_pieces_go() {
+    let source = store();
+    let small = || Log {
+        refuse_more_than: Some(1),
+        ..Log::default()
+    };
+
+    let (mut client, _) = receiving_with(small());
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert_eq!(report.stopped.as_ref().map(|s| s.island), Some(0));
+    assert!(report.splits.is_empty());
+
+    for how in [Split::Halve, Split::Single] {
+        let (mut client, log) = receiving_with(small());
+        let options = Options {
+            split: how,
+            ..Default::default()
+        };
+        let mut said = Vec::new();
+        let report = block(push(&mut client, &source, "there", &options, |event| {
+            said.push(event)
+        }))
+        .unwrap();
+        assert!(report.stopped.is_none(), "{how:?}: {:?}", report.stopped);
+        assert_eq!(report.splits.len(), 1, "{how:?}: {:?}", report.splits);
+        let split = &report.splits[0];
+        assert_eq!((split.island, split.into, split.uris.len()), (0, 2, 2));
+        assert_eq!(split.refusals.len(), 2, "{:?}", split.refusals);
+        assert!(
+            split.refusals.iter().all(|r| r.code == Some(6)),
+            "EREQUEST_DENIED, section 24.3"
+        );
+        assert_eq!(report.islands.len(), 3, "the two pieces in the island's place");
+        assert_eq!(report.sent, 3);
+        assert!(said.contains(&Progress::Split { island: 0, into: 2 }), "{said:?}");
+        assert_eq!(log.lock().unwrap().objects.len(), 3);
+    }
+
+    let (mut client, _) = receiving_with(small());
+    let options = Options {
+        split: Split::Halve,
+        split_limit: 0,
+        ..Default::default()
+    };
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(report.stopped.as_ref().map(|s| s.island), Some(0));
+    assert!(report.splits.is_empty());
+}
+
+/// **A refusal a split cannot narrow further stops the push there**, and its
+/// refusals are the last ones: the CRS is refused alone, the push stops at
+/// its piece, and the split before it keeps what the whole island was told.
+#[test]
+fn a_refusal_split_down_to_one_object_stops_there() {
+    let source = store();
+    let (mut client, _) = receiving_with(Log {
+        refuse_one: Some((CRS, "the CRS does not validate")),
+        ..Log::default()
+    });
+    let options = Options {
+        split: Split::Halve,
+        ..Default::default()
+    };
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(report.splits.len(), 1, "{:?}", report.splits);
+    let stopped = report.stopped.as_ref().expect("the push stopped");
+    assert_eq!(report.islands[stopped.island].uris.len(), 1);
+    assert!(report.islands[stopped.island].uris[0].contains(CRS));
+    assert_eq!(report.refusals.len(), 1, "{:?}", report.refusals);
+    assert!(report.refusals[0].uri.contains(CRS));
+    assert_eq!(report.refusals[0].code, Some(14), "EINVALID_OBJECT, section 24.3");
+}
+
+/// Sessions with one receiving store, opened one after the other by the
+/// push's runner: session `n` falls as `falls[n]` says - the last entry
+/// holds for every session after it - and nothing waits between two.
+struct Sessions {
+    log: Arc<Mutex<Log>>,
+    falls: Vec<Fall>,
+    opened: usize,
+    pauses: Vec<Duration>,
+}
+
+impl Sessions {
+    fn new(falls: Vec<Fall>) -> Self {
+        Sessions {
+            log: Arc::new(Mutex::new(Log::default())),
+            falls,
+            opened: 0,
+            pauses: Vec::new(),
+        }
+    }
+}
+
+impl Connector for Sessions {
+    type Session = Client<MemoryTransport, ManualClock>;
+
+    fn connect(&mut self) -> Result<Self::Session, Box<dyn std::error::Error + Send + Sync>> {
+        let fall = self
+            .falls
+            .get(self.opened)
+            .or(self.falls.last())
+            .copied()
+            .unwrap_or(Fall::Never);
+        self.opened += 1;
+        Ok(session(&self.log, &[3, 4, 9, 18], fall))
+    }
+
+    fn pause(&mut self, how_long: Duration) {
+        self.pauses.push(how_long);
+    }
+}
+
+fn retrying(max_retries: u32) -> Retry {
+    Retry {
+        max_retries,
+        first_pause: Duration::from_millis(10),
+        longest_pause: Duration::from_millis(40),
+    }
+}
+
+/// **A connection that falls is reopened, and the push goes on from the
+/// first island not committed.** The first session falls on the second
+/// commit, which never reaches the store; the second session sends that
+/// island again, whole, and not the one committed before it.
+#[test]
+fn a_fallen_connection_is_reopened_and_the_push_goes_on() {
+    let source = store();
+    let mut sessions = Sessions::new(vec![
+        Fall::OnThe {
+            nth: 2,
+            protocol: CommitTransaction::PROTOCOL,
+            message_type: CommitTransaction::MESSAGE_TYPE,
+        },
+        Fall::Never,
+    ]);
+    let mut session = None;
+    let mut events = Vec::new();
+    let report = push_resumable(
+        &mut sessions,
+        &mut session,
+        &source,
+        "there",
+        &Options::default(),
+        &retrying(3),
+        |event| events.push(event),
+    )
+    .unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    assert_eq!(report.sent, 2);
+    assert_eq!(report.reconnections, 1);
+    assert_eq!(sessions.opened, 2);
+    assert_eq!(sessions.pauses, [Duration::from_millis(10)]);
+    assert!(session.is_some(), "the last session is left open");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Setback(Setback::Reconnecting { .. }))),
+        "{events:?}"
+    );
+    let log = sessions.log.lock().unwrap();
+    assert_eq!(
+        log.transactions,
+        ["start", "commit", "start", "array", "start", "array", "commit"],
+        "the island with the array twice, the first island once"
+    );
+    let crs_writes = log.objects.iter().filter(|(uri, _)| uri.contains(CRS)).count();
+    assert_eq!(crs_writes, 1, "what committed is not sent again");
+}
+
+/// **A push gives up after so many falls in a row**, and says it did: the
+/// island it stopped at is named, its outcome unknown. An island the
+/// connection falls on twice in a row is halved before the next try.
+#[test]
+fn a_push_gives_up_after_so_many_falls_in_a_row() {
+    let source = store();
+    let mut sessions = Sessions::new(vec![Fall::OnThe {
+        nth: 1,
+        protocol: PutDataObjects::PROTOCOL,
+        message_type: PutDataObjects::MESSAGE_TYPE,
+    }]);
+    let mut session = None;
+    let report = push_resumable(
+        &mut sessions,
+        &mut session,
+        &source,
+        "there",
+        &Options::default(),
+        &retrying(3),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.sent, 0);
+    match &report.stopped.as_ref().expect("it gave up").why {
+        Stop::GaveUp { attempts, last } => {
+            assert_eq!(*attempts, 3);
+            assert!(last.contains("fell"), "{last}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(report.reconnections, 2);
+    assert_eq!(
+        report.splits.len(),
+        1,
+        "halved after the second fall: {:?}",
+        report.splits
+    );
+    assert!(
+        report.splits[0].why.contains("connection"),
+        "{:?}",
+        report.splits[0]
+    );
+}
+
+/// **A server that hangs up on heavy requests gets halves.** It falls on
+/// any `PutDataObjects` of more than one object: after two falls on the
+/// first island, the island is halved, and the push goes through.
+#[test]
+fn a_server_that_hangs_up_on_heavy_requests_gets_halves() {
+    let source = store();
+    let mut sessions = Sessions::new(vec![Fall::OnMoreObjectsThan(1)]);
+    let mut session = None;
+    let report = push_resumable(
+        &mut sessions,
+        &mut session,
+        &source,
+        "there",
+        &Options::default(),
+        &retrying(3),
+        |_| {},
+    )
+    .unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    assert_eq!(report.reconnections, 2);
+    assert_eq!(report.splits.len(), 1, "{:?}", report.splits);
+    assert_eq!(report.sent, report.islands.len());
+    assert_eq!(report.islands.len(), 3);
 }

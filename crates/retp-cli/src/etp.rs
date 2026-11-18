@@ -1139,30 +1139,21 @@ fn delete_dataspace(session: &mut Session, dataspace: &str) -> Result<bool> {
 /// as the source. The exit code says whether everything went.
 fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     use energyml_etp_store::push::{
-        Budget, Options, Progress as PushProgress, Stop, WellKnown, WriteFormat, push,
+        Budget, Options, Progress as PushProgress, Stop, WellKnown, WriteFormat, chosen, push,
     };
-    use energyml_storage::storage::EnergymlStorage;
     use retp_client::arrays::Grouping;
     let registry = std::sync::Arc::new(energyml_schemas::all());
     let store = energyml_storage::EpcStore::open(&args.epc, registry.clone())
         .with_context(|| format!("opening {}", args.epc.display()))?;
-    // `--only` by uuid: matched against the package's own URIs.
+    // `--only`: URIs or uuids, matched against the package's own URIs by the
+    // library (`push::chosen`).
     let only: Option<Vec<String>> = if args.only.is_empty() {
         None
     } else {
-        let listed = retp_client::blocking(EnergymlStorage::resources(&store))?;
-        let mut chosen = Vec::new();
-        for wanted in &args.only {
-            let lower = wanted.to_ascii_lowercase();
-            match listed
-                .iter()
-                .find(|one| one.uri == *wanted || one.uuid.eq_ignore_ascii_case(&lower))
-            {
-                Some(found) => chosen.push(found.uri.clone()),
-                None => anyhow::bail!("{wanted}: not in {}", args.epc.display()),
-            }
-        }
-        Some(chosen)
+        Some(
+            retp_client::blocking(chosen(&store, &args.only))
+                .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?,
+        )
     };
     let mut budget = Budget::default();
     if let Some(objects) = args.objects {
@@ -1249,6 +1240,16 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
                 "stopped at island {}: {why} (the island's outcome is unknown)",
                 stopped.island + 1
             ),
+        }
+    }
+    for refused in &report.refusals {
+        let what = match &refused.array {
+            Some(path) => format!("{} {path}", refused.uri),
+            None => refused.uri.clone(),
+        };
+        match refused.code {
+            Some(code) => eprintln!("refused: {what}: {} ({code})", refused.message),
+            None => eprintln!("refused: {what}: {}", refused.message),
         }
     }
     println!("{} of {} island(s) committed", report.sent, report.islands.len());

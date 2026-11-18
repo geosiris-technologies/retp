@@ -10,7 +10,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use energyml_etp_store::push::{Options, Progress, Stop, WellKnown, WriteFormat, push};
+use energyml_etp_store::push::{Options, Progress, Stop, WellKnown, WriteFormat, chosen, push};
 use retp_avro::Role;
 use retp_client::memory::{ManualClock, MemoryTransport};
 use retp_client::{Client, Settings, writing_client};
@@ -48,6 +48,14 @@ struct Log {
     /// Refuse every object written, with this reason - a dataspace opened
     /// read-only, which most are.
     refuse_objects: Option<&'static str>,
+    /// Refuse, as `EINVALID_OBJECT`, the objects whose URI holds this uuid,
+    /// with this reason, and take the others.
+    refuse_one: Option<(&'static str, &'static str)>,
+    /// Answer a `PutDataObjects` with one `ProtocolException` for the whole
+    /// request, `EREQUEST_DENIED` with this reason - no per-object map.
+    refuse_request: Option<&'static str>,
+    /// Refuse every array written, `EREQUEST_DENIED` with this reason.
+    refuse_arrays: Option<&'static str>,
     /// Announce Transaction (18) and then answer `ENOTSUPPORTED` to every
     /// `StartTransaction` - what some REST APIs do, naming the transaction
     /// `null`.
@@ -115,6 +123,13 @@ impl Handler for Receiving {
                 responder.send(out);
             }
             Message::PutDataObjects(request) => {
+                if let Some(why) = log.refuse_request {
+                    let out = responder
+                        .wire()
+                        .refuse(delivery, &EtpError::EREQUEST_DENIED.with_detail(why.to_string()));
+                    responder.send(out);
+                    return Ok(Handled::Answered);
+                }
                 let mut reply = responder
                     .wire()
                     .begin_response(delivery)
@@ -126,6 +141,17 @@ impl Handler for Receiving {
                             .failed(
                                 key.clone(),
                                 &EtpError::EREQUEST_DENIED.with_detail(why.to_string()),
+                            )
+                            .unwrap();
+                        continue;
+                    }
+                    if let Some((uuid, why)) = log.refuse_one
+                        && object.resource.uri.contains(uuid)
+                    {
+                        reply
+                            .failed(
+                                key.clone(),
+                                &EtpError::EINVALID_OBJECT.with_detail(why.to_string()),
                             )
                             .unwrap();
                         continue;
@@ -149,6 +175,15 @@ impl Handler for Receiving {
                     .begin_response(delivery)
                     .for_keys(request.data_arrays.keys().cloned());
                 for (key, put) in &request.data_arrays {
+                    if let Some(why) = log.refuse_arrays {
+                        reply
+                            .failed(
+                                key.clone(),
+                                &EtpError::EREQUEST_DENIED.with_detail(why.to_string()),
+                            )
+                            .unwrap();
+                        continue;
+                    }
                     if let AnyArrayItem::ArrayOfDouble(values) = &put.array.data.item {
                         log.arrays.insert(
                             (put.uid.uri.clone(), put.uid.path_in_resource.clone()),
@@ -501,6 +536,156 @@ fn a_refused_commit_names_what_leaves_the_source() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// The codes below are written as ETP v1.2 section 24.3 (p.482-486) numbers
+// them - EREQUEST_DENIED is 6, EINVALID_OBJECT 14 -, not read back from the
+// enumeration the test server answers with: a renumbered constant would
+// otherwise agree with itself.
+
+/// **Every object the store refuses is named, with its code** - not the
+/// first one quoted in a sentence. The CRS is refused, the proxy in the same
+/// island is taken: the refusals name the CRS alone, with the store's code
+/// and words, so that a caller can isolate it without reading text.
+#[test]
+fn each_refused_object_is_named_with_the_stores_code() {
+    let source = store();
+    let (mut client, _log) = receiving_with(Log {
+        refuse_one: Some((CRS, "the CRS does not validate")),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+
+    assert_eq!(report.sent, 0);
+    assert_eq!(report.refusals.len(), 1, "{:?}", report.refusals);
+    let refused = &report.refusals[0];
+    assert!(
+        refused.uri.starts_with(THERE) && refused.uri.contains(CRS),
+        "addressed in the destination: {}",
+        refused.uri
+    );
+    assert_eq!(refused.array, None);
+    assert_eq!(refused.code, Some(14), "EINVALID_OBJECT, section 24.3");
+    assert!(
+        refused.message.contains("does not validate"),
+        "{}",
+        refused.message
+    );
+    match &report.stopped.as_ref().expect("the push stopped").why {
+        Stop::Refused(why) => assert!(why.contains(CRS), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **A `ProtocolException` that answers the whole request** - one error, no
+/// map - is every object's answer: each object of the island is named with
+/// that one code, in the order the island sends them, and the sentence says
+/// how many more there are than the one it quotes.
+#[test]
+fn one_exception_for_the_whole_request_refuses_each_object_of_the_island() {
+    let source = store();
+    let (mut client, _log) = receiving_with(Log {
+        refuse_request: Some("quota exceeded"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+
+    let island = &report.islands[0];
+    assert_eq!(report.refusals.len(), island.uris.len(), "{:?}", report.refusals);
+    for (refused, source_uri) in report.refusals.iter().zip(&island.uris) {
+        let uuid = energyml_core::identifiers::EtpUri::parse(source_uri)
+            .unwrap()
+            .uuid
+            .unwrap();
+        assert!(refused.uri.contains(&uuid), "{} for {source_uri}", refused.uri);
+        assert_eq!(refused.code, Some(6), "EREQUEST_DENIED, section 24.3");
+        assert!(refused.message.contains("quota exceeded"), "{}", refused.message);
+    }
+    match &report.stopped.as_ref().expect("the push stopped").why {
+        Stop::Refused(why) => assert!(
+            why.contains(&format!("and {} more refused", island.uris.len() - 1)),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **An array the store refuses is named by its object and its path.** The
+/// point set's array hangs from its RESQML 2.0.1 proxy: the refusal names
+/// the proxy in the destination, the array's path, and the store's code.
+#[test]
+fn a_refused_array_is_named_by_its_object_and_path() {
+    let source = store();
+    let (mut client, _log) = receiving_with(Log {
+        refuse_arrays: Some("no room for arrays"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+
+    assert_eq!(report.sent, 1, "the island without arrays went");
+    assert_eq!(report.refusals.len(), 1, "{:?}", report.refusals);
+    let refused = &report.refusals[0];
+    assert!(
+        refused.uri.starts_with(THERE) && refused.uri.contains(PROXY),
+        "{}",
+        refused.uri
+    );
+    assert!(refused.array.is_some(), "{refused:?}");
+    assert_eq!(refused.code, Some(6), "EREQUEST_DENIED, section 24.3");
+    assert!(refused.message.contains("no room"), "{}", refused.message);
+}
+
+/// **A push that went through refuses nothing**, and says so with an empty
+/// list rather than a list nobody filled.
+#[test]
+fn a_push_that_went_through_names_no_refusal() {
+    let source = store();
+    let (mut client, _log) = receiving(None);
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    assert!(report.refusals.is_empty(), "{:?}", report.refusals);
+}
+
+/// **What a caller names becomes the source's own URIs**: a URI the source
+/// lists, the same object's URI in another dataspace, a bare uuid in any
+/// case. A name the source does not hold is refused by name.
+#[test]
+fn what_a_caller_names_is_matched_against_the_sources_uris() {
+    let source = store();
+    let listed = block(energyml_storage::storage::EnergymlStorage::resources(&source)).unwrap();
+    let uri_of = |uuid: &str| {
+        listed
+            .iter()
+            .find(|one| one.uuid.eq_ignore_ascii_case(uuid))
+            .unwrap()
+            .uri
+            .clone()
+    };
+    let points = uri_of(POINTS);
+    let crs = uri_of(CRS);
+    let crs_kind = listed
+        .iter()
+        .find(|one| one.uri == crs)
+        .unwrap()
+        .qualified_type
+        .clone();
+    let names = [
+        points.clone(),
+        CRS.to_ascii_uppercase(),
+        format!("eml:///dataspace('elsewhere')/{crs_kind}({CRS})"),
+    ];
+    let found = block(chosen(&source, &names)).unwrap();
+    assert_eq!(found, [points, crs], "each object once, in the order named");
+
+    let refused = block(chosen(
+        &source,
+        &["ee000000-0000-4000-8000-000000000009".to_string()],
+    ))
+    .unwrap_err();
+    assert!(refused.contains("does not hold"), "{refused}");
+    // The right uuid under another type is not the object.
+    let wrong = format!("eml:///dataspace('elsewhere')/eml20.obj_EpcExternalPartReference({CRS})");
+    assert!(block(chosen(&source, &[wrong])).is_err());
 }
 
 /// **The same object twice, not two objects.** Asked for JSON - what the

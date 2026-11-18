@@ -61,87 +61,125 @@ pub(crate) struct Journal {
     path: PathBuf,
 }
 
+/// What a journal file holds, read: what it records as committed, and what
+/// opening it for a push has to write.
+struct Read {
+    committed: BTreeSet<String>,
+    /// No first line yet: the push writes one.
+    fresh: bool,
+    /// The text up to its last whole line, when a last line was cut while it
+    /// was written: the push writes the file back without it.
+    cut: Option<String>,
+}
+
+/// Read the journal at `path` for a push into `dataspace` whose fingerprint
+/// is `package`, **writing nothing**: what it records as committed, or why it
+/// is refused. A file that is not there records nothing.
+fn read(path: &Path, dataspace: &str, package: &str) -> Result<Read, String> {
+    let shown = path.display();
+    let text = match std::fs::read(path) {
+        Ok(bytes) => {
+            String::from_utf8(bytes).map_err(|_| format!("{shown}: the journal is not UTF-8 text"))?
+        }
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(why) => return Err(format!("{shown}: the journal cannot be read: {why}")),
+    };
+    // What ends with an end of line; a last line without one was cut.
+    let whole = match text.rfind('\n') {
+        Some(end) => &text[..=end],
+        None => "",
+    };
+    let space = EtpUri::parse(dataspace)
+        .map_err(|why| format!("{dataspace} is not a dataspace URI: {why}"))?
+        .dataspace;
+    let mut committed = BTreeSet::new();
+    let mut lines = whole
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty());
+    let fresh = match lines.next() {
+        None => true,
+        Some((n, first)) => {
+            let header: Value = serde_json::from_str(first)
+                .map_err(|why| format!("{shown}, line {}: not a push journal: {why}", n + 1))?;
+            if header["journal"] != KIND || header["version"] != VERSION {
+                return Err(format!(
+                    "{shown}: not a push journal of version {VERSION} (its first line is {first})"
+                ));
+            }
+            let there = header["dataspace"].as_str().unwrap_or_default();
+            if there != dataspace {
+                return Err(format!(
+                    "{shown}: the journal was written for a push into {there}, and this push goes into {dataspace} - use another journal"
+                ));
+            }
+            let print = header["package"].as_str().unwrap_or_default();
+            if print != package {
+                return Err(format!(
+                    "{shown}: the journal was written for another package (fingerprint {print}, this push's is {package}): \
+                 another package, another selection of its objects, another format, or another writing of them - use another journal"
+                ));
+            }
+            false
+        }
+    };
+    for (n, line) in lines {
+        let entry: Value = serde_json::from_str(line)
+            .map_err(|why| format!("{shown}, line {}: it does not read: {why}", n + 1))?;
+        let Some(uris) = entry["committed"].as_array() else {
+            return Err(format!("{shown}, line {}: it names no committed objects", n + 1));
+        };
+        for uri in uris {
+            let Some(uri) = uri.as_str() else {
+                return Err(format!("{shown}, line {}: {uri} is not a URI in a string", n + 1));
+            };
+            let parsed =
+                EtpUri::parse(uri).map_err(|why| format!("{shown}, line {}: {uri}: {why}", n + 1))?;
+            if parsed.dataspace != space || parsed.uuid.is_none() {
+                return Err(format!(
+                    "{shown}, line {}: {uri} is not an object of {dataspace}",
+                    n + 1
+                ));
+            }
+            committed.insert(uri.to_string());
+        }
+    }
+    let cut = (whole.len() != text.len()).then(|| whole.to_string());
+    Ok(Read {
+        committed,
+        fresh,
+        cut,
+    })
+}
+
+/// What the journal at `path` records as committed, for a push into
+/// `dataspace` whose fingerprint is `package` - read the way a push reads
+/// it, refused for the same reasons, and **nothing written**: no file
+/// created, no cut line dropped. What `push::dry_run` leaves out.
+pub(crate) fn recorded(path: &Path, dataspace: &str, package: &str) -> Result<BTreeSet<String>, String> {
+    read(path, dataspace, package).map(|read| read.committed)
+}
+
 impl Journal {
     /// Open the journal at `path` for a push of `objects` objects into
     /// `dataspace` whose fingerprint is `package` ([`fingerprint`]),
     /// creating it when it is not there, and give what it records as
-    /// committed.
+    /// committed ([`recorded`], then the writing: a cut last line dropped,
+    /// the first line written to a new journal).
     pub(crate) fn open(
         path: &Path,
         dataspace: &str,
         package: &str,
         objects: usize,
     ) -> Result<(Journal, BTreeSet<String>), String> {
+        let Read {
+            committed,
+            fresh,
+            cut,
+        } = read(path, dataspace, package)?;
         let shown = path.display();
-        let text = match std::fs::read(path) {
-            Ok(bytes) => {
-                String::from_utf8(bytes).map_err(|_| format!("{shown}: the journal is not UTF-8 text"))?
-            }
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(why) => return Err(format!("{shown}: the journal cannot be read: {why}")),
-        };
-        // What ends with an end of line; a last line without one was cut.
-        let whole = match text.rfind('\n') {
-            Some(end) => &text[..=end],
-            None => "",
-        };
-        let space = EtpUri::parse(dataspace)
-            .map_err(|why| format!("{dataspace} is not a dataspace URI: {why}"))?
-            .dataspace;
-        let mut committed = BTreeSet::new();
-        let mut lines = whole
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty());
-        let fresh = match lines.next() {
-            None => true,
-            Some((n, first)) => {
-                let header: Value = serde_json::from_str(first)
-                    .map_err(|why| format!("{shown}, line {}: not a push journal: {why}", n + 1))?;
-                if header["journal"] != KIND || header["version"] != VERSION {
-                    return Err(format!(
-                        "{shown}: not a push journal of version {VERSION} (its first line is {first})"
-                    ));
-                }
-                let there = header["dataspace"].as_str().unwrap_or_default();
-                if there != dataspace {
-                    return Err(format!(
-                        "{shown}: the journal was written for a push into {there}, and this push goes into {dataspace} - use another journal"
-                    ));
-                }
-                let print = header["package"].as_str().unwrap_or_default();
-                if print != package {
-                    return Err(format!(
-                        "{shown}: the journal was written for another package (fingerprint {print}, this push's is {package}): \
-                         another package, another selection of its objects, another format, or another writing of them - use another journal"
-                    ));
-                }
-                false
-            }
-        };
-        for (n, line) in lines {
-            let entry: Value = serde_json::from_str(line)
-                .map_err(|why| format!("{shown}, line {}: it does not read: {why}", n + 1))?;
-            let Some(uris) = entry["committed"].as_array() else {
-                return Err(format!("{shown}, line {}: it names no committed objects", n + 1));
-            };
-            for uri in uris {
-                let Some(uri) = uri.as_str() else {
-                    return Err(format!("{shown}, line {}: {uri} is not a URI in a string", n + 1));
-                };
-                let parsed =
-                    EtpUri::parse(uri).map_err(|why| format!("{shown}, line {}: {uri}: {why}", n + 1))?;
-                if parsed.dataspace != space || parsed.uuid.is_none() {
-                    return Err(format!(
-                        "{shown}, line {}: {uri} is not an object of {dataspace}",
-                        n + 1
-                    ));
-                }
-                committed.insert(uri.to_string());
-            }
-        }
         let failed = |why: std::io::Error| format!("{shown}: the journal cannot be written: {why}");
-        if whole.len() != text.len() {
+        if let Some(whole) = cut {
             std::fs::write(path, whole).map_err(failed)?;
         }
         let mut file = OpenOptions::new()

@@ -25,9 +25,11 @@ use retp_client::notifications::uuid_text;
 use retp_client::resume::Came;
 
 use crate::session::{
-    ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, CustomValue, DataspaceRow, Failure, Kind, Objects,
-    Outcomes, PushChoices, PushReport, Resources, Session, SupportedTypeRow, parse_split, pause_of,
+    ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, CustomValue, DataspaceRow, Failure, IslandRow,
+    Kind, Objects, Outcomes, PushChoices, PushPlan, PushReport, Resources, Session, SupportedTypeRow,
+    parse_split, pause_of, plan_epc,
 };
+use energyml_etp_store::push::{Cause, Diagnosis};
 
 // The exception tree. One class per thing a caller does differently (see
 // `session::Kind`), all under `RetpError`.
@@ -197,33 +199,99 @@ fn resources_into_py<'py>(py: Python<'py>, listed: &Resources) -> PyResult<Bound
     Ok(out)
 }
 
-fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'py, PyDict>> {
-    let out = PyDict::new(py);
-    let islands = PyList::empty(py);
-    for island in &report.islands {
+/// Islands as `{"state", "uris", "objects", "arrays", "bytes", "units",
+/// "cycles"}`, and `"destinations"` in a plan.
+fn islands_into_py<'py>(py: Python<'py>, islands: &[IslandRow]) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for island in islands {
         let row = PyDict::new(py);
         row.set_item("state", island.state)?;
         row.set_item("uris", &island.uris)?;
+        row.set_item("objects", island.objects)?;
         row.set_item("arrays", island.arrays)?;
         row.set_item("bytes", island.bytes)?;
-        islands.append(row)?;
+        row.set_item("units", &island.units)?;
+        row.set_item("cycles", &island.cycles)?;
+        if let Some(destinations) = &island.destinations {
+            row.set_item("destinations", destinations)?;
+        }
+        out.append(row)?;
     }
-    out.set_item("islands", islands)?;
+    Ok(out)
+}
+
+/// Skipped objects as `{"uri", "why"}`.
+fn skipped_into_py<'py>(py: Python<'py>, skipped: &[(String, &'static str)]) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for (uri, why) in skipped {
+        let row = PyDict::new(py);
+        row.set_item("uri", uri)?;
+        row.set_item("why", *why)?;
+        out.append(row)?;
+    }
+    Ok(out)
+}
+
+/// A cause as `{"kind", ...}`: `count` for the counted ones, `space` too for
+/// a missing reference, `containers` for a missing array container.
+fn cause_into_py<'py>(py: Python<'py>, cause: &Cause) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("kind", cause.name())?;
+    match cause {
+        Cause::MissingReference { count, space } => {
+            out.set_item("count", count)?;
+            out.set_item("space", space)?;
+        }
+        Cause::OrphanReference { count } | Cause::MissingArray { count } | Cause::OrphanArray { count } => {
+            out.set_item("count", count)?;
+        }
+        Cause::MissingArrayContainer { containers } => out.set_item("containers", containers)?,
+        Cause::Unknown => {}
+    }
+    Ok(out)
+}
+
+/// A stop as `{"island", "kind", "message", "code", "cause", "candidates"}`.
+fn stop_into_py<'py>(py: Python<'py>, stop: &Diagnosis) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("island", stop.island)?;
+    out.set_item("kind", stop.kind.name())?;
+    out.set_item("message", &stop.message)?;
+    out.set_item("code", stop.code)?;
+    match &stop.cause {
+        Some(cause) => out.set_item("cause", cause_into_py(py, cause)?)?,
+        None => out.set_item("cause", py.None())?,
+    }
+    out.set_item("candidates", &stop.candidates)?;
+    Ok(out)
+}
+
+/// A plan as `{"dataspace", "islands", "left_out", "dangling", "skipped"}`.
+fn plan_into_py<'py>(py: Python<'py>, plan: &PushPlan) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("dataspace", &plan.dataspace)?;
+    out.set_item("islands", islands_into_py(py, &plan.islands)?)?;
+    out.set_item("left_out", &plan.left_out)?;
+    out.set_item("dangling", &plan.dangling)?;
+    out.set_item("skipped", skipped_into_py(py, &plan.skipped)?)?;
+    Ok(out)
+}
+
+fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("islands", islands_into_py(py, &report.islands)?)?;
     out.set_item("sent", report.sent)?;
     out.set_item("complete", report.complete())?;
     out.set_item("left_out", &report.left_out)?;
     out.set_item("dangling", &report.dangling)?;
     out.set_item("without_transactions", report.without_transactions)?;
     out.set_item("stopped", &report.stopped)?;
-    out.set_item("refusals", refusals_into_py(py, &report.refusals)?)?;
-    let skipped = PyList::empty(py);
-    for (uri, why) in &report.skipped {
-        let row = PyDict::new(py);
-        row.set_item("uri", uri)?;
-        row.set_item("why", *why)?;
-        skipped.append(row)?;
+    match &report.stop {
+        Some(stop) => out.set_item("stop", stop_into_py(py, stop)?)?,
+        None => out.set_item("stop", py.None())?,
     }
-    out.set_item("skipped", skipped)?;
+    out.set_item("refusals", refusals_into_py(py, &report.refusals)?)?;
+    out.set_item("skipped", skipped_into_py(py, &report.skipped)?)?;
     let splits = PyList::empty(py);
     for split in &report.splits {
         let row = PyDict::new(py);
@@ -251,7 +319,7 @@ fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'
     Ok(out)
 }
 
-/// Refusals as `{"uri", "array", "code", "message"}`.
+/// Refusals as `{"uri", "array", "code", "message", "cause"}`.
 fn refusals_into_py<'py>(
     py: Python<'py>,
     refusals: &[energyml_etp_store::push::Refusal],
@@ -263,6 +331,7 @@ fn refusals_into_py<'py>(
         row.set_item("array", &refused.array)?;
         row.set_item("code", refused.code)?;
         row.set_item("message", &refused.message)?;
+        row.set_item("cause", cause_into_py(py, &refused.cause())?)?;
         out.append(row)?;
     }
     Ok(out)
@@ -691,7 +760,20 @@ impl PySession {
     /// `resumed`, and why a resume was `refused`.
     ///
     /// The report's `refusals` lists each object or array the store refused,
-    /// `{"uri", "array", "code", "message"}`, `code` the ETP error code.
+    /// `{"uri", "array", "code", "message", "cause"}`, `code` the ETP error
+    /// code. `stopped` says why the push stopped in a sentence; `stop` says
+    /// it sorted, `None` or `{"island", "kind", "message", "code", "cause",
+    /// "candidates"}`: `kind` one of `refused`, `failed`, `timeout`,
+    /// `gave_up`, `journal`; `message` the store's own words for a refusal,
+    /// without the hint `stopped` may add; `cause` (a refusal only) what
+    /// those words name when open-etp-server is documented to use them -
+    /// `{"kind": "missing_reference", "count", "space"}`,
+    /// `orphan_reference`, `missing_array`, `orphan_array` (with `count`),
+    /// `missing_array_container` (with `containers`) - or
+    /// `{"kind": "unknown"}`; `candidates`, for a missing reference, the
+    /// `dangling` pairs leaving the stopped island: this side's deduction,
+    /// the server names no target. `plan_push` says beforehand which islands
+    /// a push sends.
     #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None, resume_session = false))]
     #[allow(clippy::too_many_arguments)]
     fn push_epc<'py>(
@@ -1014,6 +1096,51 @@ fn uri(dataspace: &str, qualified_type: &str, uuid: &str, version: Option<&str>)
     crate::session::object_uri(dataspace, qualified_type, uuid, version).map_err(failed)
 }
 
+/// What `Session.push_epc` would send, with **no session**: the EPC at `path`
+/// read and planned as the push plans it (`energyml_etp_store::push::dry_run`),
+/// nothing asked of any server, nothing written.
+///
+/// The keywords are `push_epc`'s, with the same defaults, for what decides
+/// the plan: `objects_per_island`, `bytes_per_island`, `only`, `well_known`,
+/// `json`, `journal` (read, never written: what it records is left out).
+/// `skip_present` needs the destination and is refused (`ValueError`).
+///
+/// Returns `{"dataspace", "islands", "left_out", "dangling", "skipped"}`;
+/// each island is a row of `push_epc`'s report (`"state"` is `"planned"`)
+/// with its destination URIs in `"destinations"`, in the order of `"uris"`
+/// (the source's). An island's `"cycles"` lists its objects that reference
+/// each other, sent together whatever the budget.
+#[pyfunction]
+#[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, json = false, skip_present = false, journal = None))]
+#[allow(clippy::too_many_arguments)]
+fn plan_push<'py>(
+    py: Python<'py>,
+    path: &str,
+    dataspace: &str,
+    objects_per_island: Option<usize>,
+    bytes_per_island: Option<u64>,
+    only: Option<Vec<String>>,
+    well_known: bool,
+    json: bool,
+    skip_present: bool,
+    journal: Option<PathBuf>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let choices = PushChoices {
+        objects: objects_per_island,
+        bytes: bytes_per_island,
+        only,
+        well_known,
+        json,
+        skip_present,
+        journal,
+        ..PushChoices::default()
+    };
+    let plan = py
+        .detach(|| plan_epc(path, dataspace, &choices))
+        .map_err(failed)?;
+    plan_into_py(py, &plan)
+}
+
 /// A push's report, raising when it is not complete.
 fn pushed(py: Python<'_>, report: PushReport) -> PyResult<Bound<'_, PyDict>> {
     let as_dict = report_into_py(py, &report)?;
@@ -1108,6 +1235,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTransaction>()?;
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add_function(wrap_pyfunction!(uri, module)?)?;
+    module.add_function(wrap_pyfunction!(plan_push, module)?)?;
     module.add("RetpError", py.get_type::<RetpError>())?;
     module.add("Unsupported", py.get_type::<Unsupported>())?;
     module.add("SessionRefused", py.get_type::<SessionRefused>())?;

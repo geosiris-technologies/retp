@@ -10,11 +10,14 @@ Everything comes from the compiled extension (`retp._core`); this package only
 arranges it into modules and says where each thing lives. The bridge carries no
 operation that the Rust library does not have: see `retp.session`.
 
+`retp.plan_push(path, dataspace)` says what `Session.push_epc` would send, with
+no session: the islands, their cycles and destination URIs, what is left out.
+
 Objects cross as dictionaries (the EnergyML JSON encoding, every node carrying
 its `$type`); arrays cross as numpy arrays.
 """
 
-from ._core import connect, uri
+from ._core import connect, plan_push, uri
 from .errors import (
     AnswerRefused,
     AuthorizationNeeded,
@@ -49,5 +52,6 @@ __all__ = [
     "Transaction",
     "Unsupported",
     "connect",
+    "plan_push",
     "uri",
 ]

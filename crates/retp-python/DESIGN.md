@@ -102,7 +102,9 @@ The bridge binds the blocking form:
 - The GIL is released around every call (`Python::detach`), so a Python program
   with threads is not frozen by a slow server. One session serves one request at
   a time; a second thread calling the same session while a request is out gets
-  pyo3's "already borrowed" error, not corrupted state.
+  `SessionBusy` (a `NotSent`) from the session's `try_lock`, at once and by
+  name, not corrupted state and not a wait holding the GIL. The getters (`url`,
+  `writing`, `warnings`) read copies kept outside the lock.
 - For `asyncio` programs: `await asyncio.to_thread(session.dataspaces)`.
 
 What it costs: no concurrent requests on one session from the caller's side
@@ -126,6 +128,7 @@ then each `Kind` becomes an exception class in `bindings.rs`:
 |---|---|---|---|
 | bad argument (bridge) | `BadArgument` | `ValueError` | fix the call |
 | `Invalid`, `Send` | `NotSent` | `NotSent` | fix the request; the session is untouched |
+| the session's lock held by another thread (bridge) | `Busy` | `SessionBusy` (a `NotSent`) | one session per thread, or wait |
 | `Offer`, `Refused`, `HandshakeRefused` | `SessionRefused` | `SessionRefused` | change the offer or server |
 | `AuthorizationNeeded` | `AuthorizationNeeded` | `AuthorizationNeeded` | log in again |
 | `Transport`, `Closed` | `ConnectionLost` | `ConnectionLost` | open a new session |

@@ -47,7 +47,10 @@ environment or a secret store.
 
 The calls are blocking and release the Python GIL while they wait. From
 `asyncio`, `await asyncio.to_thread(session.dataspaces)`. One session handles one
-request at a time.
+request at a time: a second thread that calls it while a request is out gets
+`retp.SessionBusy` at once, and nothing is sent. Open one session per thread.
+(Inside one call the library already keeps several requests in flight: see
+`at_once`.)
 
 ### Renewing the token
 
@@ -375,6 +378,7 @@ argument.
 | `ConnectionLost` | the connection is gone | open a new session |
 | `OutcomeUnknown` | the connection fell while a request was out (a `ConnectionLost`) | check before retrying a write |
 | `NotSent` | not sent: the library would see the server refuse it | fix the request; the session is untouched |
+| `SessionBusy` | not sent: another thread is using the session (a `NotSent`) | one session per thread, or wait |
 | `ServerError` | the server answered with an error (`.code`, when it sent one) | depends on the code |
 | `TimedOut` | no answer in time | retry or give up |
 | `AnswerRefused` | the answer could not be taken | report it |

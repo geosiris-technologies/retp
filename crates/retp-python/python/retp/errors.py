@@ -8,6 +8,8 @@
     |   +-- OutcomeUnknown   it fell while a request was out: whether it was
     |                        applied is unknown (a retried write may write twice)
     +-- NotSent              the request was not sent; the session is untouched
+    |   +-- SessionBusy      another thread is using the session: one request
+    |                        at a time per session
     +-- ServerError          the server answered with an error (`.code`)
     +-- TimedOut             no answer in time
     +-- AnswerRefused        the answer arrived and could not be taken
@@ -30,6 +32,7 @@ from ._core import (
     PushIncomplete,
     RetpError,
     ServerError,
+    SessionBusy,
     SessionRefused,
     TimedOut,
     Unsupported,
@@ -45,6 +48,7 @@ __all__ = [
     "PushIncomplete",
     "RetpError",
     "ServerError",
+    "SessionBusy",
     "SessionRefused",
     "TimedOut",
     "Unsupported",

@@ -24,6 +24,9 @@ is exercised:
     a writing one refuses what the bridge cannot convert (a customData value,
     an empty island) and takes a renewed token;
   * `retp.uri`, the canonical URI of an object;
+  * one session called from two threads: the second is refused by name
+    (`SessionBusy`) while the first request is out, against a loopback server
+    that never answers;
   * one real connection attempt, to a loopback port nothing listens on, which
     must fail with an exception of the retp tree (the native WebSocket
     transport and the error mapping run).
@@ -32,7 +35,9 @@ What it does not exercise, because the bridge offers it only over a session:
 reading and writing objects and arrays (and so the HDF5 backend the wheel carries).
 """
 
+import socket
 import sys
+import threading
 
 import retp
 
@@ -77,6 +82,7 @@ for name in (
 ):
     check(issubclass(getattr(retp, name), retp.RetpError), f"{name} is a RetpError")
 check(issubclass(retp.OutcomeUnknown, retp.ConnectionLost), "OutcomeUnknown is a ConnectionLost")
+check(issubclass(retp.SessionBusy, retp.NotSent), "SessionBusy is a NotSent")
 check(issubclass(retp.RetpError, Exception), "RetpError is an Exception")
 
 # Refusals made by the Rust code before anything is sent.
@@ -134,6 +140,50 @@ check(
 )
 err = raised(lambda: retp.uri("demo", "resqml20.obj_HorizonInterpretation", "not-a-uuid"), ValueError)
 check(err is not None, "retp.uri refuses what is not a uuid (ValueError)")
+
+# One session, two threads: a REST request goes to a loopback server that takes
+# the connection and never answers, so the first thread holds the session; the
+# second is refused by name at once (`SessionBusy`), not by pyo3's "Already
+# borrowed". The server's accept says the first request is out.
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+port = listener.getsockname()[1]
+accepted = threading.Event()
+held = []
+
+
+def serve_silently() -> None:
+    try:
+        connection, _ = listener.accept()
+    except OSError:
+        return
+    held.append(connection)
+    accepted.set()
+
+
+threading.Thread(target=serve_silently, daemon=True).start()
+try:
+    session = retp.connect(f"http://127.0.0.1:{port}/api/reservoir-ddms/v2", token="t0", rest=True)
+except BaseException as err:
+    check(False, f"a REST session on the loopback did not open: {type(err).__name__}: {err}")
+else:
+    first = threading.Thread(target=lambda: raised(session.dataspaces, retp.RetpError), daemon=True)
+    first.start()
+    if not accepted.wait(30):
+        check(False, "the first request did not reach the loopback server")
+    else:
+        err = raised(session.dataspaces, retp.SessionBusy)
+        check(
+            err is not None and "one request at a time" in str(err),
+            "a second thread on a busy session gets SessionBusy",
+        )
+        check(session.url.startswith("http://127.0.0.1"), "the getters answer while a request is out")
+    for connection in held:
+        connection.close()
+    listener.close()
+    first.join(30)
+    check(not first.is_alive(), "the first request ends once its connection is closed")
 
 # One real attempt: nothing listens on port 1 of the loopback interface.
 # TODO(verify): which subclass of RetpError this gives on each platform; only the

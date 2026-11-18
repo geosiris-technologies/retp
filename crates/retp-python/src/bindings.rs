@@ -9,7 +9,7 @@
 //! this file through an installed wheel, with no server.
 
 use numpy::IntoPyArray;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use energyml_etp_store::pack::{Packed, Wanted};
 use energyml_storage::array::ArrayValues as StoredValues;
@@ -73,6 +73,12 @@ create_exception!(
 );
 create_exception!(
     _core,
+    SessionBusy,
+    NotSent,
+    "The session is serving another request, from another thread: one at a time per session."
+);
+create_exception!(
+    _core,
     ServerError,
     RetpError,
     "The server answered with an error (attribute `code`)."
@@ -108,6 +114,7 @@ pub(crate) fn failed(failure: Failure) -> PyErr {
         Kind::ConnectionLost => ConnectionLost::new_err(message),
         Kind::OutcomeUnknown => OutcomeUnknown::new_err(message),
         Kind::NotSent => NotSent::new_err(message),
+        Kind::Busy => SessionBusy::new_err(message),
         Kind::Server => ServerError::new_err(message),
         Kind::TimedOut => TimedOut::new_err(message),
         Kind::AnswerRefused => AnswerRefused::new_err(message),
@@ -365,25 +372,42 @@ impl PyTransaction {
 ///         print(session.dataspaces())
 // A `#[pyclass]` must be `Sync`, and a `Session` is `Send` but not `Sync` (the
 // client holds its protocol handlers as `Box<dyn Handler>`). The mutex makes it
-// shareable; a method that holds `&mut self` reaches it by `get_mut`, without
-// locking, since that borrow is already exclusive. One call at a time per
-// session is what an ETP connection does anyway.
+// shareable. Every method takes `&self` and the mutex by `try_lock`: a second
+// thread calling while a request is out gets `SessionBusy`, by name, instead of
+// pyo3's "Already borrowed" (and is never made to wait holding the GIL). What
+// never changes after `connect` is kept outside the mutex, so that the getters
+// answer while a request is out.
 #[pyclass(name = "Session")]
 pub struct PySession {
     inner: Mutex<Session>,
+    url: String,
+    writing: bool,
+    warnings: Vec<String>,
 }
 
 impl PySession {
-    /// The session, for a method that holds `&mut self`.
-    fn session(&mut self) -> &mut Session {
-        self.inner
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn new(session: Session) -> Self {
+        PySession {
+            url: session.url().to_string(),
+            writing: session.writing(),
+            warnings: session.warnings().to_vec(),
+            inner: Mutex::new(session),
+        }
     }
 
-    /// The session, for a method that holds `&self` (the getters).
-    fn shared(&self) -> MutexGuard<'_, Session> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// The session, or `Kind::Busy` when another thread holds it.
+    fn session(&self) -> Result<MutexGuard<'_, Session>, Failure> {
+        match self.inner.try_lock() {
+            Ok(session) => Ok(session),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(Failure {
+                kind: Kind::Busy,
+                message: "this session is serving another request: a session takes one request at a time; \
+                          open one session per thread"
+                    .to_string(),
+                code: None,
+            }),
+        }
     }
 
     /// Run `f` on the live session; refused by name on any other (REST).
@@ -391,7 +415,7 @@ impl PySession {
         &self,
         f: impl FnOnce(&retp_client::live::LiveSession) -> R,
     ) -> Result<R, Failure> {
-        let session = self.shared();
+        let session = self.session()?;
         match session.live() {
             Some(live) => Ok(f(live)),
             None => Err(Failure {
@@ -409,25 +433,25 @@ impl PySession {
     /// The URL the session was opened on.
     #[getter]
     fn url(&self) -> String {
-        self.shared().url().to_string()
+        self.url.clone()
     }
 
     /// Whether the session announced that it writes.
     #[getter]
     fn writing(&self) -> bool {
-        self.shared().writing()
+        self.writing
     }
 
     /// What the library had to say about the connection: plain text, an
     /// unchecked certificate.
     #[getter]
     fn warnings(&self) -> Vec<String> {
-        self.shared().warnings().to_vec()
+        self.warnings.clone()
     }
 
     /// A Ping and its Pong; the round trip in seconds.
-    fn ping(&mut self, py: Python<'_>) -> PyResult<f64> {
-        py.detach(|| self.session().ping()).map_err(failed)
+    fn ping(&self, py: Python<'_>) -> PyResult<f64> {
+        py.detach(|| self.session()?.ping()).map_err(failed)
     }
 
     /// Subscribe to the changes of `uri` (StoreNotification). `to` is where they go as they
@@ -458,8 +482,8 @@ impl PySession {
     }
 
     /// End the session. Closing twice does nothing.
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.session().close()).map_err(failed)
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.session()?.close()).map_err(failed)
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -467,14 +491,14 @@ impl PySession {
     }
 
     #[pyo3(signature = (*_args))]
-    fn __exit__(&mut self, py: Python<'_>, _args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<bool> {
-        py.detach(|| self.session().close()).map_err(failed)?;
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<bool> {
+        py.detach(|| self.session()?.close()).map_err(failed)?;
         Ok(false)
     }
 
     /// The dataspaces of the store, as dictionaries.
-    fn dataspaces<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let rows = py.detach(|| self.session().dataspaces()).map_err(failed)?;
+    fn dataspaces<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| self.session()?.dataspaces()).map_err(failed)?;
         rows.iter().map(|one| dataspace_into_py(py, one)).collect()
     }
 
@@ -488,7 +512,7 @@ impl PySession {
     // struct would make the Python side spell a builder for what is one call.
     #[allow(clippy::too_many_arguments)]
     fn resources<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspace: &str,
         depth: i32,
@@ -500,7 +524,7 @@ impl PySession {
         let types = types.unwrap_or_default();
         let listed = py
             .detach(|| {
-                self.session()
+                self.session()?
                     .resources(dataspace, depth, scope, types, edges, count)
             })
             .map_err(failed)?;
@@ -509,12 +533,12 @@ impl PySession {
 
     /// One object, as a dictionary carrying its `$type`. Raises when the
     /// object cannot be had.
-    fn get_object<'py>(&mut self, py: Python<'py>, uri: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn get_object<'py>(&self, py: Python<'py>, uri: &str) -> PyResult<Bound<'py, PyAny>> {
         let uris = vec![uri.to_string()];
         let Objects {
             mut found,
             failed: mut bad,
-        } = py.detach(|| self.session().get_objects(&uris)).map_err(failed)?;
+        } = py.detach(|| self.session()?.get_objects(&uris)).map_err(failed)?;
         if let Some((_, failure)) = bad.pop() {
             return Err(failed(failure));
         }
@@ -530,11 +554,11 @@ impl PySession {
     /// dictionary; `errors` maps a URI to `{"kind", "code", "message"}`. A URI
     /// that failed is in `errors`, never silently missing.
     fn get_objects<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         uris: Vec<String>,
     ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
-        let answered = py.detach(|| self.session().get_objects(&uris)).map_err(failed)?;
+        let answered = py.detach(|| self.session()?.get_objects(&uris)).map_err(failed)?;
         let objects = PyDict::new(py);
         for (uri, fetched) in &answered.found {
             objects.set_item(uri, loads(py, &fetched.json)?)?;
@@ -554,7 +578,7 @@ impl PySession {
     #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
     #[allow(clippy::too_many_arguments)]
     fn put_objects<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspace: &str,
         objects: Vec<Bound<'py, PyAny>>,
@@ -578,7 +602,7 @@ impl PySession {
             json,
         };
         let report = py
-            .detach(|| self.session().put_objects(dataspace, &texts, &choices))
+            .detach(|| self.session()?.put_objects(dataspace, &texts, &choices))
             .map_err(failed)?;
         pushed(py, report)
     }
@@ -599,7 +623,7 @@ impl PySession {
     #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
     #[allow(clippy::too_many_arguments)]
     fn push_epc<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         path: &str,
         dataspace: &str,
@@ -619,7 +643,7 @@ impl PySession {
             json,
         };
         let report = py
-            .detach(|| self.session().push_epc(path, dataspace, &choices))
+            .detach(|| self.session()?.push_epc(path, dataspace, &choices))
             .map_err(failed)?;
         pushed(py, report)
     }
@@ -628,21 +652,21 @@ impl PySession {
     /// before the one the server holds runs out. Over ETP the session stays
     /// the same one; a refusal raises `AuthorizationNeeded` and the session is
     /// still open. Over REST, every request from now on carries the new token.
-    fn reauthorize(&mut self, py: Python<'_>, token: String) -> PyResult<()> {
-        py.detach(|| self.session().reauthorize(&token)).map_err(failed)
+    fn reauthorize(&self, py: Python<'_>, token: String) -> PyResult<()> {
+        py.detach(|| self.session()?.reauthorize(&token)).map_err(failed)
     }
 
     /// The metadata of arrays of one object: `(found, errors)`, `found` a list
     /// of `{"path", "dimensions", "logical", "transport",
     /// "preferred_subarray_dimensions"}`.
     fn array_metadata<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         uri: &str,
         paths: Vec<String>,
     ) -> PyResult<(Vec<Bound<'py, PyDict>>, Bound<'py, PyDict>)> {
         let ArrayInfos { found, failed: bad } = py
-            .detach(|| self.session().array_metadata(uri, &paths))
+            .detach(|| self.session()?.array_metadata(uri, &paths))
             .map_err(failed)?;
         let mut rows = Vec::new();
         for one in &found {
@@ -670,7 +694,7 @@ impl PySession {
     /// that block - ETP's subarray.
     #[pyo3(signature = (uri, path, *, start = None, count = None))]
     fn read_array(
-        &mut self,
+        &self,
         py: Python<'_>,
         uri: &str,
         path: &str,
@@ -683,7 +707,7 @@ impl PySession {
             _ => return Err(PyValueError::new_err("give both start and count, or neither")),
         };
         let ArrayRead { dimensions, values } = py
-            .detach(|| self.session().read_array(uri, path, region))
+            .detach(|| self.session()?.read_array(uri, path, region))
             .map_err(failed)?;
         Ok((values_into_py(py, values)?, dimensions))
     }
@@ -696,13 +720,13 @@ impl PySession {
     /// with `writing=True`.
     #[pyo3(signature = (uris, *, prune_contained = false))]
     fn delete_objects<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         uris: Vec<String>,
         prune_contained: bool,
     ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
         let outcomes = py
-            .detach(|| self.session().delete_objects(&uris, prune_contained))
+            .detach(|| self.session()?.delete_objects(&uris, prune_contained))
             .map_err(failed)?;
         let deleted = PyDict::new(py);
         for (uri, with_it) in &outcomes.done {
@@ -720,7 +744,7 @@ impl PySession {
     /// Needs a session opened with `writing=True`.
     #[pyo3(signature = (dataspaces, *, custom_data = None))]
     fn put_dataspaces<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspaces: Vec<String>,
         custom_data: Option<std::collections::BTreeMap<String, Bound<'py, PyAny>>>,
@@ -731,7 +755,7 @@ impl PySession {
             .map(|(key, value)| Ok((key, custom_value(&value)?)))
             .collect::<PyResult<Vec<(String, CustomValue)>>>()?;
         let outcomes = py
-            .detach(|| self.session().put_dataspaces(&dataspaces, &custom))
+            .detach(|| self.session()?.put_dataspaces(&dataspaces, &custom))
             .map_err(failed)?;
         taken_into_py(py, &outcomes)
     }
@@ -739,12 +763,12 @@ impl PySession {
     /// Delete dataspaces, each given by its path or URI: `(deleted, errors)`,
     /// in the order given. Needs a session opened with `writing=True`.
     fn delete_dataspaces<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspaces: Vec<String>,
     ) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
         let outcomes = py
-            .detach(|| self.session().delete_dataspaces(&dataspaces))
+            .detach(|| self.session()?.delete_dataspaces(&dataspaces))
             .map_err(failed)?;
         taken_into_py(py, &outcomes)
     }
@@ -756,7 +780,7 @@ impl PySession {
     /// `Unsupported`. Needs a session opened with `writing=True`.
     #[pyo3(signature = (dataspaces = None, *, read_only = false, message = ""))]
     fn start_transaction(
-        &mut self,
+        &self,
         py: Python<'_>,
         dataspaces: Option<Vec<String>>,
         read_only: bool,
@@ -764,7 +788,7 @@ impl PySession {
     ) -> PyResult<PyTransaction> {
         let dataspaces = dataspaces.unwrap_or_default();
         let inner = py
-            .detach(|| self.session().start_transaction(&dataspaces, read_only, message))
+            .detach(|| self.session()?.start_transaction(&dataspaces, read_only, message))
             .map_err(failed)?;
         Ok(PyTransaction { inner })
     }
@@ -772,21 +796,17 @@ impl PySession {
     /// Commit a transaction: everything written in it becomes visible, or
     /// none of it. A refusal raises `ServerError`, and then the writes are not
     /// in the store; a connection lost meanwhile raises `OutcomeUnknown`.
-    fn commit_transaction(&mut self, py: Python<'_>, transaction: PyRef<'_, PyTransaction>) -> PyResult<()> {
+    fn commit_transaction(&self, py: Python<'_>, transaction: PyRef<'_, PyTransaction>) -> PyResult<()> {
         let transaction = transaction.inner.clone();
-        py.detach(|| self.session().commit_transaction(&transaction))
+        py.detach(|| self.session()?.commit_transaction(&transaction))
             .map_err(failed)
     }
 
     /// Roll a transaction back: nothing written in it stays. A refusal raises
     /// `ServerError`, and then its writes may still be there.
-    fn rollback_transaction(
-        &mut self,
-        py: Python<'_>,
-        transaction: PyRef<'_, PyTransaction>,
-    ) -> PyResult<()> {
+    fn rollback_transaction(&self, py: Python<'_>, transaction: PyRef<'_, PyTransaction>) -> PyResult<()> {
         let transaction = transaction.inner.clone();
-        py.detach(|| self.session().rollback_transaction(&transaction))
+        py.detach(|| self.session()?.rollback_transaction(&transaction))
             .map_err(failed)
     }
 
@@ -796,7 +816,7 @@ impl PySession {
     /// `empty` also lists the types the store supports and holds none of.
     #[pyo3(signature = (dataspace = "", *, scope = "targets", count = false, empty = false))]
     fn supported_types<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspace: &str,
         scope: &str,
@@ -804,7 +824,7 @@ impl PySession {
         empty: bool,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let rows = py
-            .detach(|| self.session().supported_types(dataspace, scope, count, empty))
+            .detach(|| self.session()?.supported_types(dataspace, scope, count, empty))
             .map_err(failed)?;
         rows.iter().map(|one| supported_type_into_py(py, one)).collect()
     }
@@ -814,12 +834,12 @@ impl PySession {
     /// a dictionary in the ETP Avro JSON encoding (`id`, `channelName`,
     /// `uom`, `indexes`...); the `id` is what a range asks for.
     fn channel_metadata<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         uris: Vec<String>,
     ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
         let ChannelRecords { found, failed: bad } = py
-            .detach(|| self.session().channel_metadata(&uris))
+            .detach(|| self.session()?.channel_metadata(&uris))
             .map_err(failed)?;
         let records = PyDict::new(py);
         for (uri, json) in &found {
@@ -834,7 +854,7 @@ impl PySession {
     /// `DataItem` dictionaries in the same encoding. A refusal raises
     /// `ServerError`.
     fn get_ranges<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         ranges: Vec<Bound<'py, PyAny>>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -842,7 +862,7 @@ impl PySession {
             .iter()
             .map(|one| dumps(py, one))
             .collect::<PyResult<Vec<_>>>()?;
-        let items = py.detach(|| self.session().get_ranges(&texts)).map_err(failed)?;
+        let items = py.detach(|| self.session()?.get_ranges(&texts)).map_err(failed)?;
         items.iter().map(|json| loads(py, json)).collect()
     }
 
@@ -856,7 +876,7 @@ impl PySession {
     /// objects reference, while the dataspace holds it.
     #[pyo3(signature = (dataspace = "", *, types = None, uris = None, arrays = true, references = false))]
     fn download_epc<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         dataspace: &str,
         types: Option<Vec<String>>,
@@ -871,16 +891,13 @@ impl PySession {
             references,
         };
         let packed = py
-            .detach(|| self.session().download_epc(dataspace, &wanted))
+            .detach(|| self.session()?.download_epc(dataspace, &wanted))
             .map_err(failed)?;
         packed_into_py(py, packed)
     }
 
     fn __repr__(&self) -> String {
-        {
-            let session = self.shared();
-            format!("Session({:?}, writing={})", session.url(), session.writing())
-        }
+        format!("Session({:?}, writing={})", self.url, self.writing)
     }
 }
 
@@ -989,9 +1006,7 @@ fn connect(
         at_once,
     };
     let inner = py.detach(|| Session::open(options)).map_err(failed)?;
-    Ok(PySession {
-        inner: Mutex::new(inner),
-    })
+    Ok(PySession::new(inner))
 }
 
 /// The compiled core of `retp`.
@@ -1014,6 +1029,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ConnectionLost", py.get_type::<ConnectionLost>())?;
     module.add("OutcomeUnknown", py.get_type::<OutcomeUnknown>())?;
     module.add("NotSent", py.get_type::<NotSent>())?;
+    module.add("SessionBusy", py.get_type::<SessionBusy>())?;
     module.add("ServerError", py.get_type::<ServerError>())?;
     module.add("TimedOut", py.get_type::<TimedOut>())?;
     module.add("AnswerRefused", py.get_type::<AnswerRefused>())?;

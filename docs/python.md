@@ -1,9 +1,5 @@
 # Python bridge
 
-> Status: alpha. The page describes what the bridge binds; it has not been run
-> against a build yet, and `TODO(verify)` marks what the first build and test
-> pass must confirm.
-
 `retp` for Python is the Rust client behind a thin pyo3 layer, built with
 maturin. It carries **no functionality the Rust library lacks**: an operation is
 written in Rust first and bridged second. When Python needs something Rust does
@@ -15,14 +11,13 @@ available.
 
 ## Install
 
-TODO(verify): not published to PyPI yet; development builds go to TestPyPI
-(see [Releasing](releasing.md)).
-
 ```
 pip install retp
 ```
 
-Wheels are `abi3` (one per platform, Python 3.9 or later) and need numpy.
+`retp` is on PyPI since version 0.2.0 (2026-10-15). Wheels are `abi3` (one per
+platform, Python 3.9 or later), carry HDF5, and need numpy. Development builds
+go to TestPyPI (see [Releasing](releasing.md)).
 
 ## Connect
 
@@ -36,7 +31,7 @@ with retp.connect("wss://etp.example.org/", token=token) as session:
 
 | Argument | Meaning |
 |---|---|
-| `url` | `ws://` or `wss://` URL of the ETP endpoint. A REST URL is refused by name (`retp.Unsupported`); the REST transport is not bridged yet |
+| `url` | `ws://` or `wss://` URL of the ETP endpoint; with `rest=True`, the `http://` or `https://` URL of the Reservoir DDMS REST API. An HTTP URL without `rest=True` is refused (`ValueError`) |
 | `token` | an OAuth 2.0 bearer token, without its scheme. It is handed to the Rust client and kept nowhere else: not in `repr`, not in `url`, not in an error |
 | `partition` | an OSDU data partition, for OSDU's Reservoir DDMS: sent as the header `data-partition-id`. The other headers a server may want are not bridged yet |
 | `insecure` | do not check the certificate (said in `session.warnings`) |
@@ -44,6 +39,8 @@ with retp.connect("wss://etp.example.org/", token=token) as session:
 | `types` | qualified types to ask for (`resqml22.*`); every release when empty, plus what the server announces |
 | `keepalive` | ping when the session has been quiet this many seconds; 0 never |
 | `at_once` | requests of one operation in flight at once (default 4; 1 sends them one after the other) |
+| `rest` | talk to the Reservoir DDMS REST API instead of an ETP WebSocket (see below) |
+| `user`, `password`, `token_url`, `azure_tenant`, `cognito_region`, `client_id`, `client_secret`, `oauth_scope` | the other logins of the command line, when no `token` is given (see below) |
 
 Keep the token out of the command line and out of source files: read it from the
 environment or a secret store.
@@ -52,11 +49,67 @@ The calls are blocking and release the Python GIL while they wait. From
 `asyncio`, `await asyncio.to_thread(session.dataspaces)`. One session handles one
 request at a time.
 
+### Renewing the token
+
+```python
+session.reauthorize(new_token)
+```
+
+Over ETP, an `Authorize` on the open session (ETP v1.2 section 3.13.5): the
+session stays the same one. Do it before the token the server holds runs out; a
+server that is not told may close the session when it does, and nothing brings
+it back. A refusal raises `retp.AuthorizationNeeded`, and the session is still
+open. Over REST there is no session to renew: every request from then on
+carries the new token. When to renew is the caller's: it knows when its token
+changes.
+
+### Logins
+
+Without a token, the session logs in as the command line does
+(`retp_client::login`), and the same fields choose the same login, in this
+order: Cognito (`cognito_region`, with `client_id`, `user` and `password`); a
+token endpoint (`token_url`, or Azure AD's for `azure_tenant`), with the
+password grant when `user` is given and client credentials (`client_id`,
+`client_secret`) otherwise; HTTP Basic for `user` and `password` alone.
+
+```python
+import os
+
+session = retp.connect(
+    url,
+    token_url="https://login.example.org/oauth2/token",
+    client_id=os.environ["ETP_CLIENT_ID"],
+    client_secret=os.environ["ETP_CLIENT_SECRET"],
+)
+```
+
+The bridge reads no environment variable itself: pass what `os.environ` holds.
+A login that lacks a part (a user without a password) raises `ValueError`
+before any request; an authorization server that says no raises
+`AuthorizationNeeded`; one that cannot be reached raises `SessionRefused`; a
+step this client does not take (a Cognito challenge such as a new password)
+raises `Unsupported`. No secret is kept, and none is in a message.
+
+### The Reservoir DDMS REST API
+
+```python
+with retp.connect("https://rddms.example.org/api/reservoir-ddms/v2",
+                  token=token, partition="opendes", rest=True) as session:
+    print(session.dataspaces())
+```
+
+The same methods run over REST (`native::rest_client`). Nothing is opened: each
+request goes on its own. What only an ETP session has is refused by name:
+`keepalive` and `types` at `connect` (`ValueError`), notifications at
+`subscribe` (`Unsupported`), and what the REST API has no counterpart for, as
+the Rust REST client refuses it.
+
 ## Dataspaces and resources
 
 ```python
 for space in session.dataspaces():
     print(space["path"], space["uri"])
+    print(space["custom_data"].get("viewers"))     # an OSDU store's ACLs, as lists
 
 listed = session.resources("demo")                 # a path, or a URI
 for resource in listed["resources"]:
@@ -65,11 +118,46 @@ for resource in listed["resources"]:
 # Which way, how far, which types, with edges and counts:
 session.resources("demo", depth=2, scope="targets", types=["resqml22.*"],
                   edges=True, count=True)
+
+# The types the dataspace holds, counted (scope "targets" or "sources"):
+for kind in session.supported_types("demo", count=True):
+    print(kind["data_object_type"], kind["object_count"])
 ```
 
 `scope` is one of the five ETP names: `self`, `sources`, `targets`,
-`sourcesOrSelf`, `targetsOrSelf`. A listing that a server cut short with an error
+`sourcesOrSelf`, `targetsOrSelf`; `supported_types` takes `targets` or
+`sources` only (ETP section 22.3.1), and refuses the others before sending
+(`NotSent`). `supported_types(..., empty=True)` also lists the types the store
+supports and holds none of. A listing that a server cut short with an error
 raises `retp.ServerError`; it is not returned as if it were complete.
+
+Each dataspace carries its `custom_data` as plain values: a string, a number, a
+flag, a list of strings (OSDU's `owners`, `viewers`, `legaltags`). A value of
+another kind is not turned into something else: its key is named in the
+dataspace's `notes`.
+
+To create and delete dataspaces, open the session with `writing=True`:
+
+```python
+with retp.connect(url, token=token, writing=True) as session:
+    created, errors = session.put_dataspaces(
+        ["demo", "carl/teapot"],
+        custom_data={
+            "owners": ["data.default.owners@example.org"],
+            "viewers": ["data.default.viewers@example.org"],
+            "legaltags": ["opendes-public-usa-dataset-1"],
+        },
+    )
+    deleted, errors = session.delete_dataspaces(["eml:///dataspace('old')"])
+```
+
+Each dataspace is a path or a URI. `custom_data` goes with each (an OSDU store
+reads its ACLs and legal tags there): a list of strings goes as that list; a
+string is read as the command line's `--custom KEY=VALUE` reads it, a text with a
+comma a list of strings and any other text one string. Any other value is
+refused (`ValueError`). Each dataspace answers for itself: the ones the store took
+are in the list, in the order given, the others in `errors`
+(`{"kind", "code", "message"}`).
 
 ## Objects
 
@@ -96,6 +184,10 @@ To write, open the session with `writing=True`:
 with retp.connect(url, token=token, writing=True) as session:
     report = session.put_objects("demo", [obj1, obj2])   # dicts, or JSON text
     print(report["sent"], "of", len(report["islands"]), "islands committed")
+
+    deleted, errors = session.delete_objects([uri1, uri2])
+    for uri, with_it in deleted.items():
+        print(uri, "took", with_it)                      # contained objects included
 ```
 
 The objects are planned by the Rust library: targets before sources, in islands
@@ -105,6 +197,65 @@ and its `.report` says what was sent, what was refused, what was left out and
 which references leave the batch. If the server agreed no Transaction protocol,
 the report says so (`without_transactions`): a refused island may be partly
 there.
+
+`report["refusals"]` names **every** object or array of the island that stopped
+that the store refused, each `{"uri", "array", "code", "message"}`: `uri` the
+object in the destination dataspace, `array` the array's path when the refusal
+is an array's, `code` the ETP error code the store answered with (`None` when
+the refusal is this side's, an array that could not be read). A
+`ProtocolException` that answered the whole request is every object's answer.
+`report["stopped"]` quotes the first in a sentence; read the list, not the
+sentence.
+
+`put_objects` and `push_epc` take the command line's `push-epc` options:
+
+| Keyword | Meaning |
+|---|---|
+| `objects_per_island`, `bytes_per_island` | at most this many objects, this many bytes, in one island (`--objects`, `--bytes`); a cycle larger than that still goes whole |
+| `only` | these objects alone, each by URI (of the package, or of the same object in another dataspace) or by uuid (`--only`); a name the source does not hold is refused |
+| `well_known` | also push the official dictionary's `PropertyKind`s the objects reference without holding (`--well-known`) |
+| `one_by_one` | the arrays one per message, one after the other (`--one-by-one`) |
+| `json` | send JSON Energistics, what the Reservoir DDMS REST API takes (`--json`); XML otherwise |
+
+The client does not filter the objects by the types the server announced: what
+the server will not take, it refuses, and the refusal is in the report.
+
+To name an object, `retp.uri` builds its canonical URI (ETP v1.2 section
+25.3.7), a quote in the dataspace written twice:
+
+```python
+retp.uri("osdu/project", "resqml20.obj_HorizonInterpretation", uuid)
+# "eml:///dataspace('osdu/project')/resqml20.obj_HorizonInterpretation(<uuid>)"
+```
+
+`delete_objects` answers per URI: `deleted` maps each URI the store deleted to
+the URIs it says went with it, `errors` the ones it did not delete.
+`prune_contained=True` asks the store to drop the contained objects the
+deletion would orphan; a store that refuses to orphan them answers that URI with
+its error (`ENOCASCADE_DELETE`, 4003).
+
+### Transactions
+
+`put_objects` and `push_epc` open their own transactions. For other writes, a
+transaction can be held by hand:
+
+```python
+with retp.connect(url, token=token, writing=True) as session:
+    transaction = session.start_transaction(["demo"], message="clean-up")
+    try:
+        session.delete_objects(uris)
+    except BaseException:
+        session.rollback_transaction(transaction)
+        raise
+    session.commit_transaction(transaction)
+```
+
+`start_transaction` returns a `retp.Transaction` (`uuid`, `dataspaces`,
+`read_only`); only `commit_transaction` or `rollback_transaction` ends it. A
+store that will not open one raises `ServerError` with its reason; a store
+without transactions raises `Unsupported`. A refused commit raises
+`ServerError`, and then the writes of the transaction are **not** in the store;
+a commit whose connection fell raises `OutcomeUnknown`.
 
 ### From `energyml.rust` to a dataspace
 
@@ -133,8 +284,30 @@ for obj in objects.values():
 ```
 
 Objects only. Arrays follow by reading each with `read_array` and writing it with
-`Epc.write_array`. Downloading a whole dataspace as an EPC is available in the
-Rust command line (`download-epc`) and not bridged yet.
+`Epc.write_array`.
+
+### A dataspace as an EPC
+
+```python
+packed = session.download_epc("demo")              # types=, uris=, arrays=, references=
+with open("demo.epc", "wb") as out:
+    out.write(packed["epc"])
+for array in packed["arrays"]:                     # what the package's HDF5 files hold
+    print(array["file"], array["path"], array["dimensions"], array["values"].dtype)
+for said in packed["left_out"]:
+    print("left out:", said)
+```
+
+`download_epc` is `energyml_etp_store::pack::pack`: the dataspace's objects in
+one package, in memory. `types` and `uris` narrow what is taken; `references`
+also takes what the kept objects reference, while the dataspace holds it;
+`arrays=False` reads no array. The arrays come back beside the package, each with
+the HDF5 file the package names for it, its path in that file, its dimensions
+and its values (a flat numpy array): writing them is the caller's (h5py, or
+`energyml.rust`), as the command line's `download-epc` writes them with its own
+HDF5 backend. `left_out` says what could not be taken (an object that does not
+read, an array the store refused): a package thinner than the dataspace is said,
+never silent.
 
 ## Arrays
 
@@ -158,8 +331,36 @@ the crate's `ARCHITECTURE.md`. String arrays, and bytes of a type without a fixe
 element size, are refused by name (`retp.Unsupported`); they are not returned as
 an empty array.
 
-Writing arrays from numpy is not bridged yet: Rust has no constructor from typed
-numbers, and the choice of the logical and transport types belongs there.
+Writing arrays from numpy is not bridged yet: the one conversion from numbers to
+what the wire carries (`energyml_etp_store::push::to_wire`, where the logical
+and transport types are chosen) is not public in Rust.
+
+## Channels
+
+```python
+records, errors = session.channel_metadata([log_uri])
+for uri, record in records.items():
+    print(record["id"], record["channelName"], record["uom"])
+
+items = session.get_ranges([{
+    "channelIds": [record["id"]],
+    "interval": {"startIndex": {"item": {"long": 0}},
+                 "endIndex": {"item": {"long": 1000}},
+                 "uom": "m", "depthDatum": ""},
+    "secondaryIntervals": [],
+}])
+for item in items:
+    print(item["channelId"], item["indexes"], item["value"])
+```
+
+`channel_metadata` asks ChannelSubscribe for the channels at some URIs (a log, a
+channel set, a channel); `get_ranges` for their values over index intervals.
+Records, ranges and data items cross in the ETP Avro JSON encoding the Rust
+library writes (`retp_avro`, ETP section 3.8.1): camel-case field names, and a
+union as a one-entry object naming its branch (`{"long": 0}`). A range that does
+not read as a `ChannelRangeInfo` raises `ValueError` naming it.
+
+Subscribing to channels, and ChannelStreaming, are not bridged yet (see below).
 
 ## Failures
 
@@ -174,14 +375,16 @@ argument.
 | `ConnectionLost` | the connection is gone | open a new session |
 | `OutcomeUnknown` | the connection fell while a request was out (a `ConnectionLost`) | check before retrying a write |
 | `NotSent` | not sent: the library would see the server refuse it | fix the request; the session is untouched |
-| `ServerError` | the server answered with an error (`.code`) | depends on the code |
+| `ServerError` | the server answered with an error (`.code`, when it sent one) | depends on the code |
 | `TimedOut` | no answer in time | retry or give up |
 | `AnswerRefused` | the answer could not be taken | report it |
 | `LocalError` | an object or a package could not be read or written locally | fix the data |
 | `PushIncomplete` | a push did not go through in full (`.report`) | read the report |
 
 A call never returns an empty result to mean "not supported" or "not found":
-plural reads return `(found, errors)` so that nothing is silently missing.
+plural reads, deletions and dataspace writes return a pair, what went through
+and `errors`, so that nothing is silently missing; a push raises
+`PushIncomplete` when it did not go through in full.
 
 ## Notifications
 
@@ -203,17 +406,25 @@ with retp.connect(url, token=token) as session:
 
 A server that offers no StoreNotification refuses by name (`NotSent`). Each
 change is the JSON object the Rust library writes (`retp_client::live::as_json`):
-`received`, `protocol`, `message`, `subscription`, `body`.
+`received`, `protocol`, `message`, `subscription`, `body`. A REST session sends
+no notifications: `subscribe` raises `Unsupported`.
 
 ## What is not there yet
 
-Deleting objects and dataspaces, creating dataspaces, explicit transactions,
-supported-type listing, channels, the logins of the command
-line (the bridge takes a token), the REST transport, downloading a dataspace as
-an EPC, and writing arrays. The Rust library has most of them; each is a small
-binding. The list of what Rust must grow first is in the crate's `DESIGN.md`.
+Each of these waits for the Rust library first; the crate's `DESIGN.md`
+(section 9) says what Rust must grow:
 
-Renewing the authorization of an open session, and listening to the session's own events,
-are not bridged yet: `connect(url, token=...)` takes one fixed token and `Session.subscribe`
-carries store notifications only. A Python session therefore ends when its token does; the
-Rust library has both (see [Library usage](client.md)).
+- writing arrays from numpy (the conversion to the wire is not public);
+- subscribing to channels and ChannelStreaming (Rust has no call that sets the
+  route and subscribes in one step, as `LiveSession::subscribe_to` does for
+  notifications);
+- writing a downloaded dataspace to disk with its HDF5 files in one call (the
+  command line does it itself; the library returns the package in memory).
+
+Listening to the session's own events (the server's warning that the token is
+expiring among them) is not bridged yet: `Session.subscribe` carries store
+notifications only, so a Python caller renews on its own clock
+(`session.reauthorize`). Nor is a credential source that the library calls
+when it renews: the Rust library has both (see [Library usage](client.md)).
+Resuming an interrupted push (a journal of the islands committed, reconnection)
+is not in the library yet either.

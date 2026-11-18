@@ -2766,7 +2766,13 @@ impl FakeRest {
             }
             ["dataspaces"] => json_response(200, json!([{
                 "uri": DEMO, "path": "demo", "storeLastWrite": "2025-07-31T15:15:38.151Z",
-                "storeCreated": "2025-07-31T15:15:38.151Z", "customData": {}
+                "storeCreated": "2025-07-31T15:15:38.151Z",
+                "customData": {
+                    "legaltags": ["opendes-public-usa-dataset-1"],
+                    "viewers": ["data.default.viewers@x.y", "data.reservoir.viewers@x.y"],
+                    "owners": ["data.default.owners@x.y"],
+                    "kind": "a, b"
+                }
             }])),
             ["dataspaces", "demo", kind @ ("resources" | "graph"), "all"] => {
                 let skip: usize = param("$skip").map_or(0, |s| s.parse().unwrap());
@@ -3246,6 +3252,66 @@ fn rest_statuses_become_what_etp_would_say() {
         (listed.items[0].path.as_str(), listed.items[0].store_last_write),
         ("demo", 1_753_974_938_151_000)
     );
+}
+
+/// **A dataspace's lists read back as lists.** OSDU's `owners`, `viewers`
+/// and `legaltags` are lists of strings; a string that holds a comma stays
+/// one string. And each value is the same JSON again through
+/// `custom_data_json`, the one conversion back.
+#[test]
+fn rest_dataspace_custom_data_reads_back_as_written() {
+    let listed = list_dataspaces(&mut rest(FakeRest::default())).unwrap();
+    let custom = &listed.items[0].custom_data;
+    let strings = |key: &str| match &custom[key].item {
+        DataValueItem::ArrayOfString(a) => a.values.clone(),
+        other => panic!("{key}: {other:?}"),
+    };
+    assert_eq!(
+        strings("viewers"),
+        ["data.default.viewers@x.y", "data.reservoir.viewers@x.y"]
+    );
+    assert_eq!(strings("legaltags"), ["opendes-public-usa-dataset-1"]);
+    assert_eq!(custom["kind"].item, DataValueItem::String("a, b".into()));
+    assert_eq!(
+        retp_client::custom_data_json(&custom["owners"]),
+        Some(serde_json::json!(["data.default.owners@x.y"]))
+    );
+    assert_eq!(
+        retp_client::custom_data_json(&custom["kind"]),
+        Some(serde_json::json!("a, b"))
+    );
+}
+
+/// **A quote in a dataspace's path is written twice in its URI** (ETP v1.2
+/// section 25.3.10): `carl's` travels as `carl''s`, and reads back as itself.
+#[test]
+fn a_quote_in_a_dataspace_path_is_written_twice() {
+    assert_eq!(
+        retp_client::dataspace_uri("carl's/teapot"),
+        "eml:///dataspace('carl''s/teapot')"
+    );
+    assert_eq!(retp_client::dataspace_uri("demo"), "eml:///dataspace('demo')");
+    assert_eq!(retp_client::dataspace_uri(""), "eml:///");
+}
+
+/// A list given as a list stays that list, commas and all; the text form
+/// keeps the command line's rule.
+#[test]
+fn custom_data_from_a_list_keeps_each_value_whole() {
+    let given = ["a,b".to_string(), "c".to_string()];
+    match retp_client::custom_data_strings(&given).item {
+        DataValueItem::ArrayOfString(a) => assert_eq!(a.values, given),
+        other => panic!("{other:?}"),
+    }
+    match retp_client::custom_data_value("a,b").item {
+        DataValueItem::ArrayOfString(a) => assert_eq!(a.values, ["a", "b"]),
+        other => panic!("{other:?}"),
+    }
+    // A kind the plain JSON cannot carry is not turned into something else.
+    let bytes = DataValue {
+        item: DataValueItem::Bytes(vec![1, 2]),
+    };
+    assert_eq!(retp_client::custom_data_json(&bytes), None);
 }
 
 /// JSON over REST is Energistics' JSON: the objects the API embeds in each

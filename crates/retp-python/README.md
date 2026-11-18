@@ -1,8 +1,11 @@
 # retp (Python)
 
 An [ETP v1.2](https://www.energistics.org/) client for Python, over the Rust
-`retp` stack: open a session with an ETP server, list its dataspaces and
-resources, read and write EnergyML objects, read data arrays into numpy.
+`retp` stack: open a session with an ETP server (or the Reservoir DDMS REST
+API), list its dataspaces, resources and supported types, read, write and
+delete EnergyML objects, create and delete dataspaces, hold transactions, read
+data arrays and channel values into Python, subscribe to notifications, and take
+a dataspace as an EPC.
 
 ```python
 import retp
@@ -37,13 +40,14 @@ what a caller does differently: reconnect (`ConnectionLost`), log in again
 up on a feature (`Unsupported`). A call never returns an empty result to mean
 "not supported".
 
-**The token is never stored**: it is handed to the Rust client and is in no
-`repr`, no attribute and no error message.
+**No credential is stored**: the token, or the password and client secret of a
+login, is handed to the Rust client and is in no `repr`, no attribute and no
+error message.
 
-Status: first draft, alpha. See `DESIGN.md` for the scope, the decisions still
-open, and what the Rust API must grow before the bridge
-can offer more. See `ARCHITECTURE.md` for why the code is shaped as it is, and
-`docs/python.md` (at the root of the repository) for the user guide.
+See `DESIGN.md` for the scope, the decisions still open, and what the Rust API
+must grow before the bridge can offer more. See `ARCHITECTURE.md` for why the
+code is shaped as it is, and `docs/python.md` (at the root of the repository)
+for the user guide.
 
 ## Install
 
@@ -51,9 +55,9 @@ can offer more. See `ARCHITECTURE.md` for why the code is shaped as it is, and
 pip install retp
 ```
 
-TODO(verify): not published to PyPI yet. From a checkout of the repository
-(needs the HDF5 C library, or add `hdf5-static` to the features for CMake and a
-C compiler instead):
+On PyPI since version 0.2.0. From a checkout of the repository (needs the HDF5
+C library, or add `hdf5-static` to the features for CMake and a C compiler
+instead):
 
 ```
 pip install maturin

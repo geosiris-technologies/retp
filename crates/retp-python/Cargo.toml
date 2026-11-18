@@ -33,6 +33,10 @@ crate-type = ["cdylib", "rlib"]
 retp-client = { workspace = true, features = ["live"] }
 retp-proto = { workspace = true }
 retp-types = { workspace = true }
+# The Avro JSON encoding of ETP records (ETP v1.2 section 3.8.1, `Avro::to_json` /
+# `from_json`): how channel records and ranges cross (`Session.channel_metadata`,
+# `Session.get_ranges`), written by the library, not by the bridge.
+retp-avro = { workspace = true }
 energyml-etp-store = { workspace = true }
 # The energyml crates come from crates.io (0.1.2), through the workspace table.
 energyml-core = { workspace = true }

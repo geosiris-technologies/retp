@@ -226,6 +226,35 @@ fn fixed_credentials_still_work_and_a_401_is_the_error() {
     assert_eq!(*seen.lock().unwrap(), ["Bearer fixed"], "sent once");
 }
 
+/// **Renewed credentials are the next request's.** A REST client has no
+/// session to renew: after `reauthorize`, every request carries the new
+/// credentials, and a source the client had is dropped - it is not asked
+/// again.
+#[test]
+fn reauthorized_credentials_go_with_the_next_request() {
+    let (http, seen) = FakeHttp::new(|authorization| authorization == "Bearer old");
+    let mut rest = RestClient::new(
+        http,
+        "http://rest.example/api",
+        Some(Credentials::bearer("old").unwrap()),
+    );
+    assert!(matches!(
+        list(&mut rest),
+        Err(ClientError::AuthorizationNeeded { .. })
+    ));
+    rest.reauthorize(Credentials::bearer("new").unwrap());
+    list(&mut rest).expect("the renewed credentials are accepted");
+    assert_eq!(*seen.lock().unwrap(), ["Bearer old", "Bearer new"]);
+
+    // Over a source: renewed, the source is no longer asked.
+    let source = Tokens::new(false);
+    let (http, seen) = FakeHttp::new(|_| false);
+    let mut rest = client(http, source.clone());
+    rest.reauthorize(Credentials::bearer("given").unwrap());
+    list(&mut rest).unwrap();
+    assert_eq!(*seen.lock().unwrap(), ["Bearer given"]);
+}
+
 /// Two connections, ONE source. The server refuses the credentials of the
 /// first while the second connection asks the source for its own (here: in
 /// the middle of the first's request). The refusal that comes back to the

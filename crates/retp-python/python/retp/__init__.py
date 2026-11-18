@@ -14,7 +14,7 @@ Objects cross as dictionaries (the EnergyML JSON encoding, every node carrying
 its `$type`); arrays cross as numpy arrays.
 """
 
-from ._core import connect
+from ._core import connect, uri
 from .errors import (
     AnswerRefused,
     AuthorizationNeeded,
@@ -29,7 +29,7 @@ from .errors import (
     TimedOut,
     Unsupported,
 )
-from .session import Session
+from .session import Session, Transaction
 
 __all__ = [
     "AnswerRefused",
@@ -44,6 +44,8 @@ __all__ = [
     "Session",
     "SessionRefused",
     "TimedOut",
+    "Transaction",
     "Unsupported",
     "connect",
+    "uri",
 ]

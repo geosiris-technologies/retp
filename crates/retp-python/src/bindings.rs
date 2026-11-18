@@ -4,22 +4,27 @@
 //! `maturin develop`: `cargo test` never runs it, which is exactly why it
 //! decides nothing. Everything that can be wrong lives in [`crate::session`].
 //!
-//! TODO(verify): this file has never been compiled. The pyo3/numpy 0.29 calls
-//! follow `energyml-python`'s `bindings.rs` (`detach`, `Bound`, `into_pyarray`);
-//! the first build will say which one drifted.
+//! The pyo3/numpy 0.29 calls follow `energyml-python`'s `bindings.rs`
+//! (`detach`, `Bound`, `into_pyarray`). `scripts/wheel-smoke.py` calls into
+//! this file through an installed wheel, with no server.
 
 use numpy::IntoPyArray;
 use std::sync::{Mutex, MutexGuard};
 
+use energyml_etp_store::pack::{Packed, Wanted};
+use energyml_storage::array::ArrayValues as StoredValues;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
+use retp_client::Transaction;
 use retp_client::arrays::Decoded;
+use retp_client::login::Choice;
+use retp_client::notifications::uuid_text;
 
 use crate::session::{
-    ArrayInfos, ArrayRead, ConnectOptions, DataspaceRow, Failure, Kind, Objects, PushReport, Resources,
-    Session,
+    ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, CustomValue, DataspaceRow, Failure, Kind, Objects,
+    Outcomes, PushChoices, PushReport, Resources, Session, SupportedTypeRow,
 };
 
 // The exception tree. One class per thing a caller does differently (see
@@ -147,6 +152,12 @@ fn dataspace_into_py<'py>(py: Python<'py>, one: &DataspaceRow) -> PyResult<Bound
     out.set_item("path", &one.path)?;
     out.set_item("store_last_write", one.store_last_write)?;
     out.set_item("store_created", one.store_created)?;
+    let custom = PyDict::new(py);
+    for (key, json) in &one.custom_data {
+        custom.set_item(key, loads(py, json)?)?;
+    }
+    out.set_item("custom_data", custom)?;
+    out.set_item("notes", &one.notes)?;
     Ok(out)
 }
 
@@ -195,6 +206,16 @@ fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'
     out.set_item("dangling", &report.dangling)?;
     out.set_item("without_transactions", report.without_transactions)?;
     out.set_item("stopped", &report.stopped)?;
+    let refusals = PyList::empty(py);
+    for refused in &report.refusals {
+        let row = PyDict::new(py);
+        row.set_item("uri", &refused.uri)?;
+        row.set_item("array", &refused.array)?;
+        row.set_item("code", refused.code)?;
+        row.set_item("message", &refused.message)?;
+        refusals.append(row)?;
+    }
+    out.set_item("refusals", refusals)?;
     Ok(out)
 }
 
@@ -221,6 +242,119 @@ fn values_into_py(py: Python<'_>, values: Decoded) -> PyResult<Py<PyAny>> {
             ));
         }
     })
+}
+
+/// `{uri: failure}` for the URIs of a plural call that did not go through.
+fn errors_into_py<'py>(py: Python<'py>, failed: &[(String, Failure)]) -> PyResult<Bound<'py, PyDict>> {
+    let errors = PyDict::new(py);
+    for (uri, failure) in failed {
+        errors.set_item(uri, failure_into_py(py, failure)?)?;
+    }
+    Ok(errors)
+}
+
+/// `([uri, ...], errors)`: the URIs the store took, in the order asked.
+fn taken_into_py<'py>(
+    py: Python<'py>,
+    outcomes: &Outcomes<String>,
+) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+    let done = outcomes.done.iter().map(|(uri, _)| uri.clone()).collect();
+    Ok((done, errors_into_py(py, &outcomes.failed)?))
+}
+
+fn supported_type_into_py<'py>(py: Python<'py>, one: &SupportedTypeRow) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("data_object_type", &one.data_object_type)?;
+    out.set_item("object_count", one.object_count)?;
+    out.set_item("relationship_kind", &one.relationship_kind)?;
+    Ok(out)
+}
+
+/// A stored array's values into numpy, flat, by copy - as [`values_into_py`].
+fn stored_values_into_py(py: Python<'_>, values: StoredValues) -> PyResult<Py<PyAny>> {
+    Ok(match values {
+        StoredValues::F64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::F32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I16(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::I8(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U64(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U32(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U16(v) => v.into_pyarray(py).into_any().unbind(),
+        StoredValues::U8(v) => v.into_pyarray(py).into_any().unbind(),
+        // `ArrayValues` is `#[non_exhaustive]`: a kind of values a later
+        // `energyml-storage` adds is refused by name, not dropped.
+        other => {
+            return Err(Unsupported::new_err(format!(
+                "{} arrays do not cross as numpy arrays in this bridge yet",
+                other.element_type()
+            )));
+        }
+    })
+}
+
+/// A packed dataspace: `{"epc": bytes, "objects", "arrays": [...], "left_out",
+/// "taken"}`.
+fn packed_into_py(py: Python<'_>, packed: Packed) -> PyResult<Bound<'_, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("epc", PyBytes::new(py, &packed.epc))?;
+    out.set_item("objects", packed.objects)?;
+    let arrays = PyList::empty(py);
+    for array in packed.arrays {
+        let row = PyDict::new(py);
+        row.set_item("file", &array.file)?;
+        row.set_item("path", &array.path)?;
+        row.set_item("dimensions", &array.dimensions)?;
+        row.set_item("values", stored_values_into_py(py, array.values)?)?;
+        arrays.append(row)?;
+    }
+    out.set_item("arrays", arrays)?;
+    out.set_item("left_out", &packed.left_out)?;
+    let taken = PyDict::new(py);
+    for (uri, when) in &packed.taken {
+        taken.set_item(uri, when)?;
+    }
+    out.set_item("taken", taken)?;
+    Ok(out)
+}
+
+/// A transaction a store opened (`Session.start_transaction`). Hand it back to
+/// `Session.commit_transaction` or `Session.rollback_transaction`: nothing
+/// else ends it, and nothing ends it on its own.
+#[pyclass(name = "Transaction", frozen)]
+pub struct PyTransaction {
+    inner: Transaction,
+}
+
+#[pymethods]
+impl PyTransaction {
+    /// The uuid the store gave it, as text.
+    #[getter]
+    fn uuid(&self) -> String {
+        uuid_text(&self.inner.uuid)
+    }
+
+    /// The dataspace URIs it spans.
+    #[getter]
+    fn dataspaces(&self) -> Vec<String> {
+        self.inner.dataspaces.clone()
+    }
+
+    /// Whether it only reads.
+    #[getter]
+    fn read_only(&self) -> bool {
+        self.inner.read_only
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Transaction(uuid={}, dataspaces={:?}, read_only={})",
+            uuid_text(&self.inner.uuid),
+            self.inner.dataspaces,
+            self.inner.read_only
+        )
+    }
 }
 
 /// An open session with an ETP server.
@@ -415,35 +549,87 @@ impl PySession {
     /// Put objects (dictionaries carrying `$type`, or their JSON text) into a
     /// dataspace. Returns the push report; raises `PushIncomplete` (with the
     /// report as its `report` attribute) when the push did not go through in
-    /// full. Needs a session opened with `writing=True`.
+    /// full. Needs a session opened with `writing=True`. The keywords are
+    /// `push_epc`'s.
+    #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
+    #[allow(clippy::too_many_arguments)]
     fn put_objects<'py>(
         &mut self,
         py: Python<'py>,
         dataspace: &str,
         objects: Vec<Bound<'py, PyAny>>,
+        objects_per_island: Option<usize>,
+        bytes_per_island: Option<u64>,
+        only: Option<Vec<String>>,
+        well_known: bool,
+        one_by_one: bool,
+        json: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let texts = objects
             .iter()
             .map(|one| dumps(py, one))
             .collect::<PyResult<Vec<_>>>()?;
+        let choices = PushChoices {
+            objects: objects_per_island,
+            bytes: bytes_per_island,
+            only,
+            well_known,
+            one_by_one,
+            json,
+        };
         let report = py
-            .detach(|| self.session().put_objects(dataspace, &texts))
+            .detach(|| self.session().put_objects(dataspace, &texts, &choices))
             .map_err(failed)?;
         pushed(py, report)
     }
 
     /// Send the EPC file at `path` (objects and arrays) into a dataspace. The
     /// file is read by Rust: to move an `energyml.rust.Epc`, save it first.
+    ///
+    /// The keywords are the command line's `push-epc` options:
+    /// `objects_per_island` and `bytes_per_island` bound an island (`--objects`,
+    /// `--bytes`); `only` sends these objects alone, each by URI or uuid
+    /// (`--only`); `well_known` sends the official dictionary's PropertyKinds
+    /// the package references without holding (`--well-known`); `one_by_one`
+    /// sends the arrays one per message (`--one-by-one`); `json` sends JSON
+    /// Energistics, what the Reservoir DDMS REST API takes (`--json`).
+    ///
+    /// The report's `refusals` lists each object or array the store refused,
+    /// `{"uri", "array", "code", "message"}`, `code` the ETP error code.
+    #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
+    #[allow(clippy::too_many_arguments)]
     fn push_epc<'py>(
         &mut self,
         py: Python<'py>,
         path: &str,
         dataspace: &str,
+        objects_per_island: Option<usize>,
+        bytes_per_island: Option<u64>,
+        only: Option<Vec<String>>,
+        well_known: bool,
+        one_by_one: bool,
+        json: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let choices = PushChoices {
+            objects: objects_per_island,
+            bytes: bytes_per_island,
+            only,
+            well_known,
+            one_by_one,
+            json,
+        };
         let report = py
-            .detach(|| self.session().push_epc(path, dataspace))
+            .detach(|| self.session().push_epc(path, dataspace, &choices))
             .map_err(failed)?;
         pushed(py, report)
+    }
+
+    /// Renew the authorization with a new bearer token (without its scheme),
+    /// before the one the server holds runs out. Over ETP the session stays
+    /// the same one; a refusal raises `AuthorizationNeeded` and the session is
+    /// still open. Over REST, every request from now on carries the new token.
+    fn reauthorize(&mut self, py: Python<'_>, token: String) -> PyResult<()> {
+        py.detach(|| self.session().reauthorize(&token)).map_err(failed)
     }
 
     /// The metadata of arrays of one object: `(found, errors)`, `found` a list
@@ -502,12 +688,227 @@ impl PySession {
         Ok((values_into_py(py, values)?, dimensions))
     }
 
+    /// Delete objects by URI: `(deleted, errors)`. `deleted` maps each URI
+    /// the store deleted to the list of URIs it says it deleted with it
+    /// (contained objects included); `errors` maps a URI it did not delete to
+    /// `{"kind", "code", "message"}`. `prune_contained` asks the store to drop
+    /// the contained objects the deletion would orphan. Needs a session opened
+    /// with `writing=True`.
+    #[pyo3(signature = (uris, *, prune_contained = false))]
+    fn delete_objects<'py>(
+        &mut self,
+        py: Python<'py>,
+        uris: Vec<String>,
+        prune_contained: bool,
+    ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+        let outcomes = py
+            .detach(|| self.session().delete_objects(&uris, prune_contained))
+            .map_err(failed)?;
+        let deleted = PyDict::new(py);
+        for (uri, with_it) in &outcomes.done {
+            deleted.set_item(uri, with_it)?;
+        }
+        Ok((deleted, errors_into_py(py, &outcomes.failed)?))
+    }
+
+    /// Create or replace dataspaces, each given by its path (`demo`) or URI:
+    /// `(created, errors)`, `created` the URIs the store took, in the order
+    /// given. `custom_data` goes with each (an OSDU store reads its ACLs and
+    /// legal tags there: `owners`, `viewers`, `legaltags`): a list of strings
+    /// goes as that list; a string as the command line's `--custom KEY=VALUE`
+    /// reads it, `"a,b"` a list of strings and any other text one string.
+    /// Needs a session opened with `writing=True`.
+    #[pyo3(signature = (dataspaces, *, custom_data = None))]
+    fn put_dataspaces<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspaces: Vec<String>,
+        custom_data: Option<std::collections::BTreeMap<String, Bound<'py, PyAny>>>,
+    ) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+        let custom = custom_data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| Ok((key, custom_value(&value)?)))
+            .collect::<PyResult<Vec<(String, CustomValue)>>>()?;
+        let outcomes = py
+            .detach(|| self.session().put_dataspaces(&dataspaces, &custom))
+            .map_err(failed)?;
+        taken_into_py(py, &outcomes)
+    }
+
+    /// Delete dataspaces, each given by its path or URI: `(deleted, errors)`,
+    /// in the order given. Needs a session opened with `writing=True`.
+    fn delete_dataspaces<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspaces: Vec<String>,
+    ) -> PyResult<(Vec<String>, Bound<'py, PyDict>)> {
+        let outcomes = py
+            .detach(|| self.session().delete_dataspaces(&dataspaces))
+            .map_err(failed)?;
+        taken_into_py(py, &outcomes)
+    }
+
+    /// Open a transaction over dataspaces (paths or URIs; none means the
+    /// store's default). Returns a `Transaction`, ended only by
+    /// `commit_transaction` or `rollback_transaction`. A store that refuses
+    /// raises `ServerError`; a store without transactions raises
+    /// `Unsupported`. Needs a session opened with `writing=True`.
+    #[pyo3(signature = (dataspaces = None, *, read_only = false, message = ""))]
+    fn start_transaction(
+        &mut self,
+        py: Python<'_>,
+        dataspaces: Option<Vec<String>>,
+        read_only: bool,
+        message: &str,
+    ) -> PyResult<PyTransaction> {
+        let dataspaces = dataspaces.unwrap_or_default();
+        let inner = py
+            .detach(|| self.session().start_transaction(&dataspaces, read_only, message))
+            .map_err(failed)?;
+        Ok(PyTransaction { inner })
+    }
+
+    /// Commit a transaction: everything written in it becomes visible, or
+    /// none of it. A refusal raises `ServerError`, and then the writes are not
+    /// in the store; a connection lost meanwhile raises `OutcomeUnknown`.
+    fn commit_transaction(&mut self, py: Python<'_>, transaction: PyRef<'_, PyTransaction>) -> PyResult<()> {
+        let transaction = transaction.inner.clone();
+        py.detach(|| self.session().commit_transaction(&transaction))
+            .map_err(failed)
+    }
+
+    /// Roll a transaction back: nothing written in it stays. A refusal raises
+    /// `ServerError`, and then its writes may still be there.
+    fn rollback_transaction(
+        &mut self,
+        py: Python<'_>,
+        transaction: PyRef<'_, PyTransaction>,
+    ) -> PyResult<()> {
+        let transaction = transaction.inner.clone();
+        py.detach(|| self.session().rollback_transaction(&transaction))
+            .map_err(failed)
+    }
+
+    /// The data object types under a dataspace (a path or a URI) or an
+    /// object, as dictionaries: `data_object_type`, `object_count` (when
+    /// `count`), `relationship_kind`. `scope` is `targets` or `sources`;
+    /// `empty` also lists the types the store supports and holds none of.
+    #[pyo3(signature = (dataspace = "", *, scope = "targets", count = false, empty = false))]
+    fn supported_types<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspace: &str,
+        scope: &str,
+        count: bool,
+        empty: bool,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py
+            .detach(|| self.session().supported_types(dataspace, scope, count, empty))
+            .map_err(failed)?;
+        rows.iter().map(|one| supported_type_into_py(py, one)).collect()
+    }
+
+    /// The channels at these URIs (a log, a channel set, a channel):
+    /// `(found, errors)`. `found` maps a URI to its `ChannelMetadataRecord`,
+    /// a dictionary in the ETP Avro JSON encoding (`id`, `channelName`,
+    /// `uom`, `indexes`...); the `id` is what a range asks for.
+    fn channel_metadata<'py>(
+        &mut self,
+        py: Python<'py>,
+        uris: Vec<String>,
+    ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+        let ChannelRecords { found, failed: bad } = py
+            .detach(|| self.session().channel_metadata(&uris))
+            .map_err(failed)?;
+        let records = PyDict::new(py);
+        for (uri, json) in &found {
+            records.set_item(uri, loads(py, json)?)?;
+        }
+        Ok((records, errors_into_py(py, &bad)?))
+    }
+
+    /// Channel values over index intervals: each range a dictionary (or its
+    /// JSON text) in the ETP Avro JSON encoding of `ChannelRangeInfo`
+    /// (`channelIds`, `interval`, `secondaryIntervals`); the answer a list of
+    /// `DataItem` dictionaries in the same encoding. A refusal raises
+    /// `ServerError`.
+    fn get_ranges<'py>(
+        &mut self,
+        py: Python<'py>,
+        ranges: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let texts = ranges
+            .iter()
+            .map(|one| dumps(py, one))
+            .collect::<PyResult<Vec<_>>>()?;
+        let items = py.detach(|| self.session().get_ranges(&texts)).map_err(failed)?;
+        items.iter().map(|json| loads(py, json)).collect()
+    }
+
+    /// A dataspace (a path or a URI) as an EPC, in memory: `{"epc": bytes,
+    /// "objects", "arrays", "left_out", "taken"}`. `arrays` lists the arrays
+    /// the objects name, each `{"file", "path", "dimensions", "values"}`
+    /// (`values` a flat numpy array), for the caller to write into the HDF5
+    /// file the package names; `left_out` says what could not be taken;
+    /// `taken` maps each listed URI to its `storeLastWrite`. `types` and
+    /// `uris` narrow what is taken; `references` also takes what the kept
+    /// objects reference, while the dataspace holds it.
+    #[pyo3(signature = (dataspace = "", *, types = None, uris = None, arrays = true, references = false))]
+    fn download_epc<'py>(
+        &mut self,
+        py: Python<'py>,
+        dataspace: &str,
+        types: Option<Vec<String>>,
+        uris: Option<Vec<String>>,
+        arrays: bool,
+        references: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let wanted = Wanted {
+            types: types.unwrap_or_default(),
+            uris: uris.unwrap_or_default(),
+            arrays,
+            references,
+        };
+        let packed = py
+            .detach(|| self.session().download_epc(dataspace, &wanted))
+            .map_err(failed)?;
+        packed_into_py(py, packed)
+    }
+
     fn __repr__(&self) -> String {
         {
             let session = self.shared();
             format!("Session({:?}, writing={})", session.url(), session.writing())
         }
     }
+}
+
+/// A `customData` value from Python: a string, or a list (or tuple) of
+/// strings. Anything else is refused by name rather than turned into text.
+fn custom_value(value: &Bound<'_, PyAny>) -> PyResult<CustomValue> {
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(CustomValue::Text(text));
+    }
+    match value.extract::<Vec<String>>() {
+        Ok(list) => Ok(CustomValue::List(list)),
+        Err(_) => Err(PyValueError::new_err(format!(
+            "a customData value is a string or a list of strings, not {}",
+            value.get_type().name()?
+        ))),
+    }
+}
+
+/// The canonical URI of a data object (ETP v1.2 section 25.3.7):
+/// `eml:///dataspace('path')/qualified.Type(uuid)`, a quote in the dataspace
+/// or in the version written twice. `dataspace` is a path, a dataspace URI,
+/// or `""` for the default dataspace; `version` names the object's version
+/// (`(uuid=...,version='...')`). The uuid is lowercased; a type, a uuid or a
+/// dataspace that does not read is refused (`ValueError`).
+#[pyfunction]
+#[pyo3(signature = (dataspace, qualified_type, uuid, *, version = None))]
+fn uri(dataspace: &str, qualified_type: &str, uuid: &str, version: Option<&str>) -> PyResult<String> {
+    crate::session::object_uri(dataspace, qualified_type, uuid, version).map_err(failed)
 }
 
 /// A push's report, raising when it is not complete.
@@ -534,9 +935,16 @@ fn pushed(py: Python<'_>, report: PushReport) -> PyResult<Bound<'_, PyDict>> {
 ///
 /// `token` is an OAuth 2.0 bearer token, without its scheme. It is handed to
 /// the Rust client and kept nowhere else: not in `repr`, not in `url`, not in
-/// an exception message.
+/// an exception message. Without a token, the other logins of the command
+/// line: `user` and `password` (HTTP Basic, or the password grant at
+/// `token_url` or Azure AD's `azure_tenant`), `client_id` and `client_secret`
+/// (client credentials at a token endpoint), `cognito_region` (AWS Cognito,
+/// with a user, a password and a client id). No environment variable is read.
+///
+/// `rest=True` talks to the Reservoir DDMS REST API at `url`
+/// (`https://.../api/reservoir-ddms/v2`) instead of an ETP WebSocket.
 #[pyfunction]
-#[pyo3(signature = (url, token = None, *, partition = None, insecure = false, writing = false, types = None, keepalive = None, at_once = None))]
+#[pyo3(signature = (url, token = None, *, partition = None, insecure = false, writing = false, types = None, keepalive = None, at_once = None, rest = false, user = None, password = None, token_url = None, azure_tenant = None, cognito_region = None, client_id = None, client_secret = None, oauth_scope = None))]
 #[allow(clippy::too_many_arguments)]
 fn connect(
     py: Python<'_>,
@@ -548,10 +956,31 @@ fn connect(
     types: Option<Vec<String>>,
     keepalive: Option<u64>,
     at_once: Option<usize>,
+    rest: bool,
+    user: Option<String>,
+    password: Option<String>,
+    token_url: Option<String>,
+    azure_tenant: Option<String>,
+    cognito_region: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    oauth_scope: Option<String>,
 ) -> PyResult<PySession> {
     let options = ConnectOptions {
         url,
         token,
+        login: Choice {
+            token: None,
+            user,
+            password,
+            token_url,
+            azure_tenant,
+            cognito_region,
+            client_id,
+            client_secret,
+            oauth_scope,
+        },
+        rest,
         partition,
         insecure,
         writing,
@@ -575,7 +1004,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add_class::<PySession>()?;
     module.add_class::<crate::notifications::PySubscription>()?;
+    module.add_class::<PyTransaction>()?;
     module.add_function(wrap_pyfunction!(connect, module)?)?;
+    module.add_function(wrap_pyfunction!(uri, module)?)?;
     module.add("RetpError", py.get_type::<RetpError>())?;
     module.add("Unsupported", py.get_type::<Unsupported>())?;
     module.add("SessionRefused", py.get_type::<SessionRefused>())?;

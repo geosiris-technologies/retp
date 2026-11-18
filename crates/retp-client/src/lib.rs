@@ -58,9 +58,10 @@ pub use offer::{
 };
 pub use operations::{
     DataspaceList, Ended, Listed, Opened, ResourceList, ResourceQuery, SupportedTypeList, Transaction,
-    commit_transaction, custom_data_value, dataspace_uri, delete_data_objects, delete_dataspaces,
-    get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
-    put_data_objects, put_dataspaces, rollback_transaction, start_transaction,
+    commit_transaction, custom_data_json, custom_data_strings, custom_data_value, dataspace_uri,
+    delete_data_objects, delete_dataspaces, get_data_objects, list_dataspaces, list_resources,
+    list_supported_types, object_file_name, put_data_objects, put_dataspaces, rollback_transaction,
+    start_transaction,
 };
 pub use profile::plain_text_warning;
 pub use source::{CredentialSource, Fresh, GaveUp, Refused, SourceError, Witness};

@@ -21,26 +21,49 @@
 //! runs it on the blocking `Client` through `retp_client::blocking`. Python
 //! calls are synchronous, so the bridge uses exactly that: no runtime, no
 //! thread of its own, and the GIL is released around each call by the binding.
+//!
+//! # Operations on any blocking client
+//!
+//! The operations added after the first scope (deleting, dataspaces,
+//! transactions, supported types, channels, packing a dataspace) are free
+//! functions over any [`Blocking`] client, and the [`Session`] method of the
+//! same name calls them on its remote. The suite runs the same functions on a
+//! client whose other end is a server connection in memory
+//! (`retp_client::memory`), so what the bridge makes of an answer is tested
+//! without a socket.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use energyml_core::identifiers::{EtpUri, QualifiedType, normalize_uuid};
 use energyml_core::registry::{ReadMode, Registry};
-use energyml_etp_store::push::{Options, Stop, push};
+use energyml_etp_store::pack::{Packed, Wanted, pack};
+use energyml_etp_store::push::{Budget, Options, Refusal, Stop, WellKnown, WriteFormat, chosen, push};
 use energyml_etp_store::{DEFAULT_MESSAGE, read_object};
 use energyml_storage::EpcStore;
 use energyml_storage::storage::EnergymlStorage;
-use retp_client::arrays::{Array, ArrayFailure, Block, Decoded, array_metadata, read_arrays, read_regions};
+use retp_avro::Avro;
+use retp_client::arrays::{
+    Array, ArrayFailure, Block, Decoded, Grouping, array_metadata, read_arrays, read_regions,
+};
+use retp_client::channels::{channel_metadata, get_ranges};
+use retp_client::login::{Choice, LoginError};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
 use retp_client::{
-    ClientError, ResourceQuery, blocking, dataspace_uri, get_data_objects, list_dataspaces, list_resources,
-    plain_text_warning, reading_client, writing_client,
+    Blocking, ClientError, Ended, Opened, ResourceQuery, Transaction, blocking, commit_transaction,
+    custom_data_json, custom_data_strings, custom_data_value, dataspace_uri, delete_data_objects,
+    delete_dataspaces, get_data_objects, list_dataspaces, list_resources, list_supported_types,
+    plain_text_warning, put_dataspaces, reading_client, rollback_transaction, start_transaction,
+    writing_client,
 };
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
+use retp_types::datatypes::ErrorInfo;
+use retp_types::datatypes::channel_data::ChannelRangeInfo;
 use retp_types::datatypes::data_array_types::DataArrayIdentifier;
-use retp_types::datatypes::object::ContextScopeKind;
+use retp_types::datatypes::object::{ContextScopeKind, Dataspace};
 
 /// The name this client announces in `RequestSession`.
 pub const APPLICATION_NAME: &str = "retp-python";
@@ -131,6 +154,18 @@ impl Failure {
             code: Some(code),
         }
     }
+
+    /// The error a server sent for one item of a plural request.
+    fn of_error(error: ErrorInfo) -> Self {
+        Failure::server(error.code, error.message)
+    }
+
+    /// A store's "no" that carries a reason and no error code (a refused
+    /// transaction, a refused commit): a server answer, so `Kind::Server`,
+    /// without a code.
+    fn said_no(message: impl Into<String>) -> Self {
+        Failure::new(Kind::Server, message)
+    }
 }
 
 impl std::fmt::Display for Failure {
@@ -183,12 +218,24 @@ impl From<ArrayFailure> for Failure {
 /// **The token is consumed by [`ConnectOptions::endpoint`]**, which turns it
 /// into `retp_proto::credentials::Credentials` (whose `Debug` hides the
 /// secret) and keeps nothing else. There is deliberately no `Debug` here, and
-/// [`Session`] holds no copy of it.
+/// [`Session`] holds no copy of it. The same holds for every secret of
+/// [`ConnectOptions::login`].
+#[derive(Default)]
 pub struct ConnectOptions {
-    /// `ws://` or `wss://` URL of the ETP endpoint.
+    /// `ws://` or `wss://` URL of the ETP endpoint; with [`ConnectOptions::rest`],
+    /// the `http(s)://` URL of the Reservoir DDMS REST API.
     pub url: String,
     /// An OAuth 2.0 bearer token, without its scheme.
     pub token: Option<String>,
+    /// Another way in than a token in hand - HTTP Basic, an OAuth 2.0 token
+    /// endpoint (password or client credentials, Azure AD's included), AWS
+    /// Cognito: `retp_client::login::Choice`, the command line's own, which
+    /// decides which login the fields given ask for. Its `token` is replaced by
+    /// [`ConnectOptions::token`].
+    pub login: Choice,
+    /// Talk to the Reservoir DDMS REST API instead of an ETP WebSocket: the
+    /// command line's `--rest`, and `native::rest_client`.
+    pub rest: bool,
     /// An OSDU data partition: talks to the server as OSDU's Reservoir DDMS.
     pub partition: Option<String>,
     /// Do not check the server's certificate. Said in [`Session::warnings`].
@@ -204,32 +251,22 @@ pub struct ConnectOptions {
 }
 
 impl ConnectOptions {
-    /// The URL, validated, the token turned into credentials, and the
+    /// The URL, validated, the login turned into credentials, and the
     /// warnings the library has about the connection.
     ///
-    /// Pure: opens nothing, so every refusal here is tested without a server.
+    /// Opens no session, so every refusal here is tested without a server. A
+    /// token in hand or HTTP Basic needs no network either; a login at a token
+    /// endpoint or at Cognito makes its one request here
+    /// (`retp_client::login::Login::obtain`), after every check that needs
+    /// none.
     pub fn endpoint(self) -> Result<(Endpoint, Vec<String>), Failure> {
-        if !(self.url.starts_with("ws://") || self.url.starts_with("wss://")) {
-            // The CLI can also go through the Reservoir DDMS REST API
-            // (`--rest`); this first scope binds the WebSocket only.
-            return Err(Failure::unsupported(format!(
-                "{}: this bridge connects to an ETP WebSocket (ws:// or wss://); the Reservoir DDMS REST API is not bridged yet",
-                self.url
-            )));
-        }
+        self.check_transport()?;
         if self.at_once == Some(0) {
             return Err(Failure::bad_argument(
                 "at_once must be at least 1 (1 sends the requests one after the other)",
             ));
         }
-        let credentials = match &self.token {
-            Some(token) => Some(
-                Credentials::bearer(token)
-                    // The refusal names the rule, never the token.
-                    .map_err(|why| Failure::bad_argument(format!("the token is refused: {}", why.0)))?,
-            ),
-            None => None,
-        };
+        let credentials = self.credentials()?;
         let certificates = if self.insecure {
             CertificateCheck::Skip
         } else {
@@ -258,6 +295,73 @@ impl ConnectOptions {
             warnings,
         ))
     }
+
+    /// The URL matches the transport asked for, and nothing is given that the
+    /// transport has no use for - the command line's checks (`retp-cli`'s
+    /// `Server::open_rest`), refused by name rather than ignored.
+    fn check_transport(&self) -> Result<(), Failure> {
+        let url = &self.url;
+        let websocket = url.starts_with("ws://") || url.starts_with("wss://");
+        let http = url.starts_with("http://") || url.starts_with("https://");
+        match (self.rest, websocket, http) {
+            (false, true, _) => Ok(()),
+            (false, _, true) => Err(Failure::bad_argument(format!(
+                "{url} is an HTTP URL: pass rest=True to talk to the Reservoir DDMS REST API, \
+                 or give the ETP WebSocket's ws:// or wss:// URL"
+            ))),
+            (false, _, _) => Err(Failure::bad_argument(format!(
+                "{url}: an ETP WebSocket URL is ws:// or wss:// (with rest=True, the REST API's http:// or https://)"
+            ))),
+            (true, _, true) => {
+                for (name, given) in [
+                    ("keepalive", self.keepalive_seconds.is_some()),
+                    ("types", !self.types.is_empty()),
+                ] {
+                    if given {
+                        return Err(Failure::bad_argument(format!(
+                            "{name} means nothing over REST: there is no session to negotiate or keep alive"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            (true, _, _) => Err(Failure::bad_argument(format!(
+                "{url}: rest=True takes the REST API's URL (https://.../api/reservoir-ddms/v2), not a WebSocket's"
+            ))),
+        }
+    }
+
+    /// The credentials the login gives: `Choice::login` decides which login
+    /// the fields ask for, in the command line's order (a token first), and
+    /// `Login::obtain` makes them.
+    ///
+    /// **No environment variable is read**: `Choice::login` takes a lookup,
+    /// and the bridge gives it none, so that what a session logs in with is
+    /// what the Python call says (a caller passes what `os.environ` holds).
+    fn credentials(&self) -> Result<Option<Credentials>, Failure> {
+        let mut choice = self.login.clone();
+        choice.token = self.token.clone();
+        let Some(login) = choice.login(|_| None).map_err(login_failure)? else {
+            return Ok(None);
+        };
+        Ok(Some(login.obtain().map_err(login_failure)?.credentials))
+    }
+}
+
+/// Why no credentials came out, as the failure a caller acts on. The
+/// library's words are kept; none of them carries a secret.
+fn login_failure(error: LoginError) -> Failure {
+    let kind = match &error {
+        // What was given cannot make credentials: fix the call.
+        LoginError::Invalid(_) => Kind::BadArgument,
+        // The authorization server could not be reached: no session.
+        LoginError::Http(_) => Kind::SessionRefused,
+        // It answered no: log in again, with other credentials.
+        LoginError::Refused { .. } => Kind::AuthorizationNeeded,
+        // A step this client does not take (a new password, a second factor).
+        LoginError::Challenge { .. } => Kind::Unsupported,
+    };
+    Failure::new(kind, format!("the login failed: {error}"))
 }
 
 /// Which way from a URI in Discovery's graph: the five names of the ETP
@@ -292,6 +396,13 @@ pub struct DataspaceRow {
     pub store_last_write: i64,
     /// `storeCreated`.
     pub store_created: i64,
+    /// Its `customData`, each value as JSON text - a flag, a number, a
+    /// string, a list of strings, `null` (`retp_client::custom_data_json`):
+    /// what an OSDU store keeps there, `owners`, `viewers`, `legaltags`.
+    pub custom_data: Vec<(String, String)>,
+    /// The keys of `customData` whose value is of a kind plain JSON does not
+    /// carry, named rather than dropped.
+    pub notes: Vec<String>,
 }
 
 /// A resource, as listed (`Discovery` protocol, `GetResources`).
@@ -420,6 +531,9 @@ pub struct PushReport {
     pub without_transactions: bool,
     /// Why the push stopped, `None` when every island went through.
     pub stopped: Option<String>,
+    /// Every object or array of the island that stopped that the store
+    /// refused, with its code (`energyml_etp_store::push::Report::refusals`).
+    pub refusals: Vec<Refusal>,
 }
 
 impl PushReport {
@@ -465,6 +579,7 @@ impl PushReport {
             dangling: report.dangling,
             without_transactions: report.without_transactions,
             stopped,
+            refusals: report.refusals,
         }
     }
 }
@@ -486,15 +601,33 @@ impl Session {
     /// Open a session: the CLI's own steps (`retp-cli`'s `Server::open_for`) -
     /// an offer (`reading_client` / `writing_client`), fitted to what the
     /// server announces when no type was named, then `native::connect`.
+    ///
+    /// With `rest`, the REST client instead (`native::rest_client`, as the
+    /// command line's `open_rest`): nothing is opened, each request goes on
+    /// its own.
     pub fn open(options: ConnectOptions) -> Result<Self, Failure> {
-        let (types, keepalive, at_once, writing) = (
+        let (types, keepalive, at_once, writing, rest) = (
             options.types.clone(),
             options.keepalive_seconds,
             options.at_once,
             options.writing,
+            options.rest,
         );
         let url = options.url.clone();
         let (endpoint, warnings) = options.endpoint()?;
+        if rest {
+            let mut client = native::rest_client(&endpoint);
+            if let Some(at_once) = at_once {
+                client = client.with_at_once(at_once);
+            }
+            return Ok(Session {
+                remote: Some(Remote::Rest(Box::new(client))),
+                registry: Arc::new(energyml_schemas::all()),
+                url,
+                writing,
+                warnings,
+            });
+        }
         let (name, version, id) = (APPLICATION_NAME, env!("CARGO_PKG_VERSION"), native::random_uuid());
         let (offer, handlers) = if writing {
             writing_client(name, version, id, &types)
@@ -592,16 +725,7 @@ impl Session {
                 format!("the dataspace list was cut short: {}", error.message),
             ));
         }
-        Ok(list
-            .items
-            .into_iter()
-            .map(|one| DataspaceRow {
-                uri: one.uri,
-                path: one.path,
-                store_last_write: one.store_last_write,
-                store_created: one.store_created,
-            })
-            .collect())
+        Ok(list.items.into_iter().map(dataspace_row).collect())
     }
 
     /// The resources under a dataspace (a path or a URI) or an object.
@@ -709,8 +833,8 @@ impl Session {
         Ok(out)
     }
 
-    fn require_writing(&self) -> Result<(), Failure> {
-        refuse_unless_writing(self.writing)
+    fn require_writing(&self, what: &str) -> Result<(), Failure> {
+        refuse_unless_writing(self.writing, what)
     }
 
     /// Put objects, given as EnergyML JSON texts (each with its `$type`), into
@@ -727,10 +851,16 @@ impl Session {
     ///
     /// Objects carrying `_data` (referenced objects expanded in place) are
     /// refused: which of the two a caller means is not ours to guess.
-    pub fn put_objects(&mut self, dataspace: &str, jsons: &[String]) -> Result<PushReport, Failure> {
-        self.require_writing()?;
+    pub fn put_objects(
+        &mut self,
+        dataspace: &str,
+        jsons: &[String],
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
+        self.require_writing("put objects")?;
+        choices.check()?;
         let store = stage(&self.registry, jsons)?;
-        self.push_store(&store, dataspace)
+        self.push_store(&store, dataspace, choices)
     }
 
     /// Send the EPC at `path` into a dataspace: `energyml_storage::EpcStore::open`
@@ -738,23 +868,76 @@ impl Session {
     ///
     /// The arrays travel too, and reading them needs the `hdf5` feature of this
     /// build: without it the storage layer refuses an array by name.
-    pub fn push_epc(&mut self, path: &str, dataspace: &str) -> Result<PushReport, Failure> {
-        self.require_writing()?;
+    pub fn push_epc(
+        &mut self,
+        path: &str,
+        dataspace: &str,
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
+        self.require_writing("push a package")?;
+        choices.check()?;
         let store = EpcStore::open(path, self.registry.clone())
             .map_err(|why| Failure::local(format!("cannot open {path}: {why}")))?;
-        self.push_store(&store, dataspace)
+        self.push_store(&store, dataspace, choices)
     }
 
-    fn push_store(&mut self, store: &EpcStore, dataspace: &str) -> Result<PushReport, Failure> {
+    /// `energyml_etp_store::push::push` with the options the command line's
+    /// `push-epc` builds from the same words (`retp-cli`'s `push_epc`).
+    fn push_store(
+        &mut self,
+        store: &EpcStore,
+        dataspace: &str,
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
         let source: &(dyn EnergymlStorage + Sync) = store;
-        let report = blocking(push(
-            self.remote()?,
-            source,
-            dataspace,
-            &Options::default(),
-            |_progress| {},
-        ))?;
+        let only = match &choices.only {
+            Some(names) => Some(blocking(chosen(source, names)).map_err(Failure::bad_argument)?),
+            None => None,
+        };
+        // Its own handle: the options borrow it while the session is borrowed to send.
+        let registry = self.registry.clone();
+        let mut budget = Budget::default();
+        if let Some(objects) = choices.objects {
+            budget.objects = objects;
+        }
+        if let Some(bytes) = choices.bytes {
+            budget.bytes = bytes;
+        }
+        let options = Options {
+            budget,
+            format: if choices.json {
+                WriteFormat::Json
+            } else {
+                WriteFormat::Xml
+            },
+            well_known: if choices.well_known {
+                WellKnown::Push(&registry)
+            } else {
+                WellKnown::Leave
+            },
+            only: only.as_deref(),
+            grouping: if choices.one_by_one {
+                Grouping::OneByOne
+            } else {
+                Grouping::Together
+            },
+            // A file knows no `storeLastWrite`: nothing to compare against.
+            expected: None,
+            overwrite: false,
+        };
+        let report = blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?;
         Ok(PushReport::of(report))
+    }
+
+    /// Renew the authorization of this session with a new bearer token:
+    /// `retp_client::native::Remote::reauthorize`. Over ETP, an `Authorize`
+    /// on the open session (ETP v1.2 section 3.13.5) - a refusal raises
+    /// `AuthorizationNeeded` and the session stays open; over REST, the token
+    /// of every request from now on.
+    pub fn reauthorize(&mut self, token: &str) -> Result<(), Failure> {
+        let credentials = Credentials::bearer(token)
+            .map_err(|why| Failure::bad_argument(format!("the token is refused: {why}")))?;
+        Ok(self.remote()?.reauthorize(&credentials)?)
     }
 
     /// The metadata of arrays of one resource. `retp_client::arrays::array_metadata`.
@@ -835,6 +1018,85 @@ impl Session {
             values,
         })
     }
+
+    /// [`delete_objects`] on this session; it writes, so needs `writing`.
+    pub fn delete_objects(
+        &mut self,
+        uris: &[String],
+        prune_contained: bool,
+    ) -> Result<Outcomes<Vec<String>>, Failure> {
+        self.require_writing("delete objects")?;
+        delete_objects(self.remote()?, uris, prune_contained)
+    }
+
+    /// [`create_dataspaces`] on this session; it writes, so needs `writing`.
+    pub fn put_dataspaces(
+        &mut self,
+        dataspaces: &[String],
+        custom_data: &[(String, CustomValue)],
+    ) -> Result<Outcomes<String>, Failure> {
+        self.require_writing("create dataspaces")?;
+        create_dataspaces(self.remote()?, dataspaces, custom_data)
+    }
+
+    /// [`remove_dataspaces`] on this session; it writes, so needs `writing`.
+    pub fn delete_dataspaces(&mut self, dataspaces: &[String]) -> Result<Outcomes<String>, Failure> {
+        self.require_writing("delete dataspaces")?;
+        remove_dataspaces(self.remote()?, dataspaces)
+    }
+
+    /// [`open_transaction`] on this session. The Transaction protocol is only
+    /// announced by a session that writes (`writing_client`), so a read-only
+    /// session refuses by name, even for a read-only transaction.
+    pub fn start_transaction(
+        &mut self,
+        dataspaces: &[String],
+        read_only: bool,
+        message: &str,
+    ) -> Result<Transaction, Failure> {
+        self.require_writing("open a transaction")?;
+        open_transaction(self.remote()?, dataspaces, read_only, message)
+    }
+
+    /// [`commit`] on this session.
+    pub fn commit_transaction(&mut self, transaction: &Transaction) -> Result<(), Failure> {
+        self.require_writing("commit a transaction")?;
+        commit(self.remote()?, transaction)
+    }
+
+    /// [`rollback`] on this session.
+    pub fn rollback_transaction(&mut self, transaction: &Transaction) -> Result<(), Failure> {
+        self.require_writing("roll a transaction back")?;
+        rollback(self.remote()?, transaction)
+    }
+
+    /// [`supported_types`] on this session.
+    pub fn supported_types(
+        &mut self,
+        uri_or_path: &str,
+        scope: &str,
+        count: bool,
+        empty: bool,
+    ) -> Result<Vec<SupportedTypeRow>, Failure> {
+        supported_types(self.remote()?, uri_or_path, scope, count, empty)
+    }
+
+    /// [`channels`] on this session.
+    pub fn channel_metadata(&mut self, uris: &[String]) -> Result<ChannelRecords, Failure> {
+        channels(self.remote()?, uris)
+    }
+
+    /// [`ranges`] on this session.
+    pub fn get_ranges(&mut self, ranges_json: &[String]) -> Result<Vec<String>, Failure> {
+        ranges(self.remote()?, ranges_json)
+    }
+
+    /// [`pack_dataspace`] on this session, read with the schemas the bridge
+    /// carries.
+    pub fn download_epc(&mut self, dataspace: &str, wanted: &Wanted) -> Result<Packed, Failure> {
+        let registry = self.registry.clone();
+        pack_dataspace(self.remote()?, &registry, dataspace, wanted)
+    }
 }
 
 fn identifiers(uri: &str, paths: &[String]) -> Vec<DataArrayIdentifier> {
@@ -848,15 +1110,434 @@ fn identifiers(uri: &str, paths: &[String]) -> Vec<DataArrayIdentifier> {
 }
 
 /// A read-only session cannot write: a named refusal rather than the server's
-/// later one (the Transaction protocol was never announced).
-pub fn refuse_unless_writing(writing: bool) -> Result<(), Failure> {
+/// later one (the Transaction protocol was never announced). `what` is what
+/// the caller tried, for the message.
+pub fn refuse_unless_writing(writing: bool, what: &str) -> Result<(), Failure> {
     if writing {
         Ok(())
     } else {
-        Err(Failure::unsupported(
-            "this session was opened read-only; open it with writing=True to put objects",
-        ))
+        Err(Failure::unsupported(format!(
+            "this session was opened read-only; open it with writing=True to {what}"
+        )))
     }
+}
+
+// ---------------------------------------------------------------------------
+// The operations beyond the first scope, on any blocking client
+// ---------------------------------------------------------------------------
+
+/// What a plural write said of each item, **in the order asked**: what the
+/// store did, or why it did not. Nothing asked is missing from both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcomes<T> {
+    /// The items the store took, each with what it said of it.
+    pub done: Vec<(String, T)>,
+    /// The ones it did not, with why.
+    pub failed: Vec<(String, Failure)>,
+}
+
+/// One supported type (SupportedTypes, `GetSupportedTypes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportedTypeRow {
+    /// The qualified type (`resqml20.obj_TriangulatedSetRepresentation`).
+    pub data_object_type: String,
+    /// How many objects of it, when they were counted.
+    pub object_count: Option<i32>,
+    /// The relationship kind, by its ETP name.
+    pub relationship_kind: String,
+}
+
+/// The channels at some URIs (`GetChannelMetadata`), each record as the ETP
+/// Avro JSON encoding the Rust library writes (ETP v1.2 section 3.8.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRecords {
+    /// URI and the JSON text of its `ChannelMetadataRecord`.
+    pub found: Vec<(String, String)>,
+    /// The URIs the store did not answer with a record, with why.
+    pub failed: Vec<(String, Failure)>,
+}
+
+/// The same URI twice in one keyed request would be one key in the answer:
+/// refused by name, rather than one of the two reported as unanswered.
+fn refuse_repeats(uris: &[String]) -> Result<(), Failure> {
+    if uris.is_empty() {
+        return Err(Failure::bad_argument("no URI given"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for uri in uris {
+        if !seen.insert(uri.as_str()) {
+            return Err(Failure::bad_argument(format!("{uri} is given twice")));
+        }
+    }
+    Ok(())
+}
+
+/// A keyed answer, back in the order asked. A label the answer does not
+/// carry is said, not skipped.
+fn in_order<T>(asked: &[String], mut answers: BTreeMap<String, Result<T, ErrorInfo>>) -> Outcomes<T> {
+    let mut out = Outcomes {
+        done: Vec::new(),
+        failed: Vec::new(),
+    };
+    for uri in asked {
+        match answers.remove(uri) {
+            Some(Ok(value)) => out.done.push((uri.clone(), value)),
+            Some(Err(error)) => out.failed.push((uri.clone(), Failure::of_error(error))),
+            None => out.failed.push((
+                uri.clone(),
+                Failure::new(
+                    Kind::AnswerRefused,
+                    "the server's answer does not mention this URI",
+                ),
+            )),
+        }
+    }
+    out
+}
+
+/// Delete objects by URI: `retp_client::delete_data_objects`. What each one
+/// took with it is the store's statement (the URIs it deleted, contained
+/// objects included); `prune_contained` asks it to drop the contained objects
+/// the deletion would orphan.
+pub fn delete_objects<K: Blocking>(
+    client: &mut K,
+    uris: &[String],
+    prune_contained: bool,
+) -> Result<Outcomes<Vec<String>>, Failure> {
+    refuse_repeats(uris)?;
+    let answers = delete_data_objects(client, uris, prune_contained)?;
+    Ok(in_order(uris, answers))
+}
+
+/// A listed dataspace as it crosses: its `customData` each value as JSON
+/// text through `retp_client::custom_data_json`, the keys it cannot carry
+/// named in `notes`.
+pub fn dataspace_row(one: Dataspace) -> DataspaceRow {
+    let mut custom_data = Vec::new();
+    let mut notes = Vec::new();
+    for (key, value) in &one.custom_data {
+        match custom_data_json(value) {
+            Some(json) => custom_data.push((key.clone(), json.to_string())),
+            None => notes.push(format!(
+                "customData `{key}` is of a kind plain JSON does not carry: left out"
+            )),
+        }
+    }
+    DataspaceRow {
+        uri: one.uri,
+        path: one.path,
+        store_last_write: one.store_last_write,
+        store_created: one.store_created,
+        custom_data,
+        notes,
+    }
+}
+
+/// The canonical URI of a data object (ETP v1.2 section 25.3.7, p.489):
+/// `energyml_core::identifiers::EtpUri::object_versioned`, which doubles a
+/// quote inside the dataspace or the version (section 25.3.10).
+///
+/// `dataspace` is a path (`demo`, `osdu/project`), a dataspace URI, or empty
+/// for the default dataspace. The uuid is checked and lowercased
+/// (`normalize_uuid`), the qualified type read (`QualifiedType::parse`), and
+/// the URI built is read back by `EtpUri::parse`: what does not come back as
+/// the same object is refused, not returned.
+pub fn object_uri(
+    dataspace: &str,
+    qualified_type: &str,
+    uuid: &str,
+    version: Option<&str>,
+) -> Result<String, Failure> {
+    let space = if dataspace.is_empty() {
+        None
+    } else {
+        let parsed = EtpUri::parse(&dataspace_uri(dataspace))
+            .map_err(|why| Failure::bad_argument(format!("{dataspace} is not a dataspace: {why}")))?;
+        if parsed.uuid.is_some() {
+            return Err(Failure::bad_argument(format!(
+                "{dataspace} names an object, not a dataspace"
+            )));
+        }
+        parsed.dataspace
+    };
+    let kind = QualifiedType::parse(qualified_type)
+        .map_err(|why| Failure::bad_argument(format!("{qualified_type} is not a qualified type: {why}")))?;
+    let uuid =
+        normalize_uuid(uuid).map_err(|why| Failure::bad_argument(format!("{uuid} is not a uuid: {why}")))?;
+    let uri = EtpUri::object_versioned(space.as_deref(), &kind.to_string(), &uuid, version);
+    let back = EtpUri::parse(&uri)
+        .map_err(|why| Failure::bad_argument(format!("{uri} does not read back: {why}")))?;
+    let same = back.dataspace == space
+        && back.uuid.as_deref() == Some(uuid.as_str())
+        && back.qualified_type().map(|q| q.to_string()) == Some(kind.to_string())
+        && back.object_version.as_deref() == version;
+    if !same {
+        return Err(Failure::bad_argument(format!(
+            "{uri} does not read back as the object asked for"
+        )));
+    }
+    Ok(uri)
+}
+
+/// What a push is told, as a caller gives it: the words of the command
+/// line's `push-epc`, which builds the same `energyml_etp_store::push::Options`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushChoices {
+    /// At most this many objects in one island (`--objects`).
+    pub objects: Option<usize>,
+    /// At most this many bytes in one island (`--bytes`).
+    pub bytes: Option<u64>,
+    /// Only these objects, by URI or uuid (`--only`, `push::chosen`); `None`
+    /// is everything.
+    pub only: Option<Vec<String>>,
+    /// Push the official dictionary's `PropertyKind`s the source references
+    /// without holding them (`--well-known`).
+    pub well_known: bool,
+    /// One array per message, one after the other (`--one-by-one`).
+    pub one_by_one: bool,
+    /// Send the objects as JSON Energistics, what the Reservoir DDMS REST API
+    /// takes (`--json`); XML otherwise.
+    pub json: bool,
+}
+
+impl PushChoices {
+    /// A budget of nothing, or an `only` that names nothing, is refused by
+    /// name: neither is "everything", and neither can send anything.
+    pub fn check(&self) -> Result<(), Failure> {
+        if self.objects == Some(0) {
+            return Err(Failure::bad_argument("objects must be at least 1"));
+        }
+        if self.bytes == Some(0) {
+            return Err(Failure::bad_argument("bytes must be at least 1"));
+        }
+        if self.only.as_ref().is_some_and(Vec::is_empty) {
+            return Err(Failure::bad_argument(
+                "only names no object: leave it out to push everything",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One `customData` value as a caller gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomValue {
+    /// Text, read as the command line's `--custom KEY=VALUE` reads it
+    /// (`retp_client::custom_data_value`): `a,b` is a list of strings, any
+    /// other text one string.
+    Text(String),
+    /// A list of strings, as given (`retp_client::custom_data_strings`): a
+    /// value that holds a comma stays one value.
+    List(Vec<String>),
+}
+
+/// The dataspaces as `retp_client::put_dataspaces` sends them: each path or
+/// URI made a URI by `dataspace_uri`, its path read back from that URI by
+/// `EtpUri::parse`, and the same `custom_data` on each ([`CustomValue`]).
+pub fn dataspaces_to_put(
+    dataspaces: &[String],
+    custom_data: &[(String, CustomValue)],
+) -> Result<Vec<Dataspace>, Failure> {
+    if dataspaces.is_empty() {
+        return Err(Failure::bad_argument("no dataspace given"));
+    }
+    dataspaces
+        .iter()
+        .map(|given| {
+            let uri = dataspace_uri(given);
+            let parsed = EtpUri::parse(&uri)
+                .map_err(|why| Failure::bad_argument(format!("{given} is not a dataspace: {why}")))?;
+            if parsed.object_type.is_some() || parsed.uuid.is_some() {
+                return Err(Failure::bad_argument(format!(
+                    "{given} names an object, not a dataspace"
+                )));
+            }
+            Ok(Dataspace {
+                uri,
+                path: parsed.dataspace.unwrap_or_default(),
+                custom_data: custom_data
+                    .iter()
+                    .map(|(key, value)| {
+                        let value = match value {
+                            CustomValue::Text(text) => custom_data_value(text),
+                            CustomValue::List(values) => custom_data_strings(values),
+                        };
+                        (key.clone(), value)
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// Create or replace dataspaces: `retp_client::put_dataspaces` with
+/// [`dataspaces_to_put`]. Each dataspace answers for itself, by its URI.
+pub fn create_dataspaces<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+    custom_data: &[(String, CustomValue)],
+) -> Result<Outcomes<String>, Failure> {
+    let spaces = dataspaces_to_put(dataspaces, custom_data)?;
+    let uris: Vec<String> = spaces.iter().map(|space| space.uri.clone()).collect();
+    refuse_repeats(&uris)?;
+    let answers = put_dataspaces(client, &spaces)?;
+    Ok(in_order(&uris, answers))
+}
+
+/// Delete dataspaces, each given by its path or URI (`dataspace_uri`):
+/// `retp_client::delete_dataspaces`.
+pub fn remove_dataspaces<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+) -> Result<Outcomes<String>, Failure> {
+    let uris: Vec<String> = dataspaces.iter().map(|given| dataspace_uri(given)).collect();
+    refuse_repeats(&uris)?;
+    let answers = delete_dataspaces(client, &uris)?;
+    Ok(in_order(&uris, answers))
+}
+
+/// Open a transaction over dataspaces (paths or URIs, `dataspace_uri`):
+/// `retp_client::start_transaction`.
+///
+/// The store's two kinds of no stay apart, as the library keeps them: a
+/// refusal (*not now*) is a server answer, an absent Transaction protocol
+/// (*never here*) is [`Kind::Unsupported`].
+pub fn open_transaction<K: Blocking>(
+    client: &mut K,
+    dataspaces: &[String],
+    read_only: bool,
+    message: &str,
+) -> Result<Transaction, Failure> {
+    let uris: Vec<String> = dataspaces.iter().map(|given| dataspace_uri(given)).collect();
+    match start_transaction(client, &uris, read_only, message)? {
+        Opened::Open(transaction) => Ok(transaction),
+        Opened::Refused(why) => Err(Failure::said_no(format!(
+            "the store did not open the transaction: {why}"
+        ))),
+        Opened::Unsupported(why) => Err(Failure::unsupported(format!(
+            "the store has no transactions: {why}"
+        ))),
+    }
+}
+
+/// Commit a transaction: `retp_client::commit_transaction`. A refused commit
+/// means the writes of the transaction are **not** in the store, and says so.
+pub fn commit<K: Blocking>(client: &mut K, transaction: &Transaction) -> Result<(), Failure> {
+    match commit_transaction(client, transaction)? {
+        Ended::Done => Ok(()),
+        Ended::Refused(why) => Err(Failure::said_no(format!(
+            "the store refused the commit: {why} (the writes of the transaction are not in the store)"
+        ))),
+    }
+}
+
+/// Roll a transaction back: `retp_client::rollback_transaction`. A refused
+/// rollback means its writes may still be there, and says so.
+pub fn rollback<K: Blocking>(client: &mut K, transaction: &Transaction) -> Result<(), Failure> {
+    match rollback_transaction(client, transaction)? {
+        Ended::Done => Ok(()),
+        Ended::Refused(why) => Err(Failure::said_no(format!(
+            "the store refused the rollback: {why} (the writes of the transaction may still be there)"
+        ))),
+    }
+}
+
+/// The data object types under a dataspace (a path or a URI) or an object:
+/// `retp_client::list_supported_types`. The library refuses, before sending,
+/// any scope but `sources` and `targets`.
+///
+/// An answer a server cut short with an error is **refused**, not returned as
+/// if it were the whole list.
+pub fn supported_types<K: Blocking>(
+    client: &mut K,
+    uri_or_path: &str,
+    scope: &str,
+    count: bool,
+    empty: bool,
+) -> Result<Vec<SupportedTypeRow>, Failure> {
+    let list = list_supported_types(
+        client,
+        &dataspace_uri(uri_or_path),
+        parse_scope(scope)?,
+        count,
+        empty,
+    )?;
+    if let Some(error) = list.ended_by {
+        return Err(Failure::server(
+            error.code,
+            format!("the supported-type list was cut short: {}", error.message),
+        ));
+    }
+    Ok(list
+        .items
+        .into_iter()
+        .map(|one| SupportedTypeRow {
+            data_object_type: one.data_object_type,
+            object_count: one.object_count,
+            relationship_kind: format!("{:?}", one.relationship_kind),
+        })
+        .collect())
+}
+
+/// The channels at these URIs (a log, a channel set, a channel):
+/// `retp_client::channels::channel_metadata`, each record in its Avro JSON
+/// encoding (`retp_avro::Avro::to_json`).
+pub fn channels<K: Blocking>(client: &mut K, uris: &[String]) -> Result<ChannelRecords, Failure> {
+    refuse_repeats(uris)?;
+    let answers = channel_metadata(client, uris)?;
+    let mut out = ChannelRecords {
+        found: Vec::new(),
+        failed: Vec::new(),
+    };
+    for (uri, answer) in uris.iter().zip(answers) {
+        match answer {
+            Ok(record) => out.found.push((uri.clone(), record.to_json().to_string())),
+            Err(error) => out.failed.push((uri.clone(), Failure::of_error(error))),
+        }
+    }
+    Ok(out)
+}
+
+/// Channel values over index intervals: `retp_client::channels::get_ranges`,
+/// each range read from its Avro JSON encoding
+/// (`ChannelRangeInfo::from_json_str`), each data item written back in it.
+/// The request's uuid is a fresh one (`native::random_uuid`).
+pub fn ranges<K: Blocking>(client: &mut K, ranges: &[String]) -> Result<Vec<String>, Failure> {
+    let asked = ranges_from_json(ranges)?;
+    match get_ranges(client, native::random_uuid(), &asked)? {
+        Ok(items) => Ok(items.iter().map(|item| item.to_json().to_string()).collect()),
+        Err(error) => Err(Failure::of_error(error)),
+    }
+}
+
+/// The ranges of [`ranges`], read; each refusal names the range.
+pub fn ranges_from_json(ranges: &[String]) -> Result<Vec<ChannelRangeInfo>, Failure> {
+    if ranges.is_empty() {
+        return Err(Failure::bad_argument("no range given"));
+    }
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(rank, text)| {
+            ChannelRangeInfo::from_json_str(text).map_err(|why| {
+                Failure::bad_argument(format!("range {rank} is not a ChannelRangeInfo: {why}"))
+            })
+        })
+        .collect()
+}
+
+/// A dataspace (a path or a URI) as an EPC, in memory:
+/// `energyml_etp_store::pack::pack`. The package's bytes, the arrays its
+/// objects name (for the caller to write into the files the package names),
+/// and what could not be taken, said rather than left out quietly.
+pub fn pack_dataspace<K: Blocking>(
+    client: &mut K,
+    registry: &Registry,
+    dataspace: &str,
+    wanted: &Wanted,
+) -> Result<Packed, Failure> {
+    Ok(blocking(pack(client, dataspace, registry, wanted))?)
 }
 
 /// Objects, as EnergyML JSON texts, in an in-memory package. Pure Rust, no

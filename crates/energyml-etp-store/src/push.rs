@@ -72,7 +72,7 @@ use energyml_storage::array::{ArrayData, ArrayLocation, ArrayValues};
 use energyml_storage::graph::Graph;
 use energyml_storage::resource::ObjectSummary;
 use energyml_storage::storage::EnergymlStorage;
-use retp_client::arrays::{Array, ArrayValues as Wire, Grouping};
+use retp_client::arrays::{Array, ArrayFailure, ArrayValues as Wire, Grouping};
 use retp_client::asynchronous::{
     commit_transaction, deleted_since, put_data_objects, rollback_transaction, start_transaction,
     write_arrays_with, written_since,
@@ -625,6 +625,71 @@ pub struct Report {
     /// The objects the store changed since the caller took them
     /// (`Options::expected`). With `overwrite`, they went anyway.
     pub conflicts: Vec<Conflict>,
+    /// **Every** object - or array - of the island that stopped that the
+    /// store would not take, each with the store's own code and words, in
+    /// the order the island sends them. [`Stop::Refused`] quotes the first
+    /// only; a caller that isolates the culprit, or looks for the reference
+    /// a store says is missing, reads this list, not that text.
+    ///
+    /// Empty when the island stopped for another reason: a transaction that
+    /// would not open, a refused commit (its reason names no object), a lost
+    /// connection.
+    pub refusals: Vec<Refusal>,
+}
+
+/// One object, or one of its arrays, that a store would not take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The object, as addressed in the destination dataspace - for an array,
+    /// the object it hangs from (a RESQML 2.0.1 proxy for a 2.0.1 array).
+    pub uri: String,
+    /// The array's path in its object, when the refusal is an array's.
+    pub array: Option<String>,
+    /// The ETP error code the store answered with (`ErrorInfo.code`, ETP
+    /// v1.2 section 24.1) - a per-object answer of a `ProtocolException`, or
+    /// the one error of a `ProtocolException` that answered the whole
+    /// request. `None` when the refusal is this side's: an array the source
+    /// could not read, or that the wire cannot carry.
+    pub code: Option<i32>,
+    /// What was said.
+    pub message: String,
+}
+
+/// The source's own URIs for what a caller names - for [`Options::only`].
+///
+/// Each name is a URI the source lists, the same object's URI in another
+/// dataspace (matched by its type and uuid), or a bare uuid in any case. A
+/// name the source does not hold is **refused** by name, as is a name that
+/// matches nothing at all: a push that quietly sends less looks exactly like
+/// a smaller model.
+pub async fn chosen(source: &(dyn EnergymlStorage + Sync), names: &[String]) -> Result<Vec<String>, String> {
+    let listed = source
+        .resources()
+        .await
+        .map_err(|why| format!("the source could not be listed: {why}"))?;
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let parsed = EtpUri::parse(name).ok();
+        let (kind, uuid) = match &parsed {
+            Some(uri) => (qualified_type_of(uri), uri.uuid.clone()),
+            None => (None, Some(name.trim().to_string())),
+        };
+        let found = listed
+            .iter()
+            .find(|one| one.uri == *name)
+            .or_else(|| {
+                let uuid = uuid.as_deref()?;
+                listed.iter().find(|one| {
+                    one.uuid.eq_ignore_ascii_case(uuid)
+                        && kind.as_deref().is_none_or(|kind| one.qualified_type == kind)
+                })
+            })
+            .ok_or_else(|| format!("{name}: the source does not hold it"))?;
+        if !out.contains(&found.uri) {
+            out.push(found.uri.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// What a push says as it goes.
@@ -891,7 +956,11 @@ pub async fn push<K: Caller>(
                         of: report.islands.len(),
                     });
                 }
-                Err(Stop::Refused(why)) => {
+                Err(Halt {
+                    stop: Stop::Refused(why),
+                    refusals,
+                }) => {
+                    report.refusals = refusals;
                     let why = with_hint(
                         format!(
                             "{why} - no transaction to roll back: what this island wrote before the refusal stays"
@@ -901,10 +970,11 @@ pub async fn push<K: Caller>(
                     report.stopped = Some(Stopped::refused(rank, why));
                     return Ok(report);
                 }
-                Err(failed) => {
+                Err(Halt { stop, refusals }) => {
+                    report.refusals = refusals;
                     report.stopped = Some(Stopped {
                         island: rank,
-                        why: failed,
+                        why: stop,
                     });
                     return Ok(report);
                 }
@@ -931,15 +1001,20 @@ pub async fn push<K: Caller>(
                     return Ok(report);
                 }
             },
-            Err(Stop::Refused(why)) => {
+            Err(Halt {
+                stop: Stop::Refused(why),
+                refusals,
+            }) => {
                 let _ = rollback_transaction(client, &transaction).await;
+                report.refusals = refusals;
                 report.stopped = Some(Stopped::refused(rank, why));
                 return Ok(report);
             }
-            Err(failed) => {
+            Err(Halt { stop, refusals }) => {
+                report.refusals = refusals;
                 report.stopped = Some(Stopped {
                     island: rank,
-                    why: failed,
+                    why: stop,
                 });
                 return Ok(report);
             }
@@ -1006,6 +1081,43 @@ async fn conflicts_of<K: Caller>(
     Ok(conflicts)
 }
 
+/// Why an island did not go through, and every object or array in it the
+/// store refused ([`Report::refusals`]).
+struct Halt {
+    stop: Stop,
+    refusals: Vec<Refusal>,
+}
+
+impl Halt {
+    fn failed(why: ClientError) -> Self {
+        Halt {
+            stop: Stop::Failed(why),
+            refusals: Vec::new(),
+        }
+    }
+
+    /// The refusals, and a [`Stop::Refused`] that quotes the first and
+    /// counts the others.
+    fn refused(refusals: Vec<Refusal>) -> Self {
+        let first = &refusals[0];
+        let what = match &first.array {
+            Some(path) => format!("{} {path}", first.uri),
+            None => first.uri.clone(),
+        };
+        let mut why = match first.code {
+            Some(code) => format!("{what}: {} ({code})", first.message),
+            None => format!("{what}: {}", first.message),
+        };
+        if refusals.len() > 1 {
+            why.push_str(&format!(", and {} more refused", refusals.len() - 1));
+        }
+        Halt {
+            stop: Stop::Refused(why),
+            refusals,
+        }
+    }
+}
+
 /// One island's objects and arrays, into the open transaction.
 async fn send_island<K: Caller>(
     client: &mut K,
@@ -1014,7 +1126,7 @@ async fn send_island<K: Caller>(
     ready: &BTreeMap<String, Ready>,
     format: WriteFormat,
     grouping: Grouping,
-) -> Result<(), Stop> {
+) -> Result<(), Halt> {
     let mut objects = Vec::with_capacity(island.uris.len());
     for uri in &island.uris {
         let one = ready.get(uri).expect("an island holds only what was readied");
@@ -1031,29 +1143,45 @@ async fn send_island<K: Caller>(
     }
     let answers = put_data_objects(client, &objects, false)
         .await
-        .map_err(Stop::Failed)?;
-    for (uri, answer) in &answers {
-        if let Err(error) = answer {
-            return Err(Stop::Refused(format!(
-                "{uri}: {} ({})",
-                error.message, error.code
-            )));
-        }
+        .map_err(Halt::failed)?;
+    // Every refusal, in the order the island sends them - not the first
+    // only, and not in the order of the answer's map.
+    let refusals: Vec<Refusal> = objects
+        .iter()
+        .filter_map(|object| {
+            let uri = &object.resource.uri;
+            match answers.get(uri) {
+                Some(Err(error)) => Some(Refusal {
+                    uri: uri.clone(),
+                    array: None,
+                    code: Some(error.code),
+                    message: error.message.clone(),
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+    if !refusals.is_empty() {
+        return Err(Halt::refused(refusals));
     }
 
     let mut writes = Vec::new();
     for uri in &island.uris {
-        for (id, location) in &ready[uri].arrays {
-            let data = source.read_array(location).await.map_err(|why| {
-                Stop::Refused(format!(
-                    "{uri}: its array {} could not be read: {why}",
-                    location.path_in_file
-                ))
-            })?;
-            writes.push((
-                id.clone(),
-                to_wire(&data).map_err(|why| Stop::Refused(format!("{uri}: {why}")))?,
-            ));
+        let one = &ready[uri];
+        for (id, location) in &one.arrays {
+            let mine = |message: String| {
+                Halt::refused(vec![Refusal {
+                    uri: id.uri.clone(),
+                    array: Some(location.path_in_file.clone()),
+                    code: None,
+                    message,
+                }])
+            };
+            let data = source
+                .read_array(location)
+                .await
+                .map_err(|why| mine(format!("the array could not be read from the source: {why}")))?;
+            writes.push((id.clone(), to_wire(&data).map_err(mine)?));
         }
     }
     if writes.is_empty() {
@@ -1061,14 +1189,26 @@ async fn send_island<K: Caller>(
     }
     let written = write_arrays_with(client, &writes, DEFAULT_MESSAGE, grouping, |_| {})
         .await
-        .map_err(Stop::Failed)?;
-    for ((id, _), outcome) in writes.iter().zip(written) {
-        if let Err(failure) = outcome {
-            return Err(Stop::Refused(format!(
-                "{} {}: {failure}",
-                id.uri, id.path_in_resource
-            )));
-        }
+        .map_err(Halt::failed)?;
+    let refusals: Vec<Refusal> = writes
+        .iter()
+        .zip(written)
+        .filter_map(|((id, _), outcome)| {
+            let failure = outcome.err()?;
+            let (code, message) = match failure {
+                ArrayFailure::Store(error) => (Some(error.code), error.message),
+                other => (None, other.to_string()),
+            };
+            Some(Refusal {
+                uri: id.uri.clone(),
+                array: Some(id.path_in_resource.clone()),
+                code,
+                message,
+            })
+        })
+        .collect();
+    if !refusals.is_empty() {
+        return Err(Halt::refused(refusals));
     }
     Ok(())
 }

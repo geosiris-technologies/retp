@@ -246,6 +246,15 @@ impl<H: Http> RestClient<H> {
         self
     }
 
+    /// Send `credentials` with every request from now on, in place of what
+    /// the client had - fixed credentials or a source, which is dropped. A
+    /// REST API has no session to renew: the next request is the one the
+    /// server judges them by.
+    pub fn reauthorize(&mut self, credentials: Credentials) {
+        self.source = None;
+        self.credentials = Some(credentials);
+    }
+
     /// Send `headers` with every request, in addition to the client's own -
     /// what the server wants besides the credentials: a routing key, a
     /// data partition, a tenant, an API key. They replace the ones given
@@ -1204,7 +1213,7 @@ impl<H: Http> RestClient<H> {
             let mut custom = serde_json::Map::new();
             let mut refused = None;
             for (name, value) in &space.custom_data {
-                match json_of_value(value) {
+                match crate::operations::custom_data_json(value) {
                     Some(json) => {
                         custom.insert(name.clone(), json);
                     }
@@ -2579,30 +2588,22 @@ fn custom(json: &Json) -> BTreeMap<String, DataValue> {
                     None => DataValueItem::Double(n.as_f64().unwrap_or(f64::NAN)),
                 },
                 Json::Null => DataValueItem::Null,
+                // A list of strings is one: OSDU's `owners`, `viewers` and
+                // `legaltags` are lists, and read back as their JSON text
+                // they would no longer be.
+                Json::Array(items) if items.iter().all(Json::is_string) => {
+                    DataValueItem::ArrayOfString(retp_types::datatypes::ArrayOfString {
+                        values: items
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect(),
+                    })
+                }
                 other => DataValueItem::String(other.to_string()),
             };
             (k.clone(), DataValue { item })
         })
         .collect()
-}
-
-/// A `DataValue` as this API's JSON - the inverse of [`custom`], for what a
-/// dataspace's `customData` carries: a flag, a number, a string, a list of
-/// strings. Anything else is `None`, and the caller refuses by name.
-fn json_of_value(value: &DataValue) -> Option<Json> {
-    Some(match &value.item {
-        DataValueItem::Boolean(b) => Json::Bool(*b),
-        DataValueItem::Int(i) => Json::from(*i),
-        DataValueItem::Long(l) => Json::from(*l),
-        DataValueItem::Float(f) => Json::from(*f),
-        DataValueItem::Double(d) => Json::from(*d),
-        DataValueItem::String(s) => Json::String(s.clone()),
-        DataValueItem::ArrayOfString(a) => {
-            Json::Array(a.values.iter().map(|s| Json::String(s.clone())).collect())
-        }
-        DataValueItem::Null => Json::Null,
-        _ => return None,
-    })
 }
 
 /// An array's values as the API's `Data`: a JSON list of numbers, flags or

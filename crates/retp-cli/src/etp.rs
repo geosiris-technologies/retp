@@ -21,13 +21,14 @@ use tracing_subscriber::prelude::*;
 use retp_client::arrays::{ArrayProgress, ArrayValues, array_metadata, budget as array_budget, read_arrays};
 use retp_client::download::{Download, Progress, download_resumable};
 use retp_client::login::{Choice, Login};
-use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen};
-use retp_client::resume::{Retry, RunEvent, Setback};
+use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen, Resuming};
+use retp_client::resume::{Came, Retry, RunEvent, Setback};
 use retp_client::{
     ClientError, ExtraHeaders, ResourceQuery, dataspace_uri, delete_dataspaces, described_client,
     get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
     plain_text_warning, put_dataspaces, reading_client, writing_client,
 };
+use retp_proto::connection::Resumable;
 use retp_proto::describe::OfferDescription;
 use retp_proto::negotiate::protocol_name;
 use retp_proto::probe::Profile;
@@ -361,18 +362,28 @@ impl Server {
     /// by the commands that write, so that a read-only errand announces
     /// nothing it will not do.
     fn open_for(&self, writing: bool) -> Result<Session> {
-        self.open_with(writing, false)
+        self.open_with(writing, false, None)
+    }
+
+    /// [`Server::open_for`], asking back over the new connection the session
+    /// `lost` - OSDU's `ResumeSession` (`native::connect_resuming`): the same
+    /// offer, the login done again, this line's credentials sent.
+    fn open_resuming(&self, writing: bool, lost: Resumable) -> Result<Session> {
+        self.open_with(writing, false, Some(lost))
     }
 
     /// A session driven by a task of its own ([`retp_client::live`]): what
     /// arrives unasked is pushed as it arrives, and nothing has to be read
     /// between two commands - the shell's. Over REST, the REST client.
     fn open_live(&self, writing: bool) -> Result<Session> {
-        self.open_with(writing, true)
+        self.open_with(writing, true, None)
     }
 
-    fn open_with(&self, writing: bool, live: bool) -> Result<Session> {
+    fn open_with(&self, writing: bool, live: bool, lost: Option<Resumable>) -> Result<Session> {
         if self.rest {
+            if lost.is_some() {
+                anyhow::bail!("--resume-session means nothing over REST: there is no session to ask back");
+            }
             return self.open_rest();
         }
         // The offer first: a file that is wrong costs no login.
@@ -410,8 +421,11 @@ impl Server {
             if let Some(at_once) = self.at_once {
                 settings.at_once = at_once;
             }
-            let session = retp_client::live::LiveSession::connect(connect, settings)
-                .with_context(|| format!("opening a session with {}", self.url))?;
+            let session = match lost {
+                None => retp_client::live::LiveSession::connect(connect, settings),
+                Some(lost) => retp_client::live::LiveSession::connect_resuming(connect, lost, settings),
+            }
+            .with_context(|| format!("opening a session with {}", self.url))?;
             session.client().ask_acknowledge(self.ack);
             if let Some(seconds) = self.keepalive {
                 session
@@ -420,8 +434,11 @@ impl Server {
             }
             return Ok(native::Remote::Live(Box::new(session)));
         }
-        let mut client =
-            native::connect(connect).with_context(|| format!("opening a session with {}", self.url))?;
+        let mut client = match lost {
+            None => native::connect(connect),
+            Some(lost) => native::connect_resuming(connect, lost),
+        }
+        .with_context(|| format!("opening a session with {}", self.url))?;
         client.ask_acknowledge(self.ack);
         if let Some(seconds) = self.keepalive {
             client.set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
@@ -833,6 +850,16 @@ struct PushArgs {
     /// fall in a row, up to 30 seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
     reconnect_pause: f64,
+    /// With --reconnect: first ask the server to give the lost session back
+    /// (OSDU's ResumeSession, protocol 2400 - an OSDU extension, not ETP
+    /// v1.2), then open a new session if it will not. Off by default. A
+    /// server may not support it: a new session is then opened at once, and
+    /// the report says why. Either way the island cut goes again whole. The
+    /// new connection always sends this line's credentials; nothing on the
+    /// client side tells which rights the server applies to a resumed
+    /// session (OSDU issue #232).
+    #[arg(long)]
+    resume_session: bool,
 }
 
 /// How `push --split` cuts a refused island.
@@ -1059,6 +1086,7 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
                 json: args.json || server.rest,
                 ..args
             };
+            check_resume_session(&args, server.rest)?;
             if args.reconnect > 0 {
                 push_epc_reconnecting(&server, &args)
             } else {
@@ -1270,6 +1298,7 @@ fn push_options<'a>(
 /// went. `--reconnect` opens sessions of its own, which a shell keeps for
 /// itself: refused here, by name.
 fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
+    check_resume_session(args, session.is_rest())?;
     if args.reconnect > 0 {
         anyhow::bail!(
             "--reconnect opens new sessions, and the shell keeps its own: run `retp push` on its own line, or push again with --journal"
@@ -1287,16 +1316,48 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     Ok(said_push_report(&report))
 }
 
+/// `--resume-session` qualifies `--reconnect`: alone, or over REST, it would
+/// mean nothing, and is refused by name.
+fn check_resume_session(args: &PushArgs, rest: bool) -> Result<()> {
+    if !args.resume_session {
+        return Ok(());
+    }
+    if args.reconnect == 0 {
+        anyhow::bail!(
+            "--resume-session asks the server for the lost session when the push reconnects: give --reconnect N too"
+        );
+    }
+    if rest {
+        anyhow::bail!("--resume-session means nothing over REST: there is no session to ask back");
+    }
+    Ok(())
+}
+
+/// What opens the sessions of a push that reconnects: the library's
+/// `native::Resuming`, which asks the server for the lost session first when
+/// `--resume-session` says so - a conversion, no decision.
+fn push_connector<'a>(
+    server: &'a Server,
+    args: &PushArgs,
+) -> Resuming<impl FnMut() -> Result<Session> + 'a, impl FnMut(Resumable) -> Result<Session> + 'a> {
+    Resuming {
+        open: || server.open_for(true),
+        resume: |lost| server.open_resuming(true, lost),
+        ask: args.resume_session,
+    }
+}
+
 /// `push` on its own line with `--reconnect`: `push_resumable` opens a new
 /// session when the connection falls, the whole way, with the login of the
-/// command line - a token obtained again when the line names how.
+/// command line - a token obtained again when the line names how - or, with
+/// `--resume-session`, first asks the server for the lost session.
 fn push_epc_reconnecting(server: &Server, args: &PushArgs) -> Result<ExitCode> {
     use energyml_etp_store::push::{push_resumable, reconnecting};
     let pause = std::time::Duration::try_from_secs_f64(args.reconnect_pause)
         .map_err(|why| anyhow::anyhow!("--reconnect-pause {} is not a pause: {why}", args.reconnect_pause))?;
     let source = PushSource::open(args)?;
     let options = source.options(args);
-    let mut connector = Reopen(|| server.open_for(true));
+    let mut connector = push_connector(server, args);
     let mut session = None;
     let report = push_resumable(
         &mut connector,
@@ -1402,6 +1463,19 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
             "{} new session(s) after the connection fell",
             report.reconnections
         );
+    }
+    for (rank, came) in report.reopened.iter().enumerate() {
+        match came {
+            Came::Resumed => eprintln!(
+                "reconnection {}: resumed, the server gave the lost session back",
+                rank + 1
+            ),
+            Came::Fresh { refused: Some(why) } => eprintln!(
+                "reconnection {}: a new session, the lost one was not given back: {why}",
+                rank + 1
+            ),
+            Came::Fresh { refused: None } => eprintln!("reconnection {}: a new session", rank + 1),
+        }
     }
     if report.without_transactions {
         eprintln!(
@@ -2722,6 +2796,41 @@ mod tests {
             assert_eq!(options.split_limit, 3);
             assert_eq!((asked.reconnect, asked.reconnect_pause), (2, 0.5));
         }
+    }
+
+    /// `--resume-session` is the library's `Resuming::ask`, off unless
+    /// given; alone, without `--reconnect`, or over REST, it is refused by
+    /// name rather than ignored.
+    #[test]
+    fn resume_session_is_the_connectors_ask_and_needs_reconnect() {
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let parsed = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            match Etp::try_parse_from(words).unwrap().command {
+                EtpCommand::Push { server, args } => (server, args),
+                _ => unreachable!("a push was parsed"),
+            }
+        };
+
+        let (server, plain) = parsed(&["--reconnect", "2"]);
+        assert!(!plain.resume_session, "off unless asked");
+        assert!(!super::push_connector(&server, &plain).ask);
+        assert!(super::check_resume_session(&plain, false).is_ok());
+
+        let (server, asked) = parsed(&["--reconnect", "2", "--resume-session"]);
+        assert!(super::push_connector(&server, &asked).ask);
+        assert!(super::check_resume_session(&asked, false).is_ok());
+        let over_rest = super::check_resume_session(&asked, true).unwrap_err();
+        assert!(over_rest.to_string().contains("REST"), "{over_rest}");
+
+        let (_, alone) = parsed(&["--resume-session"]);
+        let refused = super::check_resume_session(&alone, false).unwrap_err();
+        assert!(refused.to_string().contains("--reconnect"), "{refused}");
     }
 
     /// ETP's URIs carry single quotes: they stay, unquoted; double quotes

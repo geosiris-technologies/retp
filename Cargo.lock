@@ -1535,6 +1535,7 @@ version = "0.4.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
+ "energyml-core",
  "energyml-etp-store",
  "energyml-mcp",
  "energyml-schemas",

@@ -22,8 +22,9 @@ Methods, and the Rust function each one calls:
     resources             retp_client::list_resources
     supported_types       retp_client::list_supported_types
     get_object(s)         retp_client::get_data_objects, then the registry
-    put_objects           energyml_etp_store::push::push (see DESIGN.md, section 9)
-    push_epc              energyml_etp_store::push::push, from an EPC file
+    put_objects           energyml_etp_store::push::push (see DESIGN.md, section 9);
+                          push::push_resumable with reconnect=
+    push_epc              the same, from an EPC file
     delete_objects        retp_client::delete_data_objects
     put_dataspaces        retp_client::put_dataspaces
     delete_dataspaces     retp_client::delete_dataspaces

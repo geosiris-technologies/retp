@@ -40,6 +40,9 @@ retp-types = { workspace = true }
 energyml-etp-store = { workspace = true }
 energyml-storage = { version = "0.4.0" }
 energyml-schemas = { version = "0.4.0", features = ["all"] }
+# The registry's type, which `push` holds while it plans (already in the tree
+# through the crates above).
+energyml-core = { workspace = true }
 
 [features]
 default = []

@@ -59,11 +59,46 @@
 //! it will not take, a commit it will not do - **stops the push there**, and
 //! the report says what was sent, what failed and why, and what was left. Not
 //! because a model half sent is acceptable, but because carrying on would
-//! send islands whose references point at the one that failed. The retry is
-//! the runner's business (ADR-0002): an island is redone **whole**, since the
-//! session that died rolled it back.
+//! send islands whose references point at the one that failed.
+//!
+//! # Starting again
+//!
+//! Four things, each the caller's choice and each off by default, make a
+//! push that stopped one that can go on:
+//!
+//! - **what is already there is left out** ([`Options::skip_present`]):
+//!   before the plan, the destination dataspace is listed, and an object it
+//!   holds under the same URI - with each of its arrays answering metadata
+//!   of the same dimensions - is not sent again. The content is **not**
+//!   compared: a store rewrites what it is given (its own citation fields,
+//!   its own XML), so two writings of one object do not compare, and an
+//!   object changed in the package since it was sent goes unseen. That is
+//!   the choice, named; a listing the store cut short is refused by name;
+//! - **a journal** ([`Options::journal`], [`journal`]): each island is
+//!   recorded in a file as it commits, and a push started again with the
+//!   same journal leaves out what it records. A journal written for another
+//!   package, or another dataspace, is refused by name;
+//! - **a refused island is split** ([`Options::split`]): halved, or cut into
+//!   its objects one by one, and the pieces sent in its place, so that what
+//!   the store would take goes and the refusal is narrowed to what it will
+//!   not; the last refusal still lands in [`Report::refusals`];
+//! - **a fallen connection is reopened** ([`push_resumable`]): the runner of
+//!   long operations (`retp_client::resume`, ADR-0003) opens a new session
+//!   and the push goes on from the first island not committed, which is
+//!   redone **whole** - a session that died with its transaction open did
+//!   not commit it (TODO(verify): the ETP v1.2 section that says a store
+//!   rolls back a transaction its session left open), and writing an object
+//!   again replaces it (`PutDataObjects` is an upsert, ETP v1.2 section
+//!   9.1.1, p.178). An array written again over one the store holds - a
+//!   store without transactions keeps what an interrupted island wrote - is
+//!   taken to replace it too (TODO(verify): the DataArray section, protocol
+//!   9, that says what `PutDataArrays` does with an array already there).
+
+pub mod journal;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::time::Duration;
 
 use energyml_core::identifiers::EtpUri;
 use energyml_core::registry::{DynObject, to_part};
@@ -74,10 +109,13 @@ use energyml_storage::resource::ObjectSummary;
 use energyml_storage::storage::EnergymlStorage;
 use retp_client::arrays::{Array, ArrayFailure, ArrayValues as Wire, Grouping};
 use retp_client::asynchronous::{
-    commit_transaction, deleted_since, put_data_objects, rollback_transaction, start_transaction,
-    write_arrays_with, written_since,
+    array_metadata, commit_transaction, deleted_since, list_resources, put_data_objects,
+    rollback_transaction, start_transaction, write_arrays_with, written_since,
 };
-use retp_client::{Caller, ClientError, Ended, Opened, dataspace_uri};
+use retp_client::resume::{
+    self, Came, Connector, Operation, Retry, RunError, RunEvent, StepFailure, Stepped,
+};
+use retp_client::{Blocking, Caller, ClientError, Ended, Opened, ResourceQuery, dataspace_uri};
 use retp_proto::wire::EtpError;
 use retp_types::datatypes::data_array_types::DataArrayIdentifier;
 use retp_types::datatypes::object::{DataObject, Resource};
@@ -119,6 +157,39 @@ pub struct Options<'a> {
     /// Write over what changed on the store anyway; the conflicts are still
     /// named in the report.
     pub overwrite: bool,
+    /// Leave out what the destination dataspace already holds: an object
+    /// listed there under its URI (Discovery, `GetResources`), each of its
+    /// arrays answering `GetDataArrayMetadata` with the dimensions the
+    /// source gives it. The content is not compared (see the module's
+    /// documentation). Each object left out is in [`Report::skipped`].
+    pub skip_present: bool,
+    /// A file where each island is recorded as it commits; started again
+    /// with the same file, the push leaves out what it records
+    /// ([`journal`]). `None` keeps no record.
+    pub journal: Option<&'a Path>,
+    /// What becomes of an island the store refuses as a whole.
+    pub split: Split,
+    /// How many times the pieces of one island of the plan may be split
+    /// again - a bound on how far a refusal is chased.
+    pub split_limit: u32,
+}
+
+/// What becomes of an island the store refuses - a write it will not take, a
+/// commit it will not do.
+///
+/// A cycle of objects that reference each other is never split, whatever
+/// is asked: no order could send it in two.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Split {
+    /// The push stops there: the island is named, its refusals listed.
+    #[default]
+    Off,
+    /// The island is cut in two halves, sent in its place, first half first;
+    /// a half refused is halved again, down to one object.
+    Halve,
+    /// The island is cut into its objects, each in a transaction of its own
+    /// - an object with its arrays alone.
+    Single,
 }
 
 /// An object the store changed since the caller took it.
@@ -143,6 +214,10 @@ impl Default for Options<'_> {
             grouping: Grouping::Together,
             expected: None,
             overwrite: false,
+            skip_present: false,
+            journal: None,
+            split: Split::Off,
+            split_limit: 8,
         }
     }
 }
@@ -249,6 +324,20 @@ pub fn islands(
     weights: &BTreeMap<String, Weight>,
     budget: &Budget,
 ) -> Vec<Island> {
+    plan(resources, graph, weights, budget)
+        .into_iter()
+        .map(|(island, _)| island)
+        .collect()
+}
+
+/// [`islands`], each with the sizes of the units it is made of, in order: a
+/// unit is one object, or one cycle - what a [`Split`] never cuts.
+fn plan(
+    resources: &[ObjectSummary],
+    graph: &Graph,
+    weights: &BTreeMap<String, Weight>,
+    budget: &Budget,
+) -> Vec<(Island, Vec<usize>)> {
     let uris: Vec<&str> = resources.iter().map(|one| one.uri.as_str()).collect();
     let index: BTreeMap<&str, usize> = uris.iter().enumerate().map(|(i, uri)| (*uri, i)).collect();
     // `from` references `to`: an edge, in the direction a reference points.
@@ -322,7 +411,7 @@ pub fn islands(
         }
     }
 
-    let mut out: Vec<Island> = Vec::new();
+    let mut out: Vec<(Island, Vec<usize>)> = Vec::new();
     for c in order {
         let component = &components[c];
         let weight = weigh(component);
@@ -333,18 +422,56 @@ pub fn islands(
         };
         let open = match out.last() {
             // The kind changing cuts an island; the order is never touched.
-            Some(last) if (last.arrays > 0) == carries && fits(last) => true,
+            Some((last, _)) if (last.arrays > 0) == carries && fits(last) => true,
             _ => false,
         };
         if !open {
-            out.push(Island::default());
+            out.push((Island::default(), Vec::new()));
         }
-        let island = out.last_mut().expect("just pushed");
+        let (island, units) = out.last_mut().expect("just pushed");
         island.uris.extend(component.iter().map(|&i| uris[i].to_string()));
         island.bytes += weight.bytes;
         island.arrays += weight.arrays;
+        units.push(component.len());
     }
     out
+}
+
+/// An island cut into pieces, its units never apart: `None` when it is one
+/// unit - one object, or one cycle -, which nothing can cut. The pieces keep
+/// the island's order, so targets still go before sources.
+fn cut(
+    island: &Island,
+    units: &[usize],
+    weights: &BTreeMap<String, Weight>,
+    how: Split,
+) -> Option<Vec<(Island, Vec<usize>)>> {
+    if units.len() < 2 {
+        return None;
+    }
+    let groups: Vec<Vec<usize>> = match how {
+        Split::Off => return None,
+        Split::Halve => {
+            let half = units.len().div_ceil(2);
+            vec![units[..half].to_vec(), units[half..].to_vec()]
+        }
+        Split::Single => units.iter().map(|&unit| vec![unit]).collect(),
+    };
+    let mut at = 0;
+    let pieces = groups
+        .into_iter()
+        .map(|group| {
+            let count: usize = group.iter().sum();
+            let uris = island.uris[at..at + count].to_vec();
+            at += count;
+            let (bytes, arrays) = uris.iter().fold((0, 0), |(bytes, arrays), uri| {
+                let w = weights.get(uri).copied().unwrap_or_default();
+                (bytes + w.bytes, arrays + w.arrays)
+            });
+            (Island { uris, bytes, arrays }, group)
+        })
+        .collect();
+    Some(pieces)
 }
 
 /// Every reference that leaves the source: `(from, to)` where the source
@@ -590,6 +717,22 @@ pub enum Stop {
     /// The client could not go on - the connection fell, the session closed.
     /// An `Interrupted` here means the island's outcome is **unknown**.
     Failed(ClientError),
+    /// [`push_resumable`] reopened the session as many times in a row as it
+    /// was allowed to, and it fell each time - or would not open. The
+    /// island's outcome is **unknown**: the connection may have fallen after
+    /// its commit; a push started again with the journal sends it again,
+    /// which replaces what is there.
+    GaveUp {
+        /// Failures in a row.
+        attempts: u32,
+        /// The last one, in words.
+        last: String,
+    },
+    /// The journal ([`Options::journal`]) would not serve: written for
+    /// another package or dataspace, unreadable, or failing to record an
+    /// island that committed - in which case the push stops after it, so
+    /// that the journal never says less than what is known to be there.
+    Journal(String),
 }
 
 /// Where a push stopped, when it did.
@@ -634,6 +777,52 @@ pub struct Report {
     /// Empty when the island stopped for another reason: a transaction that
     /// would not open, a refused commit (its reason names no object), a lost
     /// connection.
+    pub refusals: Vec<Refusal>,
+    /// The objects not sent because the destination holds them already
+    /// ([`Options::skip_present`]) or the journal records them
+    /// ([`Options::journal`]), by their URI in the destination. They are in
+    /// no island.
+    pub skipped: Vec<Skipped>,
+    /// Each island that was split and sent as pieces in its place
+    /// ([`Options::split`], or a connection that kept falling on it), in the
+    /// order it happened. `islands` holds the pieces.
+    pub splits: Vec<SplitIsland>,
+    /// How many new sessions [`push_resumable`] opened after the connection
+    /// fell.
+    pub reconnections: usize,
+}
+
+/// An object left out because it is there already.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The object, in the destination dataspace.
+    pub uri: String,
+    /// How that is known.
+    pub why: SkipReason,
+}
+
+/// How an object is known to be there already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The destination lists it, and holds each of its arrays with the same
+    /// dimensions.
+    Present,
+    /// The journal records it in an island that committed.
+    Journal,
+}
+
+/// An island split, and sent as pieces in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitIsland {
+    /// Its rank in [`Report::islands`]: its pieces start there.
+    pub island: usize,
+    /// Its objects, as the plan names them.
+    pub uris: Vec<String>,
+    /// Into how many pieces.
+    pub into: usize,
+    /// Why it was split: the store's refusal, or the connection falling.
+    pub why: String,
+    /// What the store refused of it, when it did.
     pub refusals: Vec<Refusal>,
 }
 
@@ -709,15 +898,13 @@ pub enum Progress {
         /// Of how many.
         of: usize,
     },
-}
-
-impl Stopped {
-    fn refused(island: usize, why: impl Into<String>) -> Self {
-        Stopped {
-            island,
-            why: Stop::Refused(why.into()),
-        }
-    }
+    /// An island was split, and its pieces take its place ([`SplitIsland`]).
+    Split {
+        /// Its rank: the first piece's.
+        island: usize,
+        /// Into how many pieces.
+        into: usize,
+    },
 }
 
 /// One object ready to leave: its destination URI, its XML, its arrays.
@@ -725,10 +912,40 @@ struct Ready {
     uri: String,
     name: String,
     xml: Vec<u8>,
-    arrays: Vec<(DataArrayIdentifier, ArrayLocation)>,
+    arrays: Vec<ReadyArray>,
 }
 
-/// Send everything `source` holds into `dataspace`, island by island.
+/// One array of an object ready to leave: where the destination will hold
+/// it, where the source holds it, and its dimensions as the source gives
+/// them.
+struct ReadyArray {
+    id: DataArrayIdentifier,
+    location: ArrayLocation,
+    dimensions: Vec<i64>,
+}
+
+/// Everything read from the source, before the destination is asked
+/// anything.
+struct Prepared {
+    space: String,
+    /// By the object's URI in the source.
+    ready: BTreeMap<String, Ready>,
+    weights: BTreeMap<String, Weight>,
+    /// What goes, in the source's order.
+    listed: Vec<ObjectSummary>,
+    graph: Graph,
+    /// What the reading found to say: `left_out`, `dangling`.
+    report: Report,
+}
+
+/// How many arrays one `GetDataArrayMetadata` asks about when
+/// [`Options::skip_present`] checks what is there.
+const METADATA_BATCH: usize = 100;
+
+/// Send everything `source` holds into `dataspace`, island by island, over
+/// one session: a connection that falls stops the push there
+/// ([`Stop::Failed`]). [`push_resumable`] opens a new session instead and
+/// goes on.
 pub async fn push<K: Caller>(
     client: &mut K,
     source: &(dyn EnergymlStorage + Sync),
@@ -736,19 +953,88 @@ pub async fn push<K: Caller>(
     options: &Options<'_>,
     mut progress: impl FnMut(Progress),
 ) -> Result<Report, ClientError> {
-    let Options {
-        budget,
-        format,
-        well_known,
-        only,
-        grouping,
-        expected,
-        overwrite,
-    } = options;
-    let format = *format;
-    let grouping = *grouping;
-    let overwrite = *overwrite;
-    let well_known = *well_known;
+    let prepared = prepare(source, dataspace, options).await?;
+    let mut pushing = Pushing::new(source, options, prepared);
+    while !pushing.done() {
+        let advanced = pushing.advance(client, false).await;
+        for said in pushing.progress.drain(..) {
+            progress(said);
+        }
+        advanced?;
+    }
+    Ok(pushing.report)
+}
+
+/// [`push`], opening a new session when the connection falls, driven by the
+/// runner of long operations (`retp_client::resume::run`, ADR-0003).
+///
+/// `session` is the session to start with, when one is open, and the one
+/// left open at the end. A step that fails for a reason another try may cure
+/// (`retp_client::resume::worth_retrying`: the connection fell, a request
+/// timed out, an answer could not be taken) is tried again after `retry`'s
+/// pause, which doubles - in a **new session** when the connection is gone,
+/// opened the whole way by `connector`, whose credentials are its own. The
+/// island it was sending is sent again **whole**, from its first object, and
+/// the islands committed before are not. An island the connection falls on
+/// twice in a row is halved before the next try: a server that hangs up on a
+/// request too heavy for it hangs up on it again. After `retry.max_retries`
+/// failures in a row, the push stops ([`Stop::GaveUp`]).
+///
+/// The source is read once, before any session is asked anything. The
+/// errors returned are [`push`]'s: a source that cannot be read.
+pub fn push_resumable<C: Connector>(
+    connector: &mut C,
+    session: &mut Option<C::Session>,
+    source: &(dyn EnergymlStorage + Sync),
+    dataspace: &str,
+    options: &Options<'_>,
+    retry: &Retry,
+    on_event: impl FnMut(RunEvent<Progress>),
+) -> Result<Report, ClientError> {
+    let prepared = retp_client::blocking(prepare(source, dataspace, options))?;
+    let mut pushing = Pushing::new(source, options, prepared);
+    if pushing.done() {
+        return Ok(pushing.report);
+    }
+    match resume::run(connector, session, &mut pushing, retry, on_event) {
+        Ok(()) => {}
+        Err(RunError::GaveUp { attempts, last, .. }) => {
+            let at = pushing.report.sent;
+            pushing.stop_at(at, Stop::GaveUp { attempts, last });
+        }
+        Err(RunError::Refused { why, .. }) => {
+            let at = pushing.report.sent;
+            pushing.stop_at(at, Stop::Failed(why));
+        }
+        Err(RunError::Final(never)) => match never {},
+    }
+    Ok(pushing.report)
+}
+
+/// The [`Retry`] of [`push_resumable`] for *a new session at most `times`
+/// times in a row, the first after `first_pause`*: the pause doubles after
+/// each fall in a row, up to thirty seconds - or `first_pause`, when that is
+/// longer. What the command line's `--reconnect` and `--reconnect-pause`
+/// mean, and the Python bridge's `reconnect` and `reconnect_pause`.
+pub fn reconnecting(times: u32, first_pause: Duration) -> Retry {
+    Retry {
+        // The runner counts failures, the first one included; `times` counts
+        // the sessions opened after one.
+        max_retries: times.saturating_add(1),
+        first_pause,
+        longest_pause: first_pause.max(Retry::default().longest_pause),
+    }
+}
+
+/// Read the source: each object written as it will leave, its arrays
+/// located and weighed, what cannot be sent named. Nothing is asked of the
+/// destination.
+async fn prepare(
+    source: &(dyn EnergymlStorage + Sync),
+    dataspace: &str,
+    options: &Options<'_>,
+) -> Result<Prepared, ClientError> {
+    let format = options.format;
     let space = dataspace_uri(dataspace);
     let not_sent = |why: String| ClientError::Invalid(EtpError::EINVALID_ARGUMENT.with_detail(why));
     let mut resources = source
@@ -759,7 +1045,7 @@ pub async fn push<K: Caller>(
     // RESQML 2.0.1 proxy that is not among the chosen objects still names
     // where their numbers hang - and only the chosen ones are read and sent.
     let all = resources.clone();
-    if let Some(only) = only {
+    if let Some(only) = options.only {
         resources.retain(|one| only.iter().any(|uri| uri == &one.uri));
     }
     // The references as the objects write them, not the edges the source
@@ -775,7 +1061,7 @@ pub async fn push<K: Caller>(
     // The dictionary's kinds, when asked for: one more object each, listed
     // and read like the source's own, with the edges their parents make.
     let mut report = Report::default();
-    if let WellKnown::Push(registry) = well_known {
+    if let WellKnown::Push(registry) = options.well_known {
         let found = well_known_kinds(&dangling(&resources, &graph), registry);
         report.left_out.extend(found.left_out);
         for (summary, object, edges) in found.kinds {
@@ -833,10 +1119,11 @@ pub async fn push<K: Caller>(
                     break;
                 }
             };
-            match source.array_metadata(&location).await {
+            let dimensions = match source.array_metadata(&location).await {
                 Ok(meta) => {
                     let count: u64 = meta.dimensions.iter().map(|d| (*d).max(0) as u64).product();
                     bytes += count * element_bytes(&meta.element_type);
+                    meta.dimensions
                 }
                 Err(why) => {
                     refused = Some(format!(
@@ -845,14 +1132,15 @@ pub async fn push<K: Caller>(
                     ));
                     break;
                 }
-            }
-            arrays.push((
-                DataArrayIdentifier {
+            };
+            arrays.push(ReadyArray {
+                id: DataArrayIdentifier {
                     uri: owner,
                     path_in_resource: location.path_in_file.clone(),
                 },
                 location,
-            ));
+                dimensions,
+            });
         }
         if let Some(why) = refused {
             report.left_out.push(why);
@@ -882,145 +1170,529 @@ pub async fn push<K: Caller>(
         );
         listed.push(summary.clone());
     }
-
-    report.islands = islands(&listed, &graph, &weights, budget);
     report.dangling = dangling(&resources, &graph);
-    progress(Progress::Planned {
-        islands: report.islands.len(),
-        objects: listed.len(),
-    });
+    Ok(Prepared {
+        space,
+        ready,
+        weights,
+        listed,
+        graph,
+        report,
+    })
+}
 
-    // The conflict seen **before** writing: what the store wrote since
-    // the caller took its objects, in one listing. An object changed there
-    // is shown, not overwritten - unless the caller said so.
-    if let Some(expected) = expected {
-        report.conflicts = conflicts_of(client, &space, &ready, expected).await?;
-        if !report.conflicts.is_empty() && !overwrite {
-            let named: Vec<String> = report
-                .conflicts
-                .iter()
-                .map(|c| match c.store {
-                    Some(_) => c.uri.clone(),
-                    None => format!("{} (deleted there)", c.uri),
-                })
-                .collect();
-            report.stopped = Some(Stopped::refused(
-                0,
-                format!(
-                    "{} object(s) changed on the store since they were taken, nothing was written: {} - push again with overwrite to replace them",
-                    named.len(),
-                    named.join(", ")
-                ),
-            ));
-            return Ok(report);
+/// A push under way: the plan, where it stands, and what it came to so far.
+/// One step at a time, so that the runner of long operations can drive it
+/// ([`push_resumable`]) as well as a plain loop ([`push`]).
+struct Pushing<'a> {
+    source: &'a (dyn EnergymlStorage + Sync),
+    options: Options<'a>,
+    space: String,
+    /// By the object's URI in the source; what was skipped is no longer in it.
+    ready: BTreeMap<String, Ready>,
+    weights: BTreeMap<String, Weight>,
+    listed: Vec<ObjectSummary>,
+    graph: Graph,
+    journal: Option<journal::Journal>,
+    report: Report,
+    /// For each island of `report.islands`, the sizes of its units.
+    units: Vec<Vec<usize>>,
+    /// For each island of `report.islands`, how many more times it may be
+    /// split for a refusal.
+    splits_left: Vec<u32>,
+    /// Whether the destination was asked what it must be (conflicts, what it
+    /// holds), and the plan made.
+    checked: bool,
+    /// Whether the push stopped before its end.
+    stopped: bool,
+    /// A store that agreed Transaction (18) and then said it has none.
+    said_no_transactions: bool,
+    /// Said since it was last read.
+    progress: Vec<Progress>,
+}
+
+impl<'a> Pushing<'a> {
+    /// The push, the journal opened when there is one, and what it records
+    /// left out. A journal that does not match stops the push before
+    /// anything is asked of the destination.
+    fn new(source: &'a (dyn EnergymlStorage + Sync), options: &Options<'a>, prepared: Prepared) -> Self {
+        let Prepared {
+            space,
+            mut ready,
+            weights,
+            mut listed,
+            graph,
+            mut report,
+        } = prepared;
+        let mut stopped = false;
+        let journal = match options.journal {
+            None => None,
+            Some(path) => {
+                let print = journal::fingerprint(ready.values().map(|one| {
+                    (
+                        one.uri.as_str(),
+                        one.xml.as_slice(),
+                        one.arrays
+                            .iter()
+                            .map(|array| {
+                                (
+                                    array.id.uri.as_str(),
+                                    array.id.path_in_resource.as_str(),
+                                    array.dimensions.as_slice(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }));
+                match journal::Journal::open(path, &space, &print, ready.len()) {
+                    Ok((journal, committed)) => {
+                        let mut kept = Vec::with_capacity(listed.len());
+                        for one in listed {
+                            let there = ready
+                                .get(&one.uri)
+                                .is_some_and(|ready| committed.contains(&ready.uri));
+                            if there && let Some(gone) = ready.remove(&one.uri) {
+                                report.skipped.push(Skipped {
+                                    uri: gone.uri,
+                                    why: SkipReason::Journal,
+                                });
+                            } else {
+                                kept.push(one);
+                            }
+                        }
+                        listed = kept;
+                        Some(journal)
+                    }
+                    Err(why) => {
+                        report.stopped = Some(Stopped {
+                            island: 0,
+                            why: Stop::Journal(why),
+                        });
+                        stopped = true;
+                        None
+                    }
+                }
+            }
+        };
+        Pushing {
+            source,
+            options: options.clone(),
+            space,
+            ready,
+            weights,
+            listed,
+            graph,
+            journal,
+            report,
+            units: Vec::new(),
+            splits_left: Vec::new(),
+            checked: false,
+            stopped,
+            said_no_transactions: false,
+            progress: Vec::new(),
         }
     }
 
-    // A store that did not agree Transaction (18) - some RDDMS servers do
-    // not offer it - takes each island as plain puts. The islands still
-    // order what goes, and still bound what a cut costs; what they lose is
-    // the atomicity, and the report says so.
-    let mut transactional = client.negotiated().protocols.contains_key(&18);
-    report.without_transactions = !transactional;
-    for rank in 0..report.islands.len() {
-        let island = report.islands[rank].clone();
+    /// Whether there is nothing left to do: stopped, or every island sent.
+    fn done(&self) -> bool {
+        self.stopped || (self.checked && self.report.sent >= self.report.islands.len())
+    }
+
+    /// The next step: what the destination must be asked first, then one
+    /// island. `resuming` returns a failure another session may cure rather
+    /// than stopping on it.
+    async fn advance<K: Caller>(&mut self, client: &mut K, resuming: bool) -> Result<(), ClientError> {
+        if self.checked {
+            self.send_next(client, resuming).await
+        } else {
+            self.check(client).await
+        }
+    }
+
+    /// Whether this session sends islands in transactions.
+    fn transactional<K: Caller>(&self, client: &K) -> bool {
+        !self.said_no_transactions && client.negotiated().protocols.contains_key(&18)
+    }
+
+    /// Before anything is written: the conflicts, what the destination
+    /// holds, the plan.
+    async fn check<K: Caller>(&mut self, client: &mut K) -> Result<(), ClientError> {
+        // The conflict seen **before** writing: what the store wrote since
+        // the caller took its objects, in one listing. An object changed there
+        // is shown, not overwritten - unless the caller said so.
+        let mut refusal = None;
+        if let Some(expected) = self.options.expected {
+            self.report.conflicts = conflicts_of(client, &self.space, &self.ready, expected).await?;
+            if !self.report.conflicts.is_empty() && !self.options.overwrite {
+                let named: Vec<String> = self
+                    .report
+                    .conflicts
+                    .iter()
+                    .map(|c| match c.store {
+                        Some(_) => c.uri.clone(),
+                        None => format!("{} (deleted there)", c.uri),
+                    })
+                    .collect();
+                refusal = Some(format!(
+                    "{} object(s) changed on the store since they were taken, nothing was written: {} - push again with overwrite to replace them",
+                    named.len(),
+                    named.join(", ")
+                ));
+            }
+        }
+        if self.options.skip_present && refusal.is_none() {
+            match present(client, &self.space, &self.ready).await? {
+                Ok(there) => {
+                    let listed = std::mem::take(&mut self.listed);
+                    for one in listed {
+                        if there.contains(&one.uri)
+                            && let Some(gone) = self.ready.remove(&one.uri)
+                        {
+                            self.report.skipped.push(Skipped {
+                                uri: gone.uri,
+                                why: SkipReason::Present,
+                            });
+                        } else {
+                            self.listed.push(one);
+                        }
+                    }
+                }
+                Err(why) => refusal = Some(why),
+            }
+        }
+        let planned = plan(&self.listed, &self.graph, &self.weights, &self.options.budget);
+        self.report.islands.clear();
+        self.units.clear();
+        for (island, units) in planned {
+            self.report.islands.push(island);
+            self.units.push(units);
+        }
+        self.splits_left = vec![self.options.split_limit; self.report.islands.len()];
+        self.progress.push(Progress::Planned {
+            islands: self.report.islands.len(),
+            objects: self.listed.len(),
+        });
+        self.checked = true;
+        match refusal {
+            Some(why) => self.stop_at(0, Stop::Refused(why)),
+            None => self.report.without_transactions = !self.transactional(client),
+        }
+        Ok(())
+    }
+
+    /// The next island: its transaction when the store speaks them, its
+    /// objects, then their arrays, then the commit - and on the first thing
+    /// the store will not take, a rollback, and a split or a stop. A
+    /// rollback that fails changes nothing about what is reported: the
+    /// transaction is not committed either way.
+    async fn send_next<K: Caller>(&mut self, client: &mut K, resuming: bool) -> Result<(), ClientError> {
+        let rank = self.report.sent;
+        let island = self.report.islands[rank].clone();
         // A transaction when the store speaks them - and a store that agreed
         // 18 and then says it has none (some REST APIs name the transaction
-        // `null`) is taken at its word from here on.
+        // `null`) is taken at its word from here on. A store that did not
+        // agree Transaction (18) - some RDDMS servers do not offer it - takes
+        // each island as plain puts: the islands still order what goes, and
+        // still bound what a cut costs; what they lose is the atomicity, and
+        // the report says so.
+        let transactional = self.transactional(client);
+        if !transactional {
+            self.report.without_transactions = true;
+        }
         let transaction = if transactional {
-            match start_transaction(client, std::slice::from_ref(&space), false, "energyml-rust push").await?
+            match start_transaction(
+                client,
+                std::slice::from_ref(&self.space),
+                false,
+                "energyml-rust push",
+            )
+            .await?
             {
                 Opened::Open(transaction) => Some(transaction),
                 Opened::Refused(why) => {
-                    report.stopped = Some(Stopped::refused(
+                    self.stop_at(
                         rank,
-                        format!("the transaction would not open: {why}"),
-                    ));
-                    return Ok(report);
+                        Stop::Refused(format!("the transaction would not open: {why}")),
+                    );
+                    return Ok(());
                 }
                 Opened::Unsupported(_) => {
-                    transactional = false;
-                    report.without_transactions = true;
+                    self.said_no_transactions = true;
+                    self.report.without_transactions = true;
                     None
                 }
             }
         } else {
             None
         };
-        let Some(transaction) = transaction else {
-            match send_island(client, source, &island, &ready, format, grouping).await {
-                Ok(()) => {
-                    report.sent += 1;
-                    progress(Progress::Sent {
-                        island: rank,
-                        of: report.islands.len(),
-                    });
-                }
-                Err(Halt {
-                    stop: Stop::Refused(why),
-                    refusals,
-                }) => {
-                    report.refusals = refusals;
-                    let why = with_hint(
-                        format!(
-                            "{why} - no transaction to roll back: what this island wrote before the refusal stays"
-                        ),
-                        &report.dangling,
-                    );
-                    report.stopped = Some(Stopped::refused(rank, why));
-                    return Ok(report);
-                }
-                Err(Halt { stop, refusals }) => {
-                    report.refusals = refusals;
-                    report.stopped = Some(Stopped {
-                        island: rank,
-                        why: stop,
-                    });
-                    return Ok(report);
-                }
-            }
-            continue;
-        };
-        // The objects, then their arrays, then the commit - and on the first
-        // thing the store will not take, a rollback and the report. A
-        // rollback that fails changes nothing about what is reported: the
-        // transaction is not committed either way.
-        let stop = send_island(client, source, &island, &ready, format, grouping).await;
-        match stop {
-            Ok(()) => match commit_transaction(client, &transaction).await? {
-                Ended::Done => {
-                    report.sent += 1;
-                    progress(Progress::Sent {
-                        island: rank,
-                        of: report.islands.len(),
-                    });
-                }
-                Ended::Refused(why) => {
-                    let why = with_hint(format!("the commit was refused: {why}"), &report.dangling);
-                    report.stopped = Some(Stopped::refused(rank, why));
-                    return Ok(report);
-                }
+        let sent = send_island(
+            client,
+            self.source,
+            &island,
+            &self.ready,
+            self.options.format,
+            self.options.grouping,
+        )
+        .await;
+        match sent {
+            Ok(()) => match &transaction {
+                None => self.committed(rank, &island),
+                Some(transaction) => match commit_transaction(client, transaction).await? {
+                    Ended::Done => self.committed(rank, &island),
+                    Ended::Refused(why) => {
+                        let why = with_hint(format!("the commit was refused: {why}"), &self.report.dangling);
+                        self.refused(rank, why, Vec::new());
+                    }
+                },
             },
             Err(Halt {
                 stop: Stop::Refused(why),
                 refusals,
             }) => {
-                let _ = rollback_transaction(client, &transaction).await;
-                report.refusals = refusals;
-                report.stopped = Some(Stopped::refused(rank, why));
-                return Ok(report);
+                let why = match &transaction {
+                    Some(transaction) => {
+                        let _ = rollback_transaction(client, transaction).await;
+                        why
+                    }
+                    None => with_hint(
+                        format!(
+                            "{why} - no transaction to roll back: what this island wrote before the refusal stays"
+                        ),
+                        &self.report.dangling,
+                    ),
+                };
+                self.refused(rank, why, refusals);
+            }
+            Err(Halt {
+                stop: Stop::Failed(why),
+                refusals,
+            }) => {
+                if resuming && resume::worth_retrying(&why) {
+                    // The same session is used again when it still stands (an
+                    // answer that could not be taken): what this island opened
+                    // in it is closed first. A session that fell took its
+                    // transaction with it.
+                    let stands = !why.is_connection_lost() && !matches!(why, ClientError::TimedOut { .. });
+                    if stands && let Some(transaction) = &transaction {
+                        let _ = rollback_transaction(client, transaction).await;
+                    }
+                    return Err(why);
+                }
+                self.report.refusals = refusals;
+                self.stop_at(rank, Stop::Failed(why));
             }
             Err(Halt { stop, refusals }) => {
-                report.refusals = refusals;
-                report.stopped = Some(Stopped {
-                    island: rank,
-                    why: stop,
-                });
-                return Ok(report);
+                self.report.refusals = refusals;
+                self.stop_at(rank, stop);
+            }
+        }
+        Ok(())
+    }
+
+    /// The island at `rank` committed: counted, said, and recorded in the
+    /// journal - a record that fails stops the push after it.
+    fn committed(&mut self, rank: usize, island: &Island) {
+        self.report.sent += 1;
+        self.progress.push(Progress::Sent {
+            island: rank,
+            of: self.report.islands.len(),
+        });
+        let uris: Vec<String> = island
+            .uris
+            .iter()
+            .filter_map(|uri| self.ready.get(uri).map(|one| one.uri.clone()))
+            .collect();
+        if let Some(journal) = &mut self.journal
+            && let Err(why) = journal.record(rank, &uris)
+        {
+            self.stop_at(
+                rank + 1,
+                Stop::Journal(format!(
+                    "island {} committed, and the journal could not record it: {why}",
+                    rank + 1
+                )),
+            );
+        }
+    }
+
+    /// The store refused the island at `rank` as a whole: split, when asked
+    /// and still allowed, or the push stops there.
+    fn refused(&mut self, rank: usize, why: String, refusals: Vec<Refusal>) {
+        let how = self.options.split;
+        if how != Split::Off && self.splits_left[rank] > 0 {
+            match self.split_at(rank, how, why, refusals, true) {
+                Ok(()) => return,
+                Err((why, refusals)) => {
+                    self.report.refusals = refusals;
+                    self.stop_at(rank, Stop::Refused(why));
+                    return;
+                }
+            }
+        }
+        self.report.refusals = refusals;
+        self.stop_at(rank, Stop::Refused(why));
+    }
+
+    /// Put the pieces of the island at `rank` in its place - or give `why`
+    /// and `refusals` back when it is one unit, which nothing cuts. `spend`
+    /// counts the split against [`Options::split_limit`].
+    fn split_at(
+        &mut self,
+        rank: usize,
+        how: Split,
+        why: String,
+        refusals: Vec<Refusal>,
+        spend: bool,
+    ) -> Result<(), (String, Vec<Refusal>)> {
+        let island = &self.report.islands[rank];
+        let Some(pieces) = cut(island, &self.units[rank], &self.weights, how) else {
+            return Err((why, refusals));
+        };
+        let left = if spend {
+            self.splits_left[rank].saturating_sub(1)
+        } else {
+            self.splits_left[rank]
+        };
+        let into = pieces.len();
+        self.report.splits.push(SplitIsland {
+            island: rank,
+            uris: island.uris.clone(),
+            into,
+            why,
+            refusals,
+        });
+        let (islands, units): (Vec<Island>, Vec<Vec<usize>>) = pieces.into_iter().unzip();
+        self.report.islands.splice(rank..=rank, islands);
+        self.units.splice(rank..=rank, units);
+        self.splits_left
+            .splice(rank..=rank, std::iter::repeat_n(left, into));
+        self.progress.push(Progress::Split { island: rank, into });
+        Ok(())
+    }
+
+    /// The push stops at the island of rank `island`, for `why`.
+    fn stop_at(&mut self, island: usize, why: Stop) {
+        self.report.stopped = Some(Stopped { island, why });
+        self.stopped = true;
+    }
+}
+
+/// The push as an operation of the runner (`retp_client::resume::run`): one
+/// step is the check, then one island each.
+impl<K: Blocking> Operation<K> for Pushing<'_> {
+    type Progress = Progress;
+    type Error = std::convert::Infallible;
+
+    fn step(&mut self, client: &mut K) -> Result<Stepped, StepFailure<Self::Error>> {
+        retp_client::blocking(self.advance(client, true))?;
+        Ok(if self.done() {
+            Stepped::Finished
+        } else {
+            Stepped::Progressed
+        })
+    }
+
+    fn current_step(&self) -> String {
+        if !self.checked {
+            return format!("planning the push into {}", self.space);
+        }
+        let rank = self.report.sent;
+        match self.report.islands.get(rank) {
+            Some(island) => format!(
+                "island {} of {} ({} object(s))",
+                rank + 1,
+                self.report.islands.len(),
+                island.uris.len()
+            ),
+            None => format!("the end of the push into {}", self.space),
+        }
+    }
+
+    /// The island the connection keeps falling on, in two halves.
+    fn halve(&mut self) -> bool {
+        if !self.checked || self.stopped || self.report.sent >= self.report.islands.len() {
+            return false;
+        }
+        let rank = self.report.sent;
+        self.split_at(
+            rank,
+            Split::Halve,
+            "the connection kept falling on it".to_string(),
+            Vec::new(),
+            false,
+        )
+        .is_ok()
+    }
+
+    fn take_progress(&mut self) -> Vec<Progress> {
+        std::mem::take(&mut self.progress)
+    }
+
+    fn resumed(&mut self, came: &Came, since: Option<i64>) {
+        // Nothing to catch up on: the island is sent again whole, and what
+        // committed before stays committed.
+        let _ = (came, since);
+        self.report.reconnections += 1;
+    }
+}
+
+/// The objects of `ready`, by their URI in the source, that the destination
+/// holds already: listed under their URI in the dataspace (Discovery,
+/// `GetResources`, ETP v1.2 section 8.3.1), each of their arrays answering
+/// `GetDataArrayMetadata` (DataArray, protocol 9) with the dimensions the
+/// source gives it.
+///
+/// An array the store does not answer for, or answers with other
+/// dimensions, makes its object one to send: sending it again replaces what
+/// is there, skipping it would lose it. A listing the store cut short cannot
+/// say what is missing from it, and is refused by name (the inner `Err`).
+async fn present<K: Caller>(
+    client: &mut K,
+    space: &str,
+    ready: &BTreeMap<String, Ready>,
+) -> Result<Result<BTreeSet<String>, String>, ClientError> {
+    let listing = list_resources(client, &ResourceQuery::new(space)).await?;
+    if let Some(error) = listing.ended_by {
+        return Ok(Err(format!(
+            "the destination's listing was cut short ({}: {}), so what it holds already cannot be told; nothing was written",
+            error.code, error.message
+        )));
+    }
+    let held: BTreeSet<String> = listing
+        .resources
+        .iter()
+        .map(|resource| resource.uri.to_ascii_lowercase())
+        .collect();
+    let listed_there: Vec<&String> = ready
+        .iter()
+        .filter(|(_, one)| held.contains(&one.uri.to_ascii_lowercase()))
+        .map(|(source_uri, _)| source_uri)
+        .collect();
+    let arrays: Vec<(&String, &ReadyArray)> = listed_there
+        .iter()
+        .flat_map(|source_uri| {
+            ready[*source_uri]
+                .arrays
+                .iter()
+                .map(move |array| (*source_uri, array))
+        })
+        .collect();
+    let mut short: BTreeSet<&String> = BTreeSet::new();
+    for handful in arrays.chunks(METADATA_BATCH) {
+        let ids: Vec<DataArrayIdentifier> = handful.iter().map(|(_, array)| array.id.clone()).collect();
+        let answers = array_metadata(client, &ids).await?;
+        for ((source_uri, array), answer) in handful.iter().zip(answers) {
+            let same = answer.is_ok_and(|meta| meta.dimensions == array.dimensions);
+            if !same {
+                short.insert(source_uri);
             }
         }
     }
-    Ok(report)
+    Ok(Ok(listed_there
+        .into_iter()
+        .filter(|source_uri| !short.contains(source_uri))
+        .cloned()
+        .collect()))
 }
 
 /// The objects among `ready` the store wrote - or deleted - after the
@@ -1168,7 +1840,7 @@ async fn send_island<K: Caller>(
     let mut writes = Vec::new();
     for uri in &island.uris {
         let one = &ready[uri];
-        for (id, location) in &one.arrays {
+        for ReadyArray { id, location, .. } in &one.arrays {
             let mine = |message: String| {
                 Halt::refused(vec![Refusal {
                     uri: id.uri.clone(),
@@ -1528,6 +2200,45 @@ mod tests {
             by_bytes.iter().map(|one| one.uris.len()).collect::<Vec<_>>(),
             [2, 2, 1]
         );
+    }
+
+    /// A split keeps the island's order and never cuts a cycle: halved, a
+    /// cycle of two and two lone objects make two pieces with the cycle whole
+    /// in the first; one by one, three pieces; and a cycle alone, or one
+    /// object, cannot be cut at all.
+    #[test]
+    fn a_split_keeps_the_order_and_never_cuts_a_cycle() {
+        let listed = [summary("a"), summary("b"), summary("c"), summary("d")];
+        let g = graph(vec![edge("a", "b"), edge("b", "a"), edge("c", "a")]);
+        let w = weighing(&[("a", 10, 0), ("b", 20, 0), ("c", 30, 0), ("d", 40, 0)]);
+        let planned = plan(&listed, &g, &w, &Budget::default());
+        assert_eq!(planned.len(), 1, "{planned:?}");
+        let (island, units) = &planned[0];
+        assert_eq!(units, &[2, 1, 1], "the cycle is one unit: {island:?}");
+
+        let halves = cut(island, units, &w, Split::Halve).expect("three units cut");
+        let uris: Vec<Vec<&str>> = halves
+            .iter()
+            .map(|(piece, _)| piece.uris.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            uris.concat(),
+            flat(std::slice::from_ref(island)),
+            "the order is kept"
+        );
+        assert_eq!(halves.len(), 2);
+        assert_eq!(halves[0].1, [2, 1], "the cycle whole, in the first half");
+        assert_eq!(halves[0].0.bytes, 10 + 20 + 30);
+        assert_eq!(halves[1].0.uris, ["d"]);
+
+        let single = cut(island, units, &w, Split::Single).expect("three units cut");
+        assert_eq!(single.len(), 3);
+        assert_eq!(single[0].0.uris.len(), 2, "the cycle is never cut");
+
+        let cycle = &halves[0].0;
+        assert!(cut(&single[0].0, &single[0].1, &w, Split::Halve).is_none());
+        assert!(cut(cycle, &[3], &w, Split::Single).is_none());
+        assert!(cut(island, units, &w, Split::Off).is_none());
     }
 
     /// An edge to something the source does not list is not a reason to lose

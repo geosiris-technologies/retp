@@ -219,6 +219,12 @@ sentence.
 | `well_known` | also push the official dictionary's `PropertyKind`s the objects reference without holding (`--well-known`) |
 | `one_by_one` | the arrays one per message, one after the other (`--one-by-one`) |
 | `json` | send JSON Energistics, what the Reservoir DDMS REST API takes (`--json`); XML otherwise |
+| `skip_present` | leave out what the dataspace holds already: an object listed there under its URI, each of its arrays there with the same dimensions (`--skip-present`); the content is not compared |
+| `journal` | a file (a `str` or a path) where each island is recorded as it commits; a push given the same file leaves out what it records (`--journal`) |
+| `split` | `"halve"` or `"single"`: an island the store refuses as a whole is sent again in two halves, or one object per transaction (`--split`); `None`, the default, stops at it |
+| `split_limit` | how many times the pieces of one island may be split again, 8 by default (`--split-limit`) |
+| `reconnect` | when the connection falls, open a new session and go on from the first island not committed, at most this many times in a row (`--reconnect`); 0, the default, stops at the fall |
+| `reconnect_pause` | seconds before the first new session, 1 by default, doubling after each fall in a row up to 30 (`--reconnect-pause`) |
 
 The client does not filter the objects by the types the server announced: what
 the server will not take, it refuses, and the refusal is in the report.
@@ -236,6 +242,55 @@ the URIs it says went with it, `errors` the ones it did not delete.
 `prune_contained=True` asks the store to drop the contained objects the
 deletion would orphan; a store that refuses to orphan them answers that URI with
 its error (`ENOCASCADE_DELETE`, 4003).
+
+### Starting again where a push stopped
+
+The last six keywords of the table are off by default: a push goes as it
+always went. A loading job that may be interrupted, or that pushes into a store
+that refuses large transactions, can ask for each:
+
+```python
+report = session.push_epc(
+    "model.epc", "demo",
+    journal="model.push.jsonl",   # what committed is recorded, and left out next time
+    skip_present=True,            # what the dataspace holds already is left out
+    split="halve",                # a refused island is sent again in halves
+    reconnect=3,                  # a fallen connection is reopened, three times in a row at most
+)
+for skipped in report["skipped"]:
+    print(skipped["uri"], skipped["why"])          # "present" or "journal"
+for split in report["splits"]:
+    print(split["island"], split["into"], split["why"], split["refusals"])
+print(report["reconnections"], "new session(s)")
+```
+
+- **What is already there** (`skip_present`) is judged by the URI and the
+  arrays' dimensions, never by the content: a store rewrites what it is given,
+  so two writings of one object do not compare, and an object changed in the
+  package since it was sent goes unseen. A listing the store cuts short stops
+  the push by name before anything is written.
+- **The journal** is JSON Lines: a first line naming the dataspace and a
+  fingerprint of what is sent, then one line per committed island with its
+  objects' URIs in the destination (the format is in the Rust documentation
+  of `energyml_etp_store::push::journal`). A journal written for another
+  dataspace, another package, or another selection of it (`only`) is refused
+  by name: use a new file. A last line cut while it was written is dropped,
+  and its island sent again.
+- **A split** never cuts a cycle of objects that reference each other. The
+  refusal that caused it is in `report["splits"]`; the one the push stopped
+  on, if any, in `report["refusals"]` as before.
+- **A reconnection** opens the session again the whole way (probe,
+  handshake, authorization) with the credentials `connect` made, or the last
+  token `reauthorize` accepted, and sends the interrupted island again whole:
+  writing an object again replaces it. An island the connection falls on twice
+  in a row is halved. When the connection still falls after `reconnect` new
+  sessions in a row, the push stops and says so (`report["stopped"]`); the
+  island's outcome is then unknown, and a next run with the journal sends that
+  island again and nothing committed before it. The new session replaces the
+  old one on the `Session`:
+  subscriptions of the old session end with it, and a session opened by a
+  login at a token endpoint reuses the token obtained then - renew it with
+  `reauthorize` before it runs out.
 
 ### Transactions
 
@@ -430,5 +485,3 @@ expiring among them) is not bridged yet: `Session.subscribe` carries store
 notifications only, so a Python caller renews on its own clock
 (`session.reauthorize`). Nor is a credential source that the library calls
 when it renews: the Rust library has both (see [Library usage](client.md)).
-Resuming an interrupted push (a journal of the islands committed, reconnection)
-is not in the library yet either.

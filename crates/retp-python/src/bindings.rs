@@ -9,6 +9,7 @@
 //! this file through an installed wheel, with no server.
 
 use numpy::IntoPyArray;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use energyml_etp_store::pack::{Packed, Wanted};
@@ -24,7 +25,7 @@ use retp_client::notifications::uuid_text;
 
 use crate::session::{
     ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, CustomValue, DataspaceRow, Failure, Kind, Objects,
-    Outcomes, PushChoices, PushReport, Resources, Session, SupportedTypeRow,
+    Outcomes, PushChoices, PushReport, Resources, Session, SupportedTypeRow, parse_split, pause_of,
 };
 
 // The exception tree. One class per thing a caller does differently (see
@@ -213,16 +214,44 @@ fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'
     out.set_item("dangling", &report.dangling)?;
     out.set_item("without_transactions", report.without_transactions)?;
     out.set_item("stopped", &report.stopped)?;
-    let refusals = PyList::empty(py);
-    for refused in &report.refusals {
+    out.set_item("refusals", refusals_into_py(py, &report.refusals)?)?;
+    let skipped = PyList::empty(py);
+    for (uri, why) in &report.skipped {
+        let row = PyDict::new(py);
+        row.set_item("uri", uri)?;
+        row.set_item("why", *why)?;
+        skipped.append(row)?;
+    }
+    out.set_item("skipped", skipped)?;
+    let splits = PyList::empty(py);
+    for split in &report.splits {
+        let row = PyDict::new(py);
+        row.set_item("island", split.island)?;
+        row.set_item("uris", &split.uris)?;
+        row.set_item("into", split.into)?;
+        row.set_item("why", &split.why)?;
+        row.set_item("refusals", refusals_into_py(py, &split.refusals)?)?;
+        splits.append(row)?;
+    }
+    out.set_item("splits", splits)?;
+    out.set_item("reconnections", report.reconnections)?;
+    Ok(out)
+}
+
+/// Refusals as `{"uri", "array", "code", "message"}`.
+fn refusals_into_py<'py>(
+    py: Python<'py>,
+    refusals: &[energyml_etp_store::push::Refusal],
+) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for refused in refusals {
         let row = PyDict::new(py);
         row.set_item("uri", &refused.uri)?;
         row.set_item("array", &refused.array)?;
         row.set_item("code", refused.code)?;
         row.set_item("message", &refused.message)?;
-        refusals.append(row)?;
+        out.append(row)?;
     }
-    out.set_item("refusals", refusals)?;
     Ok(out)
 }
 
@@ -575,7 +604,7 @@ impl PySession {
     /// report as its `report` attribute) when the push did not go through in
     /// full. Needs a session opened with `writing=True`. The keywords are
     /// `push_epc`'s.
-    #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
+    #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None))]
     #[allow(clippy::too_many_arguments)]
     fn put_objects<'py>(
         &self,
@@ -588,6 +617,12 @@ impl PySession {
         well_known: bool,
         one_by_one: bool,
         json: bool,
+        skip_present: bool,
+        journal: Option<PathBuf>,
+        split: Option<String>,
+        split_limit: Option<u32>,
+        reconnect: u32,
+        reconnect_pause: Option<f64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let texts = objects
             .iter()
@@ -600,6 +635,12 @@ impl PySession {
             well_known,
             one_by_one,
             json,
+            skip_present,
+            journal,
+            split: parse_split(split.as_deref()).map_err(failed)?,
+            split_limit,
+            reconnect,
+            reconnect_pause: pause_of(reconnect_pause).map_err(failed)?,
         };
         let report = py
             .detach(|| self.session()?.put_objects(dataspace, &texts, &choices))
@@ -618,9 +659,19 @@ impl PySession {
     /// sends the arrays one per message (`--one-by-one`); `json` sends JSON
     /// Energistics, what the Reservoir DDMS REST API takes (`--json`).
     ///
+    /// To start again where a push stopped: `skip_present` leaves out what
+    /// the dataspace holds already (`--skip-present`); `journal`, a file path,
+    /// records each committed island and leaves out what it records
+    /// (`--journal`); `split` ("halve" or "single") sends an island the store
+    /// refuses again in pieces, at most `split_limit` times over
+    /// (`--split`, `--split-limit`); `reconnect` opens a new session, at most
+    /// that many times in a row, when the connection falls, after
+    /// `reconnect_pause` seconds that double (`--reconnect`,
+    /// `--reconnect-pause`).
+    ///
     /// The report's `refusals` lists each object or array the store refused,
     /// `{"uri", "array", "code", "message"}`, `code` the ETP error code.
-    #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false))]
+    #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None))]
     #[allow(clippy::too_many_arguments)]
     fn push_epc<'py>(
         &self,
@@ -633,6 +684,12 @@ impl PySession {
         well_known: bool,
         one_by_one: bool,
         json: bool,
+        skip_present: bool,
+        journal: Option<PathBuf>,
+        split: Option<String>,
+        split_limit: Option<u32>,
+        reconnect: u32,
+        reconnect_pause: Option<f64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let choices = PushChoices {
             objects: objects_per_island,
@@ -641,6 +698,12 @@ impl PySession {
             well_known,
             one_by_one,
             json,
+            skip_present,
+            journal,
+            split: parse_split(split.as_deref()).map_err(failed)?,
+            split_limit,
+            reconnect,
+            reconnect_pause: pause_of(reconnect_pause).map_err(failed)?,
         };
         let report = py
             .detach(|| self.session()?.push_epc(path, dataspace, &choices))

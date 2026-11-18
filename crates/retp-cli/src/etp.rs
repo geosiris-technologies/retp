@@ -860,6 +860,14 @@ struct PushArgs {
     /// session (OSDU issue #232).
     #[arg(long)]
     resume_session: bool,
+    /// Print the plan - the islands in order, their cycles, each object's
+    /// URI in the dataspace, what is left out, what leaves the package -
+    /// and send nothing: no session is opened, the server is not reached,
+    /// a journal is read and not written. The flags that decide the plan
+    /// (--objects, --bytes, --only, --well-known, --json, --journal) count;
+    /// --skip-present needs the server and is refused.
+    #[arg(long)]
+    plan: bool,
 }
 
 /// How `push --split` cuts a refused island.
@@ -1031,6 +1039,12 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
     let yes = args.yes;
     // Before anything runs: a write to a protected server asks first, and what `--save-as`
     // would refuse is refused now, not after a long command.
+    if let EtpCommand::Push { server, args } = &args.command
+        && args.plan
+        && server.save_as.is_some()
+    {
+        anyhow::bail!("--save-as saves a server a command reached, and `push --plan` reaches none");
+    }
     let plan = match server_of(&args.command) {
         Some(server) => {
             if let Some(command) = writing_name(&args.command) {
@@ -1087,7 +1101,13 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
                 ..args
             };
             check_resume_session(&args, server.rest)?;
-            if args.reconnect > 0 {
+            if args.plan {
+                Ok(if plan_push(&args)? {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                })
+            } else if args.reconnect > 0 {
                 push_epc_reconnecting(&server, &args)
             } else {
                 one_shot_writing(&server, |session| push_epc(session, &args))
@@ -1130,6 +1150,8 @@ fn writing_name(command: &EtpCommand) -> Option<&'static str> {
     match command {
         EtpCommand::CreateDataspace { .. } => Some("create-dataspace"),
         EtpCommand::DeleteDataspace { .. } => Some("delete-dataspace"),
+        // `--plan` sends nothing: no confirmation to ask.
+        EtpCommand::Push { args, .. } if args.plan => None,
         EtpCommand::Push { .. } => Some("push"),
         _ => None,
     }
@@ -1299,6 +1321,9 @@ fn push_options<'a>(
 /// itself: refused here, by name.
 fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     check_resume_session(args, session.is_rest())?;
+    if args.plan {
+        return plan_push(args);
+    }
     if args.reconnect > 0 {
         anyhow::bail!(
             "--reconnect opens new sessions, and the shell keeps its own: run `retp push` on its own line, or push again with --journal"
@@ -1314,6 +1339,59 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
         said_push_progress,
     ))?;
     Ok(said_push_report(&report))
+}
+
+/// `push --plan`: what the push would send, without a session -
+/// `energyml_etp_store::push::dry_run`, printed. Whether nothing is left out,
+/// as a push says it.
+fn plan_push(args: &PushArgs) -> Result<bool> {
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let plan = retp_client::blocking(energyml_etp_store::push::dry_run(
+        &source.store,
+        &args.dataspace,
+        &options,
+    ))
+    .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?;
+    Ok(said_plan(&plan))
+}
+
+/// The plan, printed as a push's report prints its islands; whether nothing
+/// is left out.
+fn said_plan(plan: &energyml_etp_store::push::Plan) -> bool {
+    for (rank, island) in plan.islands.iter().enumerate() {
+        let cycles = island.cycles();
+        println!(
+            "island {}	planned	{} object(s), {} array(s), {} bytes, {} cycle(s)",
+            rank + 1,
+            island.uris.len(),
+            island.arrays,
+            island.bytes,
+            cycles.len()
+        );
+        for (uri, there) in island.uris.iter().zip(plan.destinations_of(island)) {
+            println!("\t{uri}\t{there}");
+        }
+        for cycle in cycles {
+            println!("\tcycle\t{}", cycle.join(" "));
+        }
+    }
+    for skipped in &plan.skipped {
+        eprintln!("skipped: {}: the journal says it committed", skipped.uri);
+    }
+    for said in &plan.left_out {
+        eprintln!("left out: {said}");
+    }
+    for (from, to) in &plan.dangling {
+        eprintln!("leaves the package: {from} -> {to}");
+    }
+    let objects: usize = plan.islands.iter().map(|island| island.uris.len()).sum();
+    println!(
+        "plan: {} island(s), {objects} object(s) into {}; nothing was sent",
+        plan.islands.len(),
+        plan.dataspace
+    );
+    plan.left_out.is_empty()
 }
 
 /// `--resume-session` qualifies `--reconnect`: alone, or over REST, it would
@@ -1502,6 +1580,17 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
             Stop::Journal(why) => eprintln!("stopped at island {}: the journal: {why}", stopped.island + 1),
         }
     }
+    // What the store's words name, when a known server is documented to use
+    // them (`push::Cause`), and the references that may be missing.
+    if let Some(diagnosis) = report.diagnosis()
+        && let Some(cause) = &diagnosis.cause
+        && *cause != energyml_etp_store::push::Cause::Unknown
+    {
+        eprintln!("cause: {}", said_cause(cause));
+        for (from, to) in &diagnosis.candidates {
+            eprintln!("may be missing (deduced here, the server names none): {from} -> {to}");
+        }
+    }
     for refused in &report.refusals {
         let what = match &refused.array {
             Some(path) => format!("{} {path}", refused.uri),
@@ -1523,6 +1612,23 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
         );
     }
     report.stopped.is_none() && report.left_out.is_empty()
+}
+
+/// A cause in words, its name first.
+fn said_cause(cause: &energyml_etp_store::push::Cause) -> String {
+    use energyml_etp_store::push::Cause;
+    match cause {
+        Cause::MissingReference { count, space: None } => format!("{} ({count})", cause.name()),
+        Cause::MissingReference {
+            count,
+            space: Some(space),
+        } => format!("{} ({count}, in space {space})", cause.name()),
+        Cause::OrphanReference { count } | Cause::MissingArray { count } | Cause::OrphanArray { count } => {
+            format!("{} ({count})", cause.name())
+        }
+        Cause::MissingArrayContainer { containers } => format!("{} ({containers})", cause.name()),
+        Cause::Unknown => cause.name().to_string(),
+    }
 }
 
 /// Open a session, do one thing, close it: the exit code says whether the
@@ -2745,6 +2851,28 @@ mod tests {
         }
         Etp::command().debug_assert();
         Line::command().debug_assert();
+    }
+
+    /// `push --plan` writes nothing, so a protected server asks no
+    /// confirmation for it; a push without it does. Off unless given.
+    #[test]
+    fn a_push_plan_writes_nothing() {
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let command_of = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            Etp::try_parse_from(words).unwrap().command
+        };
+        let plain = command_of(&[]);
+        assert!(matches!(&plain, EtpCommand::Push { args, .. } if !args.plan));
+        assert_eq!(super::writing_name(&plain), Some("push"));
+        let planned = command_of(&["--plan"]);
+        assert!(matches!(&planned, EtpCommand::Push { args, .. } if args.plan));
+        assert_eq!(super::writing_name(&planned), None);
     }
 
     /// `push`'s flags reach the library's options under the same meaning,

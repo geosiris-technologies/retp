@@ -98,6 +98,10 @@ pub enum Kind {
     /// The request was not sent: the library would see the server refuse it.
     /// The session is untouched.
     NotSent,
+    /// The session is serving another request, from another thread: a session
+    /// takes one request at a time. Nothing was sent; the session is
+    /// untouched. Open one session per thread, or wait.
+    Busy,
     /// The server answered with an error (its code in [`Failure::code`]).
     Server,
     /// No answer in time.

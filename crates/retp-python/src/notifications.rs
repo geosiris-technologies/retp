@@ -213,8 +213,8 @@ impl PySubscription {
         let Some((uuid, route)) = self.open().take() else {
             return Ok(());
         };
-        // `Session` is not frozen (its methods take `&mut self`): borrowed, and the
-        // borrow kept while the GIL is released - one call at a time per session.
+        // Borrowed, and the borrow kept while the GIL is released; the session's own
+        // lock refuses (`SessionBusy`) when another thread is using it.
         let guard = self.session.borrow(py);
         let session: &PySession = &guard;
         let outcome = py.detach(|| session.with_live(|live| live.unsubscribe_from(uuid, route)));

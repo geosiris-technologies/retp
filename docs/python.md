@@ -49,6 +49,20 @@ The calls are blocking and release the Python GIL while they wait. From
 `asyncio`, `await asyncio.to_thread(session.dataspaces)`. One session handles one
 request at a time.
 
+### Renewing the token
+
+```python
+session.reauthorize(new_token)
+```
+
+Over ETP, an `Authorize` on the open session (ETP v1.2 section 3.13.5): the
+session stays the same one. Do it before the token the server holds runs out; a
+server that is not told may close the session when it does, and nothing brings
+it back. A refusal raises `retp.AuthorizationNeeded`, and the session is still
+open. Over REST there is no session to renew: every request from then on
+carries the new token. When to renew is the caller's: it knows when its token
+changes.
+
 ### Logins
 
 Without a token, the session logs in as the command line does
@@ -95,6 +109,7 @@ the Rust REST client refuses it.
 ```python
 for space in session.dataspaces():
     print(space["path"], space["uri"])
+    print(space["custom_data"].get("viewers"))     # an OSDU store's ACLs, as lists
 
 listed = session.resources("demo")                 # a path, or a URI
 for resource in listed["resources"]:
@@ -116,21 +131,31 @@ for kind in session.supported_types("demo", count=True):
 supports and holds none of. A listing that a server cut short with an error
 raises `retp.ServerError`; it is not returned as if it were complete.
 
+Each dataspace carries its `custom_data` as plain values: a string, a number, a
+flag, a list of strings (OSDU's `owners`, `viewers`, `legaltags`). A value of
+another kind is not turned into something else: its key is named in the
+dataspace's `notes`.
+
 To create and delete dataspaces, open the session with `writing=True`:
 
 ```python
 with retp.connect(url, token=token, writing=True) as session:
     created, errors = session.put_dataspaces(
         ["demo", "carl/teapot"],
-        custom_data={"owners": "a@example.org,b@example.org", "legaltags": "public"},
+        custom_data={
+            "owners": ["data.default.owners@example.org"],
+            "viewers": ["data.default.viewers@example.org"],
+            "legaltags": ["opendes-public-usa-dataset-1"],
+        },
     )
     deleted, errors = session.delete_dataspaces(["eml:///dataspace('old')"])
 ```
 
-Each dataspace is a path or a URI. `custom_data` goes with each, every value read
-as the command line's `--custom KEY=VALUE` reads it: a text with a comma is a
-list of strings, any other text one string (an OSDU store reads its ACLs and
-legal tags there). Each dataspace answers for itself: the ones the store took
+Each dataspace is a path or a URI. `custom_data` goes with each (an OSDU store
+reads its ACLs and legal tags there): a list of strings goes as that list; a
+string is read as the command line's `--custom KEY=VALUE` reads it, a text with a
+comma a list of strings and any other text one string. Any other value is
+refused (`ValueError`). Each dataspace answers for itself: the ones the store took
 are in the list, in the order given, the others in `errors`
 (`{"kind", "code", "message"}`).
 
@@ -172,6 +197,36 @@ and its `.report` says what was sent, what was refused, what was left out and
 which references leave the batch. If the server agreed no Transaction protocol,
 the report says so (`without_transactions`): a refused island may be partly
 there.
+
+`report["refusals"]` names **every** object or array of the island that stopped
+that the store refused, each `{"uri", "array", "code", "message"}`: `uri` the
+object in the destination dataspace, `array` the array's path when the refusal
+is an array's, `code` the ETP error code the store answered with (`None` when
+the refusal is this side's, an array that could not be read). A
+`ProtocolException` that answered the whole request is every object's answer.
+`report["stopped"]` quotes the first in a sentence; read the list, not the
+sentence.
+
+`put_objects` and `push_epc` take the command line's `push-epc` options:
+
+| Keyword | Meaning |
+|---|---|
+| `objects_per_island`, `bytes_per_island` | at most this many objects, this many bytes, in one island (`--objects`, `--bytes`); a cycle larger than that still goes whole |
+| `only` | these objects alone, each by URI (of the package, or of the same object in another dataspace) or by uuid (`--only`); a name the source does not hold is refused |
+| `well_known` | also push the official dictionary's `PropertyKind`s the objects reference without holding (`--well-known`) |
+| `one_by_one` | the arrays one per message, one after the other (`--one-by-one`) |
+| `json` | send JSON Energistics, what the Reservoir DDMS REST API takes (`--json`); XML otherwise |
+
+The client does not filter the objects by the types the server announced: what
+the server will not take, it refuses, and the refusal is in the report.
+
+To name an object, `retp.uri` builds its canonical URI (ETP v1.2 section
+25.3.7), a quote in the dataspace written twice:
+
+```python
+retp.uri("osdu/project", "resqml20.obj_HorizonInterpretation", uuid)
+# "eml:///dataspace('osdu/project')/resqml20.obj_HorizonInterpretation(<uuid>)"
+```
 
 `delete_objects` answers per URI: `deleted` maps each URI the store deleted to
 the URIs it says went with it, `errors` the ones it did not delete.
@@ -366,7 +421,10 @@ Each of these waits for the Rust library first; the crate's `DESIGN.md`
 - writing a downloaded dataspace to disk with its HDF5 files in one call (the
   command line does it itself; the library returns the package in memory).
 
-Renewing the authorization of an open session, and listening to the session's own events,
-are not bridged yet: `connect(url, token=...)` takes one fixed token and `Session.subscribe`
-carries store notifications only. A Python session therefore ends when its token does; the
-Rust library has both (see [Library usage](client.md)).
+Listening to the session's own events (the server's warning that the token is
+expiring among them) is not bridged yet: `Session.subscribe` carries store
+notifications only, so a Python caller renews on its own clock
+(`session.reauthorize`). Nor is a credential source that the library calls
+when it renews: the Rust library has both (see [Library usage](client.md)).
+Resuming an interrupted push (a journal of the islands committed, reconnection)
+is not in the library yet either.

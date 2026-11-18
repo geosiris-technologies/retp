@@ -14,6 +14,7 @@ mod errors;
 mod operations;
 mod scope;
 mod stage;
+mod uris;
 
 #[cfg(feature = "live-server")]
 mod live;

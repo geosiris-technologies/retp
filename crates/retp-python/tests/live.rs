@@ -46,7 +46,11 @@ fn live_a_bad_scope_is_refused_before_it_is_sent() {
 fn live_a_read_only_session_does_not_write() {
     let mut session = open();
     let refusal = session
-        .put_objects("demo", &["{}".to_string()])
+        .put_objects(
+            "demo",
+            &["{}".to_string()],
+            &retp_python::session::PushChoices::default(),
+        )
         .expect_err("read-only");
     assert_eq!(refusal.kind, retp_python::session::Kind::Unsupported);
 }

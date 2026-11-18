@@ -26,18 +26,20 @@ Bound, function by function (Python name, then the Rust item it calls):
 | `retp.connect(url, token, partition=, insecure=, writing=, types=, keepalive=, at_once=)` | `retp_client::live::LiveSession::connect` over `reading_client` / `writing_client` and `native::fit_to_server`; `ExtraHeaders` (the partition); `plain_text_warning`, `CertificateCheck::warning` |
 | `retp.connect(..., user=, password=, token_url=, azure_tenant=, cognito_region=, client_id=, client_secret=, oauth_scope=)` | `retp_client::login::Choice::login` (given no environment), then `Login::obtain`; a token alone is `Login::Bearer`, so `Credentials::bearer` |
 | `retp.connect(..., rest=True)` | `native::rest_client`, `RestClient::with_at_once`; `Remote::Rest` |
-| `Session.dataspaces()` | `retp_client::list_dataspaces` |
+| `Session.dataspaces()` | `retp_client::list_dataspaces`; each `customData` value through `retp_client::custom_data_json` |
 | `Session.resources(dataspace, depth=, scope=, types=, edges=, count=)` | `retp_client::list_resources` with a `ResourceQuery`; `dataspace_uri` |
 | `Session.get_object(uri)`, `get_objects(uris)` | `retp_client::get_data_objects` (format `xml`), then `energyml_etp_store::read_object`, then `energyml_core::json::write_string` |
-| `Session.put_objects(dataspace, objects)` | `energyml_core::json::read_string`, `EpcStore::put` (in memory), then `energyml_etp_store::push::push` (see gap G1) |
-| `Session.push_epc(path, dataspace)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` |
+| `Session.put_objects(dataspace, objects, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=)` | `energyml_core::json::read_string`, `EpcStore::put` (in memory), then `energyml_etp_store::push::push` (see gap G1) |
+| `Session.push_epc(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` with the `Options` the command line's `push-epc` builds; `push::chosen` for `only`; the report's `refusals` are `push::Report::refusals` |
+| `Session.reauthorize(token)` | `Credentials::bearer`, then `native::Remote::reauthorize` |
+| `retp.uri(dataspace, qualified_type, uuid, version=)` | `EtpUri::object_versioned`, read back by `EtpUri::parse` |
 | `Session.array_metadata(uri, paths)` | `retp_client::arrays::array_metadata` |
 | `Session.read_array(uri, path, start=, count=)` | `retp_client::arrays::read_arrays`, or `read_regions` with a `Block`; `ArrayValues::decode` |
 | `Session.ping()`, `close()` | `Remote::ping`, `Remote::close` |
 | `Session.subscribe(uri, ...)` | `retp_client::live::LiveSession::subscribe_to`, `unsubscribe_from`; `live::as_json` |
 | `Session.supported_types(dataspace, scope=, count=, empty=)` | `retp_client::list_supported_types`; `dataspace_uri` |
 | `Session.delete_objects(uris, prune_contained=)` | `retp_client::delete_data_objects` |
-| `Session.put_dataspaces(dataspaces, custom_data=)` | `retp_client::put_dataspaces`; `dataspace_uri`, `EtpUri::parse` for the path, `custom_data_value` |
+| `Session.put_dataspaces(dataspaces, custom_data=)` | `retp_client::put_dataspaces`; `dataspace_uri`, `EtpUri::parse` for the path, `custom_data_value` for a string, `custom_data_strings` for a list |
 | `Session.delete_dataspaces(dataspaces)` | `retp_client::delete_dataspaces`; `dataspace_uri` |
 | `Session.start_transaction(dataspaces, read_only=, message=)`, `commit_transaction(t)`, `rollback_transaction(t)` | `retp_client::start_transaction`, `commit_transaction`, `rollback_transaction`; `retp.Transaction` holds the library's `Transaction` |
 | `Session.channel_metadata(uris)` | `retp_client::channels::channel_metadata`; `retp_avro::Avro::to_json` |

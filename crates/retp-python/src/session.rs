@@ -37,23 +37,26 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use energyml_core::identifiers::EtpUri;
+use energyml_core::identifiers::{EtpUri, QualifiedType, normalize_uuid};
 use energyml_core::registry::{ReadMode, Registry};
 use energyml_etp_store::pack::{Packed, Wanted, pack};
-use energyml_etp_store::push::{Options, Stop, push};
+use energyml_etp_store::push::{Budget, Options, Refusal, Stop, WellKnown, WriteFormat, chosen, push};
 use energyml_etp_store::{DEFAULT_MESSAGE, read_object};
 use energyml_storage::EpcStore;
 use energyml_storage::storage::EnergymlStorage;
 use retp_avro::Avro;
-use retp_client::arrays::{Array, ArrayFailure, Block, Decoded, array_metadata, read_arrays, read_regions};
+use retp_client::arrays::{
+    Array, ArrayFailure, Block, Decoded, Grouping, array_metadata, read_arrays, read_regions,
+};
 use retp_client::channels::{channel_metadata, get_ranges};
 use retp_client::login::{Choice, LoginError};
 use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
 use retp_client::{
     Blocking, ClientError, Ended, Opened, ResourceQuery, Transaction, blocking, commit_transaction,
-    custom_data_value, dataspace_uri, delete_data_objects, delete_dataspaces, get_data_objects,
-    list_dataspaces, list_resources, list_supported_types, plain_text_warning, put_dataspaces,
-    reading_client, rollback_transaction, start_transaction, writing_client,
+    custom_data_json, custom_data_strings, custom_data_value, dataspace_uri, delete_data_objects,
+    delete_dataspaces, get_data_objects, list_dataspaces, list_resources, list_supported_types,
+    plain_text_warning, put_dataspaces, reading_client, rollback_transaction, start_transaction,
+    writing_client,
 };
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
@@ -393,6 +396,13 @@ pub struct DataspaceRow {
     pub store_last_write: i64,
     /// `storeCreated`.
     pub store_created: i64,
+    /// Its `customData`, each value as JSON text - a flag, a number, a
+    /// string, a list of strings, `null` (`retp_client::custom_data_json`):
+    /// what an OSDU store keeps there, `owners`, `viewers`, `legaltags`.
+    pub custom_data: Vec<(String, String)>,
+    /// The keys of `customData` whose value is of a kind plain JSON does not
+    /// carry, named rather than dropped.
+    pub notes: Vec<String>,
 }
 
 /// A resource, as listed (`Discovery` protocol, `GetResources`).
@@ -521,6 +531,9 @@ pub struct PushReport {
     pub without_transactions: bool,
     /// Why the push stopped, `None` when every island went through.
     pub stopped: Option<String>,
+    /// Every object or array of the island that stopped that the store
+    /// refused, with its code (`energyml_etp_store::push::Report::refusals`).
+    pub refusals: Vec<Refusal>,
 }
 
 impl PushReport {
@@ -566,6 +579,7 @@ impl PushReport {
             dangling: report.dangling,
             without_transactions: report.without_transactions,
             stopped,
+            refusals: report.refusals,
         }
     }
 }
@@ -711,16 +725,7 @@ impl Session {
                 format!("the dataspace list was cut short: {}", error.message),
             ));
         }
-        Ok(list
-            .items
-            .into_iter()
-            .map(|one| DataspaceRow {
-                uri: one.uri,
-                path: one.path,
-                store_last_write: one.store_last_write,
-                store_created: one.store_created,
-            })
-            .collect())
+        Ok(list.items.into_iter().map(dataspace_row).collect())
     }
 
     /// The resources under a dataspace (a path or a URI) or an object.
@@ -846,10 +851,16 @@ impl Session {
     ///
     /// Objects carrying `_data` (referenced objects expanded in place) are
     /// refused: which of the two a caller means is not ours to guess.
-    pub fn put_objects(&mut self, dataspace: &str, jsons: &[String]) -> Result<PushReport, Failure> {
+    pub fn put_objects(
+        &mut self,
+        dataspace: &str,
+        jsons: &[String],
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
         self.require_writing("put objects")?;
+        choices.check()?;
         let store = stage(&self.registry, jsons)?;
-        self.push_store(&store, dataspace)
+        self.push_store(&store, dataspace, choices)
     }
 
     /// Send the EPC at `path` into a dataspace: `energyml_storage::EpcStore::open`
@@ -857,23 +868,76 @@ impl Session {
     ///
     /// The arrays travel too, and reading them needs the `hdf5` feature of this
     /// build: without it the storage layer refuses an array by name.
-    pub fn push_epc(&mut self, path: &str, dataspace: &str) -> Result<PushReport, Failure> {
+    pub fn push_epc(
+        &mut self,
+        path: &str,
+        dataspace: &str,
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
         self.require_writing("push a package")?;
+        choices.check()?;
         let store = EpcStore::open(path, self.registry.clone())
             .map_err(|why| Failure::local(format!("cannot open {path}: {why}")))?;
-        self.push_store(&store, dataspace)
+        self.push_store(&store, dataspace, choices)
     }
 
-    fn push_store(&mut self, store: &EpcStore, dataspace: &str) -> Result<PushReport, Failure> {
+    /// `energyml_etp_store::push::push` with the options the command line's
+    /// `push-epc` builds from the same words (`retp-cli`'s `push_epc`).
+    fn push_store(
+        &mut self,
+        store: &EpcStore,
+        dataspace: &str,
+        choices: &PushChoices,
+    ) -> Result<PushReport, Failure> {
         let source: &(dyn EnergymlStorage + Sync) = store;
-        let report = blocking(push(
-            self.remote()?,
-            source,
-            dataspace,
-            &Options::default(),
-            |_progress| {},
-        ))?;
+        let only = match &choices.only {
+            Some(names) => Some(blocking(chosen(source, names)).map_err(Failure::bad_argument)?),
+            None => None,
+        };
+        // Its own handle: the options borrow it while the session is borrowed to send.
+        let registry = self.registry.clone();
+        let mut budget = Budget::default();
+        if let Some(objects) = choices.objects {
+            budget.objects = objects;
+        }
+        if let Some(bytes) = choices.bytes {
+            budget.bytes = bytes;
+        }
+        let options = Options {
+            budget,
+            format: if choices.json {
+                WriteFormat::Json
+            } else {
+                WriteFormat::Xml
+            },
+            well_known: if choices.well_known {
+                WellKnown::Push(&registry)
+            } else {
+                WellKnown::Leave
+            },
+            only: only.as_deref(),
+            grouping: if choices.one_by_one {
+                Grouping::OneByOne
+            } else {
+                Grouping::Together
+            },
+            // A file knows no `storeLastWrite`: nothing to compare against.
+            expected: None,
+            overwrite: false,
+        };
+        let report = blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?;
         Ok(PushReport::of(report))
+    }
+
+    /// Renew the authorization of this session with a new bearer token:
+    /// `retp_client::native::Remote::reauthorize`. Over ETP, an `Authorize`
+    /// on the open session (ETP v1.2 section 3.13.5) - a refusal raises
+    /// `AuthorizationNeeded` and the session stays open; over REST, the token
+    /// of every request from now on.
+    pub fn reauthorize(&mut self, token: &str) -> Result<(), Failure> {
+        let credentials = Credentials::bearer(token)
+            .map_err(|why| Failure::bad_argument(format!("the token is refused: {why}")))?;
+        Ok(self.remote()?.reauthorize(&credentials)?)
     }
 
     /// The metadata of arrays of one resource. `retp_client::arrays::array_metadata`.
@@ -969,7 +1033,7 @@ impl Session {
     pub fn put_dataspaces(
         &mut self,
         dataspaces: &[String],
-        custom_data: &[(String, String)],
+        custom_data: &[(String, CustomValue)],
     ) -> Result<Outcomes<String>, Failure> {
         self.require_writing("create dataspaces")?;
         create_dataspaces(self.remote()?, dataspaces, custom_data)
@@ -1145,14 +1209,134 @@ pub fn delete_objects<K: Blocking>(
     Ok(in_order(uris, answers))
 }
 
+/// A listed dataspace as it crosses: its `customData` each value as JSON
+/// text through `retp_client::custom_data_json`, the keys it cannot carry
+/// named in `notes`.
+pub fn dataspace_row(one: Dataspace) -> DataspaceRow {
+    let mut custom_data = Vec::new();
+    let mut notes = Vec::new();
+    for (key, value) in &one.custom_data {
+        match custom_data_json(value) {
+            Some(json) => custom_data.push((key.clone(), json.to_string())),
+            None => notes.push(format!(
+                "customData `{key}` is of a kind plain JSON does not carry: left out"
+            )),
+        }
+    }
+    DataspaceRow {
+        uri: one.uri,
+        path: one.path,
+        store_last_write: one.store_last_write,
+        store_created: one.store_created,
+        custom_data,
+        notes,
+    }
+}
+
+/// The canonical URI of a data object (ETP v1.2 section 25.3.7, p.489):
+/// `energyml_core::identifiers::EtpUri::object_versioned`, which doubles a
+/// quote inside the dataspace or the version (section 25.3.10).
+///
+/// `dataspace` is a path (`demo`, `osdu/project`), a dataspace URI, or empty
+/// for the default dataspace. The uuid is checked and lowercased
+/// (`normalize_uuid`), the qualified type read (`QualifiedType::parse`), and
+/// the URI built is read back by `EtpUri::parse`: what does not come back as
+/// the same object is refused, not returned.
+pub fn object_uri(
+    dataspace: &str,
+    qualified_type: &str,
+    uuid: &str,
+    version: Option<&str>,
+) -> Result<String, Failure> {
+    let space = if dataspace.is_empty() {
+        None
+    } else {
+        let parsed = EtpUri::parse(&dataspace_uri(dataspace))
+            .map_err(|why| Failure::bad_argument(format!("{dataspace} is not a dataspace: {why}")))?;
+        if parsed.uuid.is_some() {
+            return Err(Failure::bad_argument(format!(
+                "{dataspace} names an object, not a dataspace"
+            )));
+        }
+        parsed.dataspace
+    };
+    let kind = QualifiedType::parse(qualified_type)
+        .map_err(|why| Failure::bad_argument(format!("{qualified_type} is not a qualified type: {why}")))?;
+    let uuid =
+        normalize_uuid(uuid).map_err(|why| Failure::bad_argument(format!("{uuid} is not a uuid: {why}")))?;
+    let uri = EtpUri::object_versioned(space.as_deref(), &kind.to_string(), &uuid, version);
+    let back = EtpUri::parse(&uri)
+        .map_err(|why| Failure::bad_argument(format!("{uri} does not read back: {why}")))?;
+    let same = back.dataspace == space
+        && back.uuid.as_deref() == Some(uuid.as_str())
+        && back.qualified_type().map(|q| q.to_string()) == Some(kind.to_string())
+        && back.object_version.as_deref() == version;
+    if !same {
+        return Err(Failure::bad_argument(format!(
+            "{uri} does not read back as the object asked for"
+        )));
+    }
+    Ok(uri)
+}
+
+/// What a push is told, as a caller gives it: the words of the command
+/// line's `push-epc`, which builds the same `energyml_etp_store::push::Options`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushChoices {
+    /// At most this many objects in one island (`--objects`).
+    pub objects: Option<usize>,
+    /// At most this many bytes in one island (`--bytes`).
+    pub bytes: Option<u64>,
+    /// Only these objects, by URI or uuid (`--only`, `push::chosen`); `None`
+    /// is everything.
+    pub only: Option<Vec<String>>,
+    /// Push the official dictionary's `PropertyKind`s the source references
+    /// without holding them (`--well-known`).
+    pub well_known: bool,
+    /// One array per message, one after the other (`--one-by-one`).
+    pub one_by_one: bool,
+    /// Send the objects as JSON Energistics, what the Reservoir DDMS REST API
+    /// takes (`--json`); XML otherwise.
+    pub json: bool,
+}
+
+impl PushChoices {
+    /// A budget of nothing, or an `only` that names nothing, is refused by
+    /// name: neither is "everything", and neither can send anything.
+    pub fn check(&self) -> Result<(), Failure> {
+        if self.objects == Some(0) {
+            return Err(Failure::bad_argument("objects must be at least 1"));
+        }
+        if self.bytes == Some(0) {
+            return Err(Failure::bad_argument("bytes must be at least 1"));
+        }
+        if self.only.as_ref().is_some_and(Vec::is_empty) {
+            return Err(Failure::bad_argument(
+                "only names no object: leave it out to push everything",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One `customData` value as a caller gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomValue {
+    /// Text, read as the command line's `--custom KEY=VALUE` reads it
+    /// (`retp_client::custom_data_value`): `a,b` is a list of strings, any
+    /// other text one string.
+    Text(String),
+    /// A list of strings, as given (`retp_client::custom_data_strings`): a
+    /// value that holds a comma stays one value.
+    List(Vec<String>),
+}
+
 /// The dataspaces as `retp_client::put_dataspaces` sends them: each path or
 /// URI made a URI by `dataspace_uri`, its path read back from that URI by
-/// `EtpUri::parse`, and the same `custom_data` on each, every value through
-/// `retp_client::custom_data_value` (the command line's `--custom KEY=VALUE`:
-/// `a,b` is a list of strings, any other text one string).
+/// `EtpUri::parse`, and the same `custom_data` on each ([`CustomValue`]).
 pub fn dataspaces_to_put(
     dataspaces: &[String],
-    custom_data: &[(String, String)],
+    custom_data: &[(String, CustomValue)],
 ) -> Result<Vec<Dataspace>, Failure> {
     if dataspaces.is_empty() {
         return Err(Failure::bad_argument("no dataspace given"));
@@ -1173,7 +1357,13 @@ pub fn dataspaces_to_put(
                 path: parsed.dataspace.unwrap_or_default(),
                 custom_data: custom_data
                     .iter()
-                    .map(|(key, value)| (key.clone(), custom_data_value(value)))
+                    .map(|(key, value)| {
+                        let value = match value {
+                            CustomValue::Text(text) => custom_data_value(text),
+                            CustomValue::List(values) => custom_data_strings(values),
+                        };
+                        (key.clone(), value)
+                    })
                     .collect(),
                 ..Default::default()
             })
@@ -1186,7 +1376,7 @@ pub fn dataspaces_to_put(
 pub fn create_dataspaces<K: Blocking>(
     client: &mut K,
     dataspaces: &[String],
-    custom_data: &[(String, String)],
+    custom_data: &[(String, CustomValue)],
 ) -> Result<Outcomes<String>, Failure> {
     let spaces = dataspaces_to_put(dataspaces, custom_data)?;
     let uris: Vec<String> = spaces.iter().map(|space| space.uri.clone()).collect();

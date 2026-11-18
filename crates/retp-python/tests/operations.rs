@@ -19,8 +19,8 @@ use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder};
 use retp_proto::negotiate::{Offer, ProtocolOffer};
 use retp_proto::wire::{Body, Delivery, EtpError};
 use retp_python::session::{
-    Kind, channels, commit, create_dataspaces, dataspaces_to_put, delete_objects, open_transaction,
-    pack_dataspace, ranges, ranges_from_json, remove_dataspaces, rollback, supported_types,
+    CustomValue, Kind, channels, commit, create_dataspaces, dataspace_row, dataspaces_to_put, delete_objects,
+    open_transaction, pack_dataspace, ranges, ranges_from_json, remove_dataspaces, rollback, supported_types,
 };
 use retp_types::datatypes::channel_data::{ChannelMetadataRecord, DataItem};
 use retp_types::datatypes::object::{RelationshipKind, SupportedType};
@@ -395,8 +395,11 @@ fn deleting_nothing_or_the_same_uri_twice_is_refused_before_anything_leaves() {
 fn a_dataspace_is_put_with_its_uri_its_path_and_its_custom_data() {
     let (mut client, shared) = session();
     let custom = vec![
-        ("owners".to_string(), "a@example.org,b@example.org".to_string()),
-        ("legal".to_string(), "public".to_string()),
+        (
+            "owners".to_string(),
+            CustomValue::Text("a@example.org,b@example.org".to_string()),
+        ),
+        ("legal".to_string(), CustomValue::Text("public".to_string())),
     ];
     let outcome =
         create_dataspaces(&mut client, &texts(&["carl/teapot", "refused"]), &custom).expect("answered");
@@ -420,6 +423,62 @@ fn a_dataspace_is_put_with_its_uri_its_path_and_its_custom_data() {
         custom_data.iter().any(|v| v.starts_with("legal=String")),
         "{custom_data:?}"
     );
+}
+
+/// A list given as a list goes as that list: a legal tag that holds a comma
+/// stays one tag, where the text form would have cut it in two.
+#[test]
+fn a_list_of_custom_values_goes_as_given() {
+    let tags = vec!["tag,with comma".to_string(), "other".to_string()];
+    let spaces = dataspaces_to_put(
+        &texts(&["demo"]),
+        &[("legaltags".to_string(), CustomValue::List(tags.clone()))],
+    )
+    .expect("a dataspace");
+    match &spaces[0].custom_data["legaltags"].item {
+        DataValueItem::ArrayOfString(a) => assert_eq!(a.values, tags),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A listed dataspace's `customData` crosses as JSON, each value, and a value
+/// plain JSON does not carry is named in `notes`, not dropped in silence.
+#[test]
+fn a_listed_dataspace_carries_its_custom_data_as_json() {
+    let mut custom_data = BTreeMap::new();
+    custom_data.insert(
+        "viewers".to_string(),
+        DataValue {
+            item: DataValueItem::ArrayOfString(ArrayOfString {
+                values: vec!["a@x.y".into(), "b@x.y".into()],
+            }),
+        },
+    );
+    custom_data.insert(
+        "kind".to_string(),
+        DataValue {
+            item: DataValueItem::String("project".into()),
+        },
+    );
+    custom_data.insert(
+        "blob".to_string(),
+        DataValue {
+            item: DataValueItem::Bytes(vec![1, 2, 3]),
+        },
+    );
+    let row = dataspace_row(retp_types::datatypes::object::Dataspace {
+        uri: "eml:///dataspace('demo')".into(),
+        path: "demo".into(),
+        store_last_write: T0,
+        store_created: T0,
+        custom_data,
+    });
+    let json: BTreeMap<String, String> = row.custom_data.into_iter().collect();
+    assert_eq!(json["viewers"], r#"["a@x.y","b@x.y"]"#);
+    assert_eq!(json["kind"], r#""project""#);
+    assert!(!json.contains_key("blob"));
+    assert_eq!(row.notes.len(), 1, "{:?}", row.notes);
+    assert!(row.notes[0].contains("blob"), "{:?}", row.notes);
 }
 
 #[test]

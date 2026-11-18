@@ -21,6 +21,9 @@ is exercised:
     exception of its kind, and a refused token never echoed in the message;
   * a REST session, which opens nothing: what REST does not do (notifications)
     and what a read-only session does not do (writing) are refused by name;
+    a writing one refuses what the bridge cannot convert (a customData value,
+    an empty island) and takes a renewed token;
+  * `retp.uri`, the canonical URI of an object;
   * one real connection attempt, to a loopback port nothing listens on, which
     must fail with an exception of the retp tree (the native WebSocket
     transport and the error mapping run).
@@ -104,6 +107,33 @@ else:
     err = raised(lambda: session.start_transaction(["demo"]), retp.Unsupported)
     check(err is not None, "a read-only session opens no transaction (Unsupported)")
     session.close()
+
+# A writing REST session still opens nothing: the conversions of the bridge run,
+# and refuse, before any request leaves; a renewed token is taken as it is.
+try:
+    session = retp.connect(REST_URL, token="t0", rest=True, writing=True)
+except BaseException as err:
+    check(False, f"a writing REST session did not open: {type(err).__name__}: {err}")
+else:
+    err = raised(lambda: session.put_dataspaces(["demo"], custom_data={"owners": 3}), ValueError)
+    check(err is not None and "list of strings" in str(err), "a customData value of another kind is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", objects_per_island=0), ValueError)
+    check(err is not None and "objects" in str(err), "an island of no object is refused (ValueError)")
+    check(session.reauthorize("t1") is None, "a REST session takes a renewed token")
+    err = raised(lambda: session.reauthorize("s3cret token"), ValueError)
+    check(err is not None and "s3cret" not in str(err), "a bad renewed token is refused without being echoed (ValueError)")
+    session.close()
+
+# The canonical URI of an object (ETP v1.2 section 25.3.7), typed here as the
+# specification spells it: a quote written twice (section 25.3.10), the uuid in
+# lower case.
+check(
+    retp.uri("carl's", "resqml20.obj_HorizonInterpretation", "421A7A05-033A-450D-BCEF-051352023578")
+    == "eml:///dataspace('carl''s')/resqml20.obj_HorizonInterpretation(421a7a05-033a-450d-bcef-051352023578)",
+    "retp.uri spells the canonical URI",
+)
+err = raised(lambda: retp.uri("demo", "resqml20.obj_HorizonInterpretation", "not-a-uuid"), ValueError)
+check(err is not None, "retp.uri refuses what is not a uuid (ValueError)")
 
 # One real attempt: nothing listens on port 1 of the loopback interface.
 # TODO(verify): which subclass of RetpError this gives on each platform; only the

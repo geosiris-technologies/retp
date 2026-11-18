@@ -36,7 +36,11 @@ Methods, and the Rust function each one calls:
     get_ranges            retp_client::channels::get_ranges
     download_epc          energyml_etp_store::pack::pack
     subscribe             retp_client::live::LiveSession::subscribe_to
+    reauthorize           Remote::reauthorize
     ping, close           Remote::ping, Remote::close
+
+`retp.uri(dataspace, qualified_type, uuid)` builds an object's canonical URI
+(energyml_core::identifiers::EtpUri::object_versioned).
 
 A failure is an exception of `retp.errors`; an unsupported case raises
 `retp.Unsupported` and names it. A call never returns an empty result to mean

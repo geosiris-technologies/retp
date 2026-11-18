@@ -273,6 +273,12 @@ impl<T: Transport, C: Clock> Client<T, C> {
         self.engine.resumed()
     }
 
+    /// How the session came: given back by `ResumeSession`, or opened anew -
+    /// with the server's refusal, when [`Client::resume`] asked and was refused.
+    pub fn came(&self) -> crate::resume::Came {
+        self.engine.came()
+    }
+
     /// How this client takes the server's faults.
     pub fn tolerance(&self) -> retp_proto::wire::Tolerance {
         self.engine.tolerance()

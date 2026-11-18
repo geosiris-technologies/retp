@@ -14,12 +14,14 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use live_server::{
-    ARRIVAL, DATASPACE, OTHER_SUBSCRIPTION, REFUSED, SUBSCRIPTION, is_the_change_of, open, start_server,
-    start_server_notifying_after, within,
+    ARRIVAL, DATASPACE, OTHER_SUBSCRIPTION, REFUSED, Resumes, SUBSCRIPTION, connect_to, is_the_change_of,
+    open, start_server, start_server_notifying_after, start_server_twice, within,
 };
-use retp_client::Blocking;
 use retp_client::live::Queue;
+use retp_client::live::{LiveSession, LiveSettings};
 use retp_client::notifications::Watch;
+use retp_client::resume::Came;
+use retp_client::{Blocking, Caller};
 
 /// A blocking operation of the crate runs on a `&mut LiveSession`, and `Blocking::end` closes it.
 #[test]
@@ -44,7 +46,6 @@ fn a_blocking_operation_runs_on_the_live_session() {
 /// What the session agreed is read from the open session, and `events` returns at once.
 #[test]
 fn the_caller_methods_answer_without_waiting() {
-    use retp_client::Caller;
     within(|| {
         let server = start_server();
         let mut session = open(&server);
@@ -145,5 +146,74 @@ fn a_refused_subscription_leaves_no_route() {
             .expect("the session answers")
             .expect("the store accepts this one");
         session.close("done").expect("the session closes");
+    });
+}
+
+// -- a live session asked back: OSDU's ResumeSession (CoreOSDU 2400, ADR-0003) --
+
+/// A live session opened, then closed, and a second connection that asks it back: what the
+/// second session came as. Either way, it answers.
+fn asked_back(resumes: Resumes) -> Came {
+    let server = start_server_twice(resumes);
+    let first = open(&server);
+    let lost = first
+        .client()
+        .resumable()
+        .expect("an open live session can be asked back");
+    assert_eq!(
+        Caller::resumable(&first).map(|r| r.session_id),
+        Some(lost.session_id),
+        "the caller's door says the same"
+    );
+    first.end("its connection is lost");
+    let second = match LiveSession::connect_resuming(connect_to(&server), lost, LiveSettings::default()) {
+        Ok(session) => session,
+        Err(why) => panic!("a session opens, given back or anew: {why:?}"),
+    };
+    let came = second.client().came();
+    assert_eq!(Caller::came(&second), came, "the caller's door says the same");
+    let mut second = second;
+    let list = retp_client::list_dataspaces(&mut second).expect("the session answers");
+    assert_eq!(list.items.len(), 1);
+    second.end("done");
+    came
+}
+
+/// **A server that gives the session back opens it again.**
+#[test]
+fn a_live_session_is_given_back_by_a_server_that_resumes() {
+    within(|| {
+        assert_eq!(asked_back(Resumes::GivesBack), Came::Resumed);
+    });
+}
+
+/// **A server that no longer has it opens a new session at once, and its words are kept.**
+#[test]
+fn a_live_session_not_given_back_is_opened_anew_and_says_why() {
+    within(|| {
+        let came = asked_back(Resumes::NotFound);
+        let Came::Fresh { refused: Some(why) } = &came else {
+            panic!("{came:?}");
+        };
+        assert!(
+            why.contains("ENOT_FOUND") && why.contains("Session not found or expired"),
+            "{why}"
+        );
+    });
+}
+
+/// **A server that does not speak 2400 opens a new session too**, and says why the resume did
+/// not serve.
+#[test]
+fn a_live_session_on_a_server_without_resume_is_opened_anew_and_says_why() {
+    within(|| {
+        let came = asked_back(Resumes::Never);
+        let Came::Fresh { refused: Some(why) } = &came else {
+            panic!("{came:?}");
+        };
+        assert!(
+            why.contains("EUNSUPPORTED_PROTOCOL") && why.contains("2400"),
+            "{why}"
+        );
     });
 }

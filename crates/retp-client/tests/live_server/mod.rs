@@ -24,10 +24,12 @@ use retp_client::{Clock, SystemClock, reading_client};
 use retp_proto::connection::{Connection, Declined, Event, Handled, Handler, Responder};
 use retp_proto::negotiate::{Offer, ProtocolOffer};
 use retp_proto::probe;
+use retp_proto::wire::EtpError;
 use retp_proto::wire::{Body, Delivery, Outgoing};
 use retp_types::datatypes::object::{DataObject, ObjectChange, ObjectChangeKind, Resource};
 use retp_types::datatypes::{SupportedDataObject, Uuid};
 use retp_types::dispatch::Message;
+use retp_types::protocol::core::RequestSession;
 use retp_types::protocol::dataspace::GetDataspacesResponse;
 use retp_types::protocol::store_notification::{
     ObjectChanged, SubscribeNotificationsResponse, SubscriptionEnded,
@@ -184,11 +186,27 @@ fn send(socket: &mut tungstenite::WebSocket<TcpStream>, out: Vec<Outgoing>) -> b
     true
 }
 
+/// How a server answers OSDU's `ResumeSession` (CoreOSDU, protocol 2400), the extension
+/// `open-etp-server` publishes the wire format of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumes {
+    /// It does not speak 2400: `EUNSUPPORTED_PROTOCOL`, as any protocol nobody announced.
+    Never,
+    /// It gives the lost session back, negotiated from the `RequestSession` the connection
+    /// before this one was opened with.
+    GivesBack,
+    /// It no longer has it: `ENOT_FOUND`, *Session not found or expired*, as OSDU's server.
+    NotFound,
+}
+
+/// What a server keeps of the session of its last connection: its `RequestSession`.
+type Kept = Arc<Mutex<Option<RequestSession>>>;
+
 /// Serve one connection until it ends. Reads with a short timeout so that the server can also
 /// act on its own: tick the connection, and send the notifications when they are due.
 // The handshake callback's `Result` is tungstenite's signature, not ours.
 #[allow(clippy::result_large_err)]
-fn serve(stream: TcpStream, notify_after: Duration) {
+fn serve(stream: TcpStream, notify_after: Duration, resumes: Resumes, kept: &Kept) {
     let callback = |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
         response.headers_mut().insert(
             "sec-websocket-protocol",
@@ -208,14 +226,29 @@ fn serve(stream: TcpStream, notify_after: Duration) {
     }
     let wanted: Wanted = Arc::new(Mutex::new(Vec::new()));
     let mut connection = server_connection(wanted.clone());
+    if resumes != Resumes::Never {
+        connection = connection.accepting_resume();
+    }
     let mut due: Option<Instant> = None;
     let mut notified = false;
     loop {
         match socket.read() {
             Ok(Frame::Binary(bytes)) => {
                 let step = connection.receive(&bytes, SystemClock.now());
+                let asked_back = step.events.iter().any(|e| matches!(e, Event::ResumeAsked(_)));
                 if !send(&mut socket, step.send) || step.close {
                     break;
+                }
+                if asked_back {
+                    let lost = locked(kept).clone();
+                    let answer = match (resumes, lost) {
+                        (Resumes::GivesBack, Some(lost)) => connection.resume(&lost, SystemClock.now()),
+                        _ => connection
+                            .refuse_resume(&EtpError::ENOT_FOUND.with_detail("Session not found or expired")),
+                    };
+                    if !send(&mut socket, answer.send) || answer.close {
+                        break;
+                    }
                 }
             }
             Ok(Frame::Close(_)) => break,
@@ -254,6 +287,9 @@ fn serve(stream: TcpStream, notify_after: Duration) {
             }
         }
     }
+    if let Some(request) = connection.requested() {
+        *locked(kept) = Some(request.clone());
+    }
     let _ = socket.close(None);
 }
 
@@ -278,7 +314,7 @@ pub fn start_server_notifying_after(notify_after: Duration) -> Server {
     let (ended_tx, ended) = mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            serve(stream, notify_after);
+            serve(stream, notify_after, Resumes::Never, &Kept::default());
         }
         let _ = ended_tx.send(());
     });
@@ -288,23 +324,48 @@ pub fn start_server_notifying_after(notify_after: Duration) -> Server {
     }
 }
 
+/// Listen on a free port and serve two connections, one after the other: the second one
+/// answers a `ResumeSession` as `resumes` says, from what the server kept of the first.
+pub fn start_server_twice(resumes: Resumes) -> Server {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a free local port");
+    let port = listener.local_addr().expect("a bound address").port();
+    let (ended_tx, ended) = mpsc::channel();
+    std::thread::spawn(move || {
+        let kept = Kept::default();
+        for _ in 0..2 {
+            if let Ok((stream, _)) = listener.accept() {
+                serve(stream, NOTIFY_AFTER, resumes, &kept);
+            }
+            let _ = ended_tx.send(());
+        }
+    });
+    Server {
+        url: format!("ws://127.0.0.1:{port}"),
+        ended,
+    }
+}
+
 // ---- the client side -----------------------------------------------------
 
-/// Open a live session on the server.
-pub fn open(server: &Server) -> LiveSession {
+/// What a live session on the server is opened with.
+pub fn connect_to(server: &Server) -> Connect {
     let (offer, handlers) = reading_client(
         "live test client",
         "0.1",
         Uuid([1; 16]),
         &["resqml20.*".to_string()],
     );
-    let connect = Connect {
+    Connect {
         endpoint: Endpoint::new(server.url.clone()),
         offer,
         handlers,
         max_message: None,
-    };
-    match LiveSession::connect(connect, LiveSettings::default()) {
+    }
+}
+
+/// Open a live session on the server.
+pub fn open(server: &Server) -> LiveSession {
+    match LiveSession::connect(connect_to(server), LiveSettings::default()) {
         Ok(session) => session,
         Err(why) => panic!("the live session should open: {why:?}"),
     }

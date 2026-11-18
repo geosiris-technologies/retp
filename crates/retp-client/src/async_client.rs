@@ -17,13 +17,14 @@ use std::task::{Poll, Waker};
 use std::time::SystemTime;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::{Event, Handler};
+use retp_proto::connection::{Event, Handler, Resumable};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer};
 use retp_proto::wire::{Delivery, Tolerance};
 
 use crate::caller::Caller;
 use crate::engine::Engine;
+use crate::resume::Came;
 use crate::source::{self, CredentialSource, Refused};
 use crate::{Acknowledged, ClientError, Clock, TransportError};
 
@@ -112,6 +113,30 @@ impl<C: Clock> AsyncClient<C> {
         credentials: Option<Credentials>,
     ) -> Result<Self, ClientError> {
         let engine = Engine::start(offer, handlers, credentials, clock.now())?;
+        Ok(Self::begin(engine, sink, clock))
+    }
+
+    /// Start a session by asking back the session `lost` (OSDU's
+    /// `ResumeSession`, ADR-0003): the `ResumeSession` goes to `sink` at once.
+    /// A server that gives it back opens the same session; one that does not
+    /// is asked a new session at once, on the same socket
+    /// ([`AsyncClient::came`] says which, once [`AsyncClient::opened`] says
+    /// it is open). `offer` and `handlers` are those `lost` was opened with,
+    /// and `credentials` this connection's own: nothing of the lost session's
+    /// authorization is carried over.
+    pub fn resume(
+        sink: Box<dyn Sink>,
+        clock: C,
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        lost: Resumable,
+    ) -> Result<Self, ClientError> {
+        let engine = Engine::resume(offer, handlers, credentials, lost, clock.now())?;
+        Ok(Self::begin(engine, sink, clock))
+    }
+
+    fn begin(engine: Engine, sink: Box<dyn Sink>, clock: C) -> Self {
         let client = Self {
             shared: Arc::new(Mutex::new(Shared {
                 engine,
@@ -121,7 +146,7 @@ impl<C: Clock> AsyncClient<C> {
             clock,
         };
         client.lock().flush();
-        Ok(client)
+        client
     }
 
     /// Over when the session is open - or could not be, and why.
@@ -418,6 +443,19 @@ impl<C: Clock> AsyncClient<C> {
     pub fn watermark(&self) -> Option<i64> {
         self.lock().engine.watermark()
     }
+
+    /// What to ask this session back with, if its connection is lost
+    /// ([`AsyncClient::resume`]): `None` until the session is open.
+    pub fn resumable(&self) -> Option<Resumable> {
+        self.lock().engine.resumable()
+    }
+
+    /// How the session came: given back by `ResumeSession`, or opened anew -
+    /// with the server's refusal, when [`AsyncClient::resume`] asked and was
+    /// refused.
+    pub fn came(&self) -> Came {
+        self.lock().engine.came()
+    }
 }
 
 impl<C: Clock> Caller for AsyncClient<C> {
@@ -463,6 +501,14 @@ impl<C: Clock> Caller for AsyncClient<C> {
 
     fn watermark(&self) -> Option<i64> {
         AsyncClient::watermark(self)
+    }
+
+    fn resumable(&self) -> Option<Resumable> {
+        AsyncClient::resumable(self)
+    }
+
+    fn came(&self) -> Came {
+        AsyncClient::came(self)
     }
 
     fn negotiated(&self) -> Negotiated {

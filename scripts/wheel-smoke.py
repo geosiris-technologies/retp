@@ -129,6 +129,8 @@ else:
     check(err is not None and "halve" in str(err), "a split of another word is refused (ValueError)")
     err = raised(lambda: session.push_epc("in.epc", "demo", reconnect=1, reconnect_pause=-1.0), ValueError)
     check(err is not None and "pause" in str(err), "a negative reconnect pause is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", resume_session=True), ValueError)
+    check(err is not None and "reconnect" in str(err), "resume_session without reconnect is refused (ValueError)")
     err = raised(lambda: session.push_epc("in.epc", "demo", journal=""), ValueError)
     check(err is not None and "journal" in str(err), "a journal that names no file is refused (ValueError)")
     check(session.reauthorize("t1") is None, "a REST session takes a renewed token")

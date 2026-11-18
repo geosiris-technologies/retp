@@ -13,10 +13,11 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::Event;
+use retp_proto::connection::{Event, Resumable};
 use retp_proto::negotiate::Negotiated;
 use retp_proto::wire::{Delivery, Tolerance};
 
+use crate::resume::Came;
 use crate::{Client, ClientError, Clock, Transport};
 
 /// A client an operation can run on.
@@ -118,6 +119,21 @@ pub trait Caller {
         None
     }
 
+    /// What to ask this session back with once its connection is lost -
+    /// OSDU's `ResumeSession` (ADR-0003, [`crate::resume::Connector::resume`]).
+    /// `None` on a caller with no session to ask back: the REST API has none.
+    fn resumable(&self) -> Option<Resumable> {
+        None
+    }
+
+    /// How the session came: given back by the server (OSDU's
+    /// `ResumeSession`), or opened anew - with the server's refusal, when it
+    /// was asked back and refused. A new session by default: whatever opens
+    /// no session the resuming way.
+    fn came(&self) -> Came {
+        Came::Fresh { refused: None }
+    }
+
     fn negotiated(&self) -> Negotiated;
 
     /// How the server's faults are taken.
@@ -170,6 +186,14 @@ impl<T: Transport, C: Clock> Caller for Client<T, C> {
 
     fn watermark(&self) -> Option<i64> {
         Client::watermark(self)
+    }
+
+    fn resumable(&self) -> Option<Resumable> {
+        Some(Client::resumable(self))
+    }
+
+    fn came(&self) -> Came {
+        Client::came(self)
     }
 
     fn negotiated(&self) -> Negotiated {

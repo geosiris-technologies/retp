@@ -964,6 +964,24 @@ impl crate::Caller for Remote {
         }
     }
 
+    fn resumable(&self) -> Option<retp_proto::connection::Resumable> {
+        match self {
+            Remote::Etp(client) => Some(client.resumable()),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().resumable(),
+            Remote::Rest(_) => None,
+        }
+    }
+
+    fn came(&self) -> crate::resume::Came {
+        match self {
+            Remote::Etp(client) => client.came(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().came(),
+            Remote::Rest(_) => crate::resume::Came::Fresh { refused: None },
+        }
+    }
+
     fn negotiated(&self) -> retp_proto::negotiate::Negotiated {
         match self {
             Remote::Etp(client) => crate::Caller::negotiated(client.as_ref()),
@@ -1063,6 +1081,77 @@ where
 
     fn connect(&mut self) -> Result<S, Box<dyn std::error::Error + Send + Sync>> {
         (self.0)().map_err(Into::into)
+    }
+
+    fn pause(&mut self, how_long: Duration) {
+        std::thread::sleep(how_long);
+    }
+}
+
+/// A [`Connector`](crate::resume::Connector) for the native transport that,
+/// when `ask` is on, first asks the server to give the lost session back -
+/// OSDU's `ResumeSession` (protocol 2400, CoreOSDU), an **extension** of
+/// ETP v1.2, which a server may not support (ADR-0003) - and opens a new
+/// session the whole way when it will not.
+///
+/// - `open` opens a session from the start - login, handshake, negotiation
+///   -, as [`Reopen`]'s does;
+/// - `resume` opens a new connection the whole way too - the probe, the
+///   login, **this connection's own credentials** - and asks the lost session
+///   back over it ([`connect_resuming`], `LiveSession::connect_resuming`),
+///   with the same offer `lost` was opened with. A server that refuses
+///   (`ENOT_FOUND`, *Session not found or expired*) or does not speak 2400
+///   is asked a new session at once on that connection; the session returned
+///   says which ([`Caller::came`](crate::Caller::came)). An attempt that
+///   fails outright - the connection would not open - is said, then `open`
+///   is called.
+///
+/// With `ask` off - the default of every caller of this crate - `resume` is
+/// never called, and this is [`Reopen`] exactly: no `ResumeSession` crosses
+/// the wire. On, a resumed session is still a session that knows nothing of
+/// what was in flight: the operation re-asks what a new one would.
+///
+/// **Caution** (OSDU's issue #232): nothing on the client side tells which
+/// rights the server applies to a resumed session. This client always sends
+/// its own credentials on the new connection, and relies on nothing of the
+/// lost one's authorization.
+pub struct Resuming<F, G> {
+    /// Opens a new session, from the start.
+    pub open: F,
+    /// Opens a new connection and asks the lost session back over it.
+    pub resume: G,
+    /// Whether to ask the server for the lost session at all.
+    pub ask: bool,
+}
+
+impl<F, G, S, E> crate::resume::Connector for Resuming<F, G>
+where
+    F: FnMut() -> Result<S, E>,
+    G: FnMut(retp_proto::connection::Resumable) -> Result<S, E>,
+    S: crate::caller::Blocking,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Session = S;
+
+    fn connect(&mut self) -> Result<S, Box<dyn std::error::Error + Send + Sync>> {
+        (self.open)().map_err(Into::into)
+    }
+
+    fn resume(
+        &mut self,
+        lost: &retp_proto::connection::Resumable,
+    ) -> Option<Result<(S, crate::resume::Came), Box<dyn std::error::Error + Send + Sync>>> {
+        if !self.ask {
+            return None;
+        }
+        Some(
+            (self.resume)(lost.clone())
+                .map(|session| {
+                    let came = crate::Caller::came(&session);
+                    (session, came)
+                })
+                .map_err(Into::into),
+        )
     }
 
     fn pause(&mut self, how_long: Duration) {

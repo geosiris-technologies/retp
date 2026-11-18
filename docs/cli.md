@@ -293,10 +293,44 @@ A push that stopped can start again, each with its own flag, all off by default:
   pause before the first is `--reconnect-pause` seconds (1 by default), and it
   doubles up to thirty seconds. An island the connection falls on twice in a
   row is halved. Not in the shell, which keeps its own session: there, push
-  again with `--journal`.
+  again with `--journal`;
+- `--resume-session`, with `--reconnect`, first asks the server to give the
+  lost session back, then opens a new session if it will not. See below.
 
 ```sh
 retp push wss://etp.example.com/etp model.epc demo --journal model.push.jsonl --split halve --reconnect 3
+```
+
+### Asking the server for the lost session (`--resume-session`)
+
+`--resume-session` is an **OSDU extension**, not ETP v1.2: OSDU's
+`ResumeSession` (protocol 2400, CoreOSDU), by which a client asks a server to
+give back the session whose connection fell, by its `sessionId`. It is **off by
+default**, means something only with `--reconnect`, and is refused by name
+without it and over `--rest`.
+
+On each reconnection the new connection is opened the whole way (probe, login,
+handshake) and its first message is `ResumeSession`. A server that gives the
+session back goes on with it; one that refuses (OSDU answers `ENOT_FOUND`,
+*Session not found or expired*) or does not speak protocol 2400 is asked a new
+session at once, on the same connection. Servers may well not support it: then
+the push goes on exactly as with `--reconnect` alone. Either way the
+interrupted island is sent again whole, since a resumed session restores what
+the session negotiated, not the requests that were in flight. The report says
+how each reconnection came back:
+
+```text
+reconnection 1: resumed, the server gave the lost session back
+reconnection 2: a new session, the lost one was not given back: ENOT_FOUND: Session not found or expired (11)
+```
+
+A caution: with OSDU's resume, nothing on the client side tells which rights
+the server applies to a resumed session (OSDU issue #232). `retp` always sends
+its own credentials on the new connection and relies on nothing of the lost
+session's authorization.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --journal model.push.jsonl --reconnect 3 --resume-session
 ```
 
 ## The client is tolerant of a server's mistakes

@@ -16,6 +16,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use retp_proto::connection::Resumable;
 use retp_proto::continuity::{Continuity, FullReloadNeeded};
 
 use crate::caller::Caller;
@@ -29,11 +30,20 @@ pub trait Connector {
     /// Open a new session - the whole way: login, handshake, negotiation.
     fn connect(&mut self) -> Result<Self::Session, Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Ask the server to take back the session it has just lost - OSDU's
-    /// extension, tried **before** a new session is opened (ADR-0003).
-    /// `None`, the default, means this connector does not offer it, and the
-    /// caller opens a fresh session; `Some(Err(…))` means it was tried and
-    /// refused, which is said and then followed by a fresh session.
+    /// Ask the server to take back the session `lost` - OSDU's extension,
+    /// tried **before** a new session is opened (ADR-0003). `lost` is what the
+    /// session that fell can be asked back with ([`Caller::resumable`]).
+    ///
+    /// - `None`, the default, means this connector does not offer it, and the
+    ///   caller opens a fresh session;
+    /// - `Some(Ok((session, came)))` is a session open on a new connection:
+    ///   [`Came::Resumed`] when the server gave the lost one back, or
+    ///   [`Came::Fresh`] with the server's refusal, when it refused and a new
+    ///   session was opened at once on the same connection (as
+    ///   `Connection::client_resuming` does);
+    /// - `Some(Err(…))` means the attempt failed - the connection would not
+    ///   open, or fell, or the session would not open on it -, which is said
+    ///   and then followed by a fresh session from [`Connector::connect`].
     ///
     /// # What OSDU's resume is, read in `open-etp-server`
     ///
@@ -66,8 +76,14 @@ pub trait Connector {
     /// The default below offers no resume: a connector that wants one
     /// overrides it, with `connect_resuming` - which still passes through the
     /// whole authorization, because what is copied from OSDU is its protocol,
-    /// not its hole (ADR-0003).
-    fn resume(&mut self) -> Option<Result<Self::Session, Box<dyn std::error::Error + Send + Sync>>> {
+    /// not its hole (ADR-0003). `native::Resuming` is that connector, off
+    /// unless asked.
+    #[allow(clippy::type_complexity)]
+    fn resume(
+        &mut self,
+        lost: &Resumable,
+    ) -> Option<Result<(Self::Session, Came), Box<dyn std::error::Error + Send + Sync>>> {
+        let _ = lost;
         None
     }
 
@@ -90,9 +106,10 @@ pub enum Came {
 }
 
 /// Open a session again after a cut, in the order ADR-0003 fixes: the
-/// server's own resume first when the connector offers one, a whole new
-/// session otherwise - or when the resume was refused, which is **said**
-/// rather than swallowed.
+/// server's own resume of `lost` first when the connector offers one, a
+/// whole new session otherwise - or when the resume was refused, which is
+/// **said** rather than swallowed. With no `lost` - the session that fell
+/// had none to ask back, a REST client's - no resume is tried.
 ///
 /// What this does **not** do is decide what to re-read: that is the
 /// watermark's business ([`Continuity::window`]), and the runner below hands
@@ -100,9 +117,10 @@ pub enum Came {
 /// nothing of what was in flight - on either path, as OSDU's own code says.
 pub fn reconnect<K: Connector>(
     connector: &mut K,
+    lost: Option<&Resumable>,
 ) -> Result<(K::Session, Came), Box<dyn std::error::Error + Send + Sync>> {
-    let refused = match connector.resume() {
-        Some(Ok(session)) => return Ok((session, Came::Resumed)),
+    let refused = match lost.and_then(|lost| connector.resume(lost)) {
+        Some(Ok(came_back)) => return Ok(came_back),
         Some(Err(why)) => Some(why.to_string()),
         None => None,
     };
@@ -323,13 +341,16 @@ where
     // What the session that is running knew, kept as it goes: once it is
     // gone, its watermark cannot be read any more (ADR-0003).
     let mut kept: Option<Continuity> = session.as_ref().and_then(kept_of);
+    // And what it can be asked back with, kept for the same reason: the
+    // server's own resume, when the connector offers one.
+    let mut lost: Option<Resumable> = session.as_ref().and_then(Caller::resumable);
     // Whether a session has been lost: the first opening of a run is not a
     // coming back, and there is nothing to ask a server to take back.
     let mut came_back = false;
     loop {
         let failed: String = match session.as_mut() {
             None => match if came_back {
-                reconnect(connector)
+                reconnect(connector, lost.as_ref())
             } else {
                 connector
                     .connect()
@@ -361,6 +382,7 @@ where
                         operation.resumed(&came, since);
                     }
                     kept = kept_of(&fresh);
+                    lost = fresh.resumable();
                     *session = Some(fresh);
                     continue;
                 }

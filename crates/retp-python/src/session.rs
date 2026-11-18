@@ -54,8 +54,8 @@ use retp_client::arrays::{
 };
 use retp_client::channels::{channel_metadata, get_ranges};
 use retp_client::login::{Choice, LoginError};
-use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote, Reopen};
-use retp_client::resume::Retry;
+use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote, Resuming};
+use retp_client::resume::{Came, Retry};
 use retp_client::{
     Blocking, ClientError, Ended, Opened, ResourceQuery, Transaction, blocking, commit_transaction,
     custom_data_json, custom_data_strings, custom_data_value, dataspace_uri, delete_data_objects,
@@ -63,6 +63,7 @@ use retp_client::{
     plain_text_warning, put_dataspaces, reading_client, rollback_transaction, start_transaction,
     writing_client,
 };
+use retp_proto::connection::Resumable;
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::Profile;
 use retp_types::datatypes::ErrorInfo;
@@ -553,6 +554,10 @@ pub struct PushReport {
     pub splits: Vec<SplitIsland>,
     /// How many new sessions were opened after the connection fell.
     pub reconnections: usize,
+    /// How each of them came back, in order
+    /// (`energyml_etp_store::push::Report::reopened`): resumed, or a new
+    /// session with why the resume did not serve, when one was asked.
+    pub reopened: Vec<Came>,
 }
 
 impl PushReport {
@@ -619,6 +624,7 @@ impl PushReport {
                 .collect(),
             splits: report.splits,
             reconnections: report.reconnections,
+            reopened: report.reopened,
         }
     }
 }
@@ -658,9 +664,18 @@ struct Recipe {
 /// session. With `rest`, the REST client instead (`native::rest_client`, as
 /// the command line's `open_rest`): nothing is opened, each request goes on
 /// its own.
-fn open_remote(recipe: &Recipe) -> Result<Remote, Failure> {
+///
+/// With `lost`, the live session asks the server for that session first -
+/// OSDU's `ResumeSession`, `LiveSession::connect_resuming` - over a
+/// connection opened the same way, with the recipe's own credentials.
+fn open_remote(recipe: &Recipe, lost: Option<Resumable>) -> Result<Remote, Failure> {
     let endpoint = recipe.endpoint.clone();
     if recipe.rest {
+        if lost.is_some() {
+            return Err(Failure::bad_argument(
+                "resume_session means nothing over REST: there is no session to ask back",
+            ));
+        }
         let mut client = native::rest_client(&endpoint);
         if let Some(at_once) = recipe.at_once {
             client = client.with_at_once(at_once);
@@ -687,15 +702,16 @@ fn open_remote(recipe: &Recipe) -> Result<Remote, Failure> {
     if let Some(at_once) = recipe.at_once {
         settings.at_once = at_once;
     }
-    let live = retp_client::live::LiveSession::connect(
-        Connect {
-            endpoint,
-            offer,
-            handlers,
-            max_message: None,
-        },
-        settings,
-    )?;
+    let connect = Connect {
+        endpoint,
+        offer,
+        handlers,
+        max_message: None,
+    };
+    let live = match lost {
+        None => retp_client::live::LiveSession::connect(connect, settings)?,
+        Some(lost) => retp_client::live::LiveSession::connect_resuming(connect, lost, settings)?,
+    };
     if let Some(seconds) = recipe.keepalive {
         live.client()
             .set_keepalive((seconds > 0).then(|| Duration::from_secs(seconds)));
@@ -723,7 +739,7 @@ impl Session {
             at_once,
             rest,
         };
-        let remote = open_remote(&recipe)?;
+        let remote = open_remote(&recipe, None)?;
         Ok(Session {
             remote: Some(remote),
             registry: Arc::new(energyml_schemas::all()),
@@ -950,7 +966,8 @@ impl Session {
     /// `push` builds from the same words (`retp-cli`'s `push_options`) - or,
     /// with `reconnect`, `push::push_resumable`, which opens this session
     /// again from what it was opened with when the connection falls, and
-    /// leaves the last one here.
+    /// leaves the last one here; with `resume_session` too, over
+    /// `native::Resuming`, which first asks the server for the lost session.
     fn push_store(
         &mut self,
         store: &EpcStore,
@@ -967,6 +984,11 @@ impl Session {
         let options = choices.options(&registry, only.as_deref());
         // A closed session is not opened again, reconnecting or not.
         self.remote()?;
+        if choices.resume_session && self.recipe.rest {
+            return Err(Failure::bad_argument(
+                "resume_session means nothing over REST: there is no session to ask back",
+            ));
+        }
         let report = if choices.reconnect == 0 {
             blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?
         } else {
@@ -975,7 +997,10 @@ impl Session {
                 choices.reconnect_pause.unwrap_or(Retry::default().first_pause),
             );
             let recipe = &self.recipe;
-            let mut connector = Reopen(|| open_remote(recipe));
+            let mut connector = choices.resuming(
+                || open_remote(recipe, None),
+                |lost| open_remote(recipe, Some(lost)),
+            );
             push_resumable(
                 &mut connector,
                 &mut self.remote,
@@ -1380,6 +1405,10 @@ pub struct PushChoices {
     /// The pause before the first new session (`--reconnect-pause`,
     /// [`pause_of`]); the runner's default when `None`.
     pub reconnect_pause: Option<Duration>,
+    /// On each new session, first ask the server to give the lost one back
+    /// (OSDU's `ResumeSession`, an extension a server may not support;
+    /// `--resume-session`). Off by default; needs `reconnect`.
+    pub resume_session: bool,
 }
 
 /// `split=` as a caller gives it: `None`, `"halve"` or `"single"`, the
@@ -1408,6 +1437,18 @@ pub fn pause_of(seconds: Option<f64>) -> Result<Option<Duration>, Failure> {
 }
 
 impl PushChoices {
+    /// What opens the sessions of a push that reconnects: the library's
+    /// `native::Resuming` over `open` and `resume`, which asks the server for
+    /// the lost session first when `resume_session` says so - the conversion
+    /// `retp-cli`'s `push_connector` makes of `--resume-session`.
+    pub fn resuming<F, G>(&self, open: F, resume: G) -> Resuming<F, G> {
+        Resuming {
+            open,
+            resume,
+            ask: self.resume_session,
+        }
+    }
+
     /// The library's options, from the words of the same names - the
     /// conversion `retp-cli`'s `push_options` makes of its flags.
     pub fn options<'a>(&'a self, registry: &'a Registry, only: Option<&'a [String]>) -> Options<'a> {
@@ -1468,6 +1509,11 @@ impl PushChoices {
         {
             return Err(Failure::bad_argument(
                 "journal names no file: leave it out to keep no journal",
+            ));
+        }
+        if self.resume_session && self.reconnect == 0 {
+            return Err(Failure::bad_argument(
+                "resume_session asks the server for the lost session when the push reconnects: give reconnect too",
             ));
         }
         Ok(())

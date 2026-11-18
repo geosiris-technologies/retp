@@ -8,6 +8,7 @@ use std::time::Duration;
 use energyml_etp_store::push::{
     Island, Options, Refusal, Report, SkipReason, Skipped, Split, SplitIsland, Stop, Stopped,
 };
+use retp_client::resume::Came;
 use retp_python::session::{Kind, PushChoices, PushReport, parse_split, pause_of};
 
 /// `split=` takes the command line's two words, and `None` is no split; any
@@ -125,6 +126,12 @@ fn the_report_carries_what_was_skipped_split_and_reopened() {
             refusals: vec![refusal.clone()],
         }],
         reconnections: 2,
+        reopened: vec![
+            Came::Resumed,
+            Came::Fresh {
+                refused: Some("ENOT_FOUND: Session not found or expired (11)".into()),
+            },
+        ],
         ..Report::default()
     };
     let flat = PushReport::of(report);
@@ -138,6 +145,16 @@ fn the_report_carries_what_was_skipped_split_and_reopened() {
     assert_eq!(flat.splits.len(), 1);
     assert_eq!(flat.splits[0].refusals, [refusal]);
     assert_eq!(flat.reconnections, 2);
+    assert_eq!(
+        flat.reopened,
+        [
+            Came::Resumed,
+            Came::Fresh {
+                refused: Some("ENOT_FOUND: Session not found or expired (11)".into()),
+            },
+        ],
+        "how each new session came back crosses as the library said it"
+    );
     assert_eq!(flat.islands[0].state, "committed");
     assert_eq!(flat.islands[1].state, "refused");
     let stopped = flat.stopped.as_deref().unwrap();
@@ -146,4 +163,36 @@ fn the_report_carries_what_was_skipped_split_and_reopened() {
         "{stopped}"
     );
     assert!(!flat.complete());
+}
+
+/// `resume_session=` is the library's `Resuming::ask`, off unless given;
+/// without `reconnect` it would mean nothing, and is refused by name.
+#[test]
+fn resume_session_is_the_connectors_ask_and_needs_reconnect() {
+    let open = || Ok::<(), ()>(());
+    let resume = |_lost: retp_proto::connection::Resumable| Ok::<(), ()>(());
+
+    let plain = PushChoices {
+        reconnect: 2,
+        ..PushChoices::default()
+    };
+    assert!(!plain.resume_session, "off unless asked");
+    assert!(!plain.resuming(open, resume).ask);
+    assert!(plain.check().is_ok());
+
+    let asked = PushChoices {
+        reconnect: 2,
+        resume_session: true,
+        ..PushChoices::default()
+    };
+    assert!(asked.resuming(open, resume).ask);
+    assert!(asked.check().is_ok());
+
+    let alone = PushChoices {
+        resume_session: true,
+        ..PushChoices::default()
+    };
+    let refused = alone.check().unwrap_err();
+    assert_eq!(refused.kind, Kind::BadArgument);
+    assert!(refused.message.contains("reconnect"), "{}", refused.message);
 }

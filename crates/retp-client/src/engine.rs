@@ -23,10 +23,11 @@ use retp_avro::EtpMessage;
 use retp_proto::connection::{Connection, Event, Handler, Resumable, State, Step};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer};
-use retp_proto::wire::{Delivery, Options, Place, Tolerance};
+use retp_proto::wire::{Delivery, Incident, Options, Place, Tolerance};
 
 use crate::TransportError;
 use crate::client::{Acknowledged, ClientError};
+use crate::resume::Came;
 
 /// A message to put on the transport, and the request it is, if one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +64,9 @@ pub struct Engine {
     ask_acknowledge: bool,
     awaiting_ack: BTreeMap<i64, (&'static str, i64)>,
     acknowledged: Vec<Acknowledged>,
+    /// The server's refusal of the `ResumeSession` this session was opened
+    /// after ([`Engine::came`]).
+    resume_refused: Option<Incident>,
 }
 
 impl Engine {
@@ -108,6 +112,7 @@ impl Engine {
             ask_acknowledge: false,
             awaiting_ack: BTreeMap::new(),
             acknowledged: Vec::new(),
+            resume_refused: None,
         };
         let start = engine.connection.start(now);
         engine.take_step(start, now);
@@ -123,6 +128,19 @@ impl Engine {
     /// Whether the session was given back by `ResumeSession`, not opened anew.
     pub fn resumed(&self) -> bool {
         self.connection.resumed()
+    }
+
+    /// How the session came: given back by `ResumeSession`, or opened anew -
+    /// with the server's words, when it was opened anew because it refused
+    /// to give the lost one back ([`Engine::resume`]).
+    pub fn came(&self) -> Came {
+        if self.resumed() {
+            Came::Resumed
+        } else {
+            Came::Fresh {
+                refused: self.resume_refused.as_ref().map(ToString::to_string),
+            }
+        }
     }
 
     /// How the opening went: `None` while it goes on. Asked again, the same
@@ -522,6 +540,7 @@ impl Engine {
                 // opening goes on, and the refusal is said.
                 Event::ResumeRefused(incident) => {
                     tracing::warn!(target: "retp_client", "the lost session was not given back ({incident}): a new session is opened");
+                    self.resume_refused = Some(incident);
                 }
                 other => self.unsolicited.push_back(other),
             }

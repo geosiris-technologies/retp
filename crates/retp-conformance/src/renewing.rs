@@ -166,6 +166,14 @@ where
         self.inner.watermark()
     }
 
+    fn resumable(&self) -> Option<retp_proto::connection::Resumable> {
+        self.inner.resumable()
+    }
+
+    fn came(&self) -> retp_client::resume::Came {
+        self.inner.came()
+    }
+
     fn negotiated(&self) -> Negotiated {
         self.inner.negotiated()
     }

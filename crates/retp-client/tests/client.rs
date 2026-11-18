@@ -1369,11 +1369,19 @@ impl Connector for Connections {
 
     fn resume(
         &mut self,
-    ) -> Option<Result<Client<Loopback, ManualClock>, Box<dyn std::error::Error + Send + Sync>>> {
+        _lost: &retp_proto::connection::Resumable,
+    ) -> Option<
+        Result<
+            (Client<Loopback, ManualClock>, retp_client::resume::Came),
+            Box<dyn std::error::Error + Send + Sync>,
+        >,
+    > {
         let answer = self.resume.clone()?;
         self.resumes += 1;
         Some(match answer {
-            Ok(()) => self.connect(),
+            Ok(()) => self
+                .connect()
+                .map(|session| (session, retp_client::resume::Came::Resumed)),
             Err(why) => Err(why.into()),
         })
     }

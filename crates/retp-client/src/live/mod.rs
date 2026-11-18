@@ -68,6 +68,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
+use retp_proto::connection::Resumable;
 use retp_proto::credentials::Credentials;
 use retp_proto::probe::{self, HandshakeSettings};
 use retp_proto::wire::EtpError;
@@ -155,7 +156,26 @@ impl LiveSession {
     /// Open the connection as `native::connect` does, start the session task on a thread of its
     /// own (a current-thread tokio runtime), and return once the session is open (or refused).
     pub fn connect(connect: Connect, settings: LiveSettings) -> Result<LiveSession, ClientError> {
-        Self::open(connect, settings)
+        Self::open(connect, settings, None)
+    }
+
+    /// [`LiveSession::connect`], asking back over the new connection the
+    /// session `lost`, which another connection held - OSDU's `ResumeSession`
+    /// (protocol 2400, an extension, ADR-0003). A server that gives it back
+    /// opens the same session; one that refuses, or does not speak 2400, is
+    /// asked a new session at once on the same connection. Which one it was,
+    /// and why, is [`AsyncClient::came`] of [`LiveSession::client`].
+    ///
+    /// `connect` is what `lost` was opened with - the same offer and handlers
+    /// -, and its credentials are this connection's own: the new connection
+    /// is authorized for itself, and nothing of the lost session's
+    /// authorization is carried over (OSDU's issue #232).
+    pub fn connect_resuming(
+        connect: Connect,
+        lost: Resumable,
+        settings: LiveSettings,
+    ) -> Result<LiveSession, ClientError> {
+        Self::open(connect, settings, Some(lost))
     }
 
     /// [`LiveSession::connect`] with credentials from a [`CredentialSource`] in place of
@@ -178,7 +198,7 @@ impl LiveSession {
         let mut attempt = |fresh: &Fresh| {
             let mut connect = make();
             connect.endpoint.credentials = Some(fresh.credentials.clone());
-            match Self::open(connect, settings.clone()) {
+            match Self::open(connect, settings.clone(), None) {
                 Ok(session) => Attempt::Open(Box::new(session)),
                 Err(ClientError::HandshakeRefused {
                     status: 401,
@@ -209,7 +229,11 @@ impl LiveSession {
         Ok(*session)
     }
 
-    fn open(connect: Connect, settings: LiveSettings) -> Result<LiveSession, ClientError> {
+    fn open(
+        connect: Connect,
+        settings: LiveSettings,
+        lost: Option<Resumable>,
+    ) -> Result<LiveSession, ClientError> {
         let handshake_settings = HandshakeSettings {
             max_message: connect.max_message,
             max_frame: None,
@@ -230,13 +254,24 @@ impl LiveSession {
         // until the client (which is `Send`) carries them: the first message
         // only waits in the queue until the task has the socket.
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
-        let client = AsyncClient::start(
-            Box::new(task::QueueSink(out_tx)),
-            SystemClock,
-            connect.offer,
-            connect.handlers,
-            connect.endpoint.credentials,
-        )?;
+        let sink = Box::new(task::QueueSink(out_tx));
+        let client = match lost {
+            None => AsyncClient::start(
+                sink,
+                SystemClock,
+                connect.offer,
+                connect.handlers,
+                connect.endpoint.credentials,
+            )?,
+            Some(lost) => AsyncClient::resume(
+                sink,
+                SystemClock,
+                connect.offer,
+                connect.handlers,
+                connect.endpoint.credentials,
+                lost,
+            )?,
+        };
         if let Some(period) = settings.keepalive {
             client.set_keepalive(Some(period));
         }

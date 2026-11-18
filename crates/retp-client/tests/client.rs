@@ -3282,6 +3282,18 @@ fn rest_dataspace_custom_data_reads_back_as_written() {
     );
 }
 
+/// **A quote in a dataspace's path is written twice in its URI** (ETP v1.2
+/// section 25.3.10): `carl's` travels as `carl''s`, and reads back as itself.
+#[test]
+fn a_quote_in_a_dataspace_path_is_written_twice() {
+    assert_eq!(
+        retp_client::dataspace_uri("carl's/teapot"),
+        "eml:///dataspace('carl''s/teapot')"
+    );
+    assert_eq!(retp_client::dataspace_uri("demo"), "eml:///dataspace('demo')");
+    assert_eq!(retp_client::dataspace_uri(""), "eml:///");
+}
+
 /// A list given as a list stays that list, commas and all; the text form
 /// keeps the command line's rule.
 #[test]

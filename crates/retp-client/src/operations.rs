@@ -1059,14 +1059,16 @@ pub fn get_data_objects<K: Blocking>(
 
 /// The canonical URI of a dataspace given by its path - `demo`,
 /// `carl/teapot` - or `path_or_uri` itself when it is a URI already. An empty
-/// path is the default dataspace, `eml:///`.
+/// path is the default dataspace, `eml:///`. A quote in the path is written
+/// twice (ETP v1.2 section 25.3.10): `EtpUri::dataspace_uri`, the one place
+/// a dataspace URI is spelt.
 pub fn dataspace_uri(path_or_uri: &str) -> String {
     if path_or_uri.starts_with("eml:") {
         path_or_uri.to_string()
     } else if path_or_uri.is_empty() {
         "eml:///".to_string()
     } else {
-        format!("eml:///dataspace('{path_or_uri}')")
+        energyml_core::identifiers::EtpUri::dataspace_uri(Some(path_or_uri))
     }
 }
 

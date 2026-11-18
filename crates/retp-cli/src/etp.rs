@@ -802,6 +802,46 @@ struct PushArgs {
     /// PutDataArrays of several arrays, or to see what one alone provokes.
     #[arg(long)]
     one_by_one: bool,
+    /// Leave out the objects the dataspace holds already: listed there under
+    /// the same URI, each of their arrays there with the same dimensions.
+    /// Their content is not compared. A listing the store cuts short stops
+    /// the push before anything is written.
+    #[arg(long)]
+    skip_present: bool,
+    /// Record each island in this file (JSON Lines) as it commits; run again
+    /// with the same file, the push leaves out what it records. A journal
+    /// written for another package, another selection of it or another
+    /// dataspace is refused.
+    #[arg(long, value_name = "FILE")]
+    journal: Option<PathBuf>,
+    /// When the store refuses an island as a whole, send it again split: in
+    /// two halves, again and again down to one object (`halve`), or one
+    /// object per transaction (`single`). A cycle of objects is never split.
+    /// Without it, the push stops at the refused island.
+    #[arg(long, value_enum, value_name = "HOW")]
+    split: Option<SplitArg>,
+    /// How many times the pieces of one island may be split again.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    split_limit: u32,
+    /// When the connection falls, open a new session (the whole way, login
+    /// included) and go on from the first island not committed, sent again
+    /// whole - at most N times in a row; an island the connection falls on
+    /// twice in a row is halved. 0 stops at the fall. Not in the shell.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    reconnect: u32,
+    /// Seconds before the first new session; the pause doubles after each
+    /// fall in a row, up to 30 seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
+    reconnect_pause: f64,
+}
+
+/// How `push --split` cuts a refused island.
+#[derive(Clone, Copy, ValueEnum)]
+enum SplitArg {
+    /// In two halves, each halved again if refused.
+    Halve,
+    /// One object (or one cycle) per transaction.
+    Single,
 }
 
 /// What `watch` takes.
@@ -1019,7 +1059,11 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
                 json: args.json || server.rest,
                 ..args
             };
-            one_shot_writing(&server, |session| push_epc(session, &args))
+            if args.reconnect > 0 {
+                push_epc_reconnecting(&server, &args)
+            } else {
+                one_shot_writing(&server, |session| push_epc(session, &args))
+            }
         }
         EtpCommand::Shell(server) => shell(server, yes),
         EtpCommand::Catalog { command } => catalog_cli::run_catalog(command),
@@ -1135,26 +1179,51 @@ fn delete_dataspace(session: &mut Session, dataspace: &str) -> Result<bool> {
     Ok(complete)
 }
 
-/// An EPC into a dataspace: `energyml_etp_store::push`, with the package
-/// as the source. The exit code says whether everything went.
-fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
-    use energyml_etp_store::push::{
-        Budget, Options, Progress as PushProgress, Stop, WellKnown, WriteFormat, chosen, push,
-    };
+/// What `push` reads before any session: the package, and the URIs `--only`
+/// names in it.
+struct PushSource {
+    registry: std::sync::Arc<energyml_core::registry::Registry>,
+    store: energyml_storage::EpcStore,
+    only: Option<Vec<String>>,
+}
+
+impl PushSource {
+    fn open(args: &PushArgs) -> Result<Self> {
+        let registry = std::sync::Arc::new(energyml_schemas::all());
+        let store = energyml_storage::EpcStore::open(&args.epc, registry.clone())
+            .with_context(|| format!("opening {}", args.epc.display()))?;
+        // `--only`: URIs or uuids, matched against the package's own URIs by the
+        // library (`push::chosen`).
+        let only: Option<Vec<String>> = if args.only.is_empty() {
+            None
+        } else {
+            Some(
+                retp_client::blocking(energyml_etp_store::push::chosen(&store, &args.only))
+                    .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?,
+            )
+        };
+        Ok(PushSource {
+            registry,
+            store,
+            only,
+        })
+    }
+
+    /// The library's options, from the flags of the same names.
+    fn options<'a>(&'a self, args: &'a PushArgs) -> energyml_etp_store::push::Options<'a> {
+        push_options(args, &self.registry, self.only.as_deref())
+    }
+}
+
+/// The library's options, from the flags of the same names - a conversion,
+/// no decision.
+fn push_options<'a>(
+    args: &'a PushArgs,
+    registry: &'a energyml_core::registry::Registry,
+    only: Option<&'a [String]>,
+) -> energyml_etp_store::push::Options<'a> {
+    use energyml_etp_store::push::{Budget, Options, Split, WellKnown, WriteFormat};
     use retp_client::arrays::Grouping;
-    let registry = std::sync::Arc::new(energyml_schemas::all());
-    let store = energyml_storage::EpcStore::open(&args.epc, registry.clone())
-        .with_context(|| format!("opening {}", args.epc.display()))?;
-    // `--only`: URIs or uuids, matched against the package's own URIs by the
-    // library (`push::chosen`).
-    let only: Option<Vec<String>> = if args.only.is_empty() {
-        None
-    } else {
-        Some(
-            retp_client::blocking(chosen(&store, &args.only))
-                .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?,
-        )
-    };
     let mut budget = Budget::default();
     if let Some(objects) = args.objects {
         budget.objects = objects;
@@ -1162,7 +1231,7 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     if let Some(bytes) = args.bytes {
         budget.bytes = bytes;
     }
-    let options = Options {
+    Options {
         budget,
         format: if args.json {
             WriteFormat::Json
@@ -1170,11 +1239,11 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
             WriteFormat::Xml
         },
         well_known: if args.well_known {
-            WellKnown::Push(&registry)
+            WellKnown::Push(registry)
         } else {
             WellKnown::Leave
         },
-        only: only.as_deref(),
+        only,
         grouping: if args.one_by_one {
             Grouping::OneByOne
         } else {
@@ -1185,21 +1254,109 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
         // from the server, is the one that checks.
         expected: None,
         overwrite: false,
-        ..Options::default()
-    };
-    let report = retp_client::blocking(push(
+        skip_present: args.skip_present,
+        journal: args.journal.as_deref(),
+        split: match args.split {
+            None => Split::Off,
+            Some(SplitArg::Halve) => Split::Halve,
+            Some(SplitArg::Single) => Split::Single,
+        },
+        split_limit: args.split_limit,
+    }
+}
+
+/// An EPC into a dataspace over one session: `energyml_etp_store::push`,
+/// with the package as the source. The exit code says whether everything
+/// went. `--reconnect` opens sessions of its own, which a shell keeps for
+/// itself: refused here, by name.
+fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
+    if args.reconnect > 0 {
+        anyhow::bail!(
+            "--reconnect opens new sessions, and the shell keeps its own: run `retp push` on its own line, or push again with --journal"
+        );
+    }
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let report = retp_client::blocking(energyml_etp_store::push::push(
         session,
-        &store,
+        &source.store,
         &args.dataspace,
         &options,
-        |event| match event {
-            PushProgress::Planned { islands, objects } => {
-                eprintln!("plan	{islands} island(s), {objects} object(s)")
-            }
-            PushProgress::Sent { island, of } => eprintln!("sent	island {}/{of}", island + 1),
-            PushProgress::Split { island, into } => eprintln!("split	island {} into {into}", island + 1),
-        },
+        said_push_progress,
     ))?;
+    Ok(said_push_report(&report))
+}
+
+/// `push` on its own line with `--reconnect`: `push_resumable` opens a new
+/// session when the connection falls, the whole way, with the login of the
+/// command line - a token obtained again when the line names how.
+fn push_epc_reconnecting(server: &Server, args: &PushArgs) -> Result<ExitCode> {
+    use energyml_etp_store::push::{push_resumable, reconnecting};
+    let pause = std::time::Duration::try_from_secs_f64(args.reconnect_pause)
+        .map_err(|why| anyhow::anyhow!("--reconnect-pause {} is not a pause: {why}", args.reconnect_pause))?;
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let mut connector = Reopen(|| server.open_for(true));
+    let mut session = None;
+    let report = push_resumable(
+        &mut connector,
+        &mut session,
+        &source.store,
+        &args.dataspace,
+        &options,
+        &reconnecting(args.reconnect, pause),
+        |event| match event {
+            RunEvent::Progress(progress) => said_push_progress(progress),
+            RunEvent::Setback(Setback::Reconnecting {
+                step,
+                attempt,
+                max,
+                pause,
+                why,
+            }) => eprintln!(
+                "{step}: {why} - a new session in {} s (failure {attempt} of {max})",
+                pause.as_secs_f64()
+            ),
+            RunEvent::Setback(Setback::Halved { step }) => {
+                eprintln!("the connection keeps falling on one island: halved, now {step}")
+            }
+            RunEvent::Setback(Setback::Reopened { resumed, refused, .. }) => {
+                if let Some(why) = refused {
+                    eprintln!("the server would not take the session back ({why})");
+                }
+                if resumed {
+                    eprintln!("the server took the lost session back; the island goes again, whole")
+                } else {
+                    eprintln!("a new session, from the probe; the island goes again, whole")
+                }
+            }
+        },
+    );
+    if let Some(mut open) = session {
+        said_acknowledgements(&mut open);
+        let _ = open.close("done");
+    }
+    Ok(if said_push_report(&report?) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn said_push_progress(event: energyml_etp_store::push::Progress) {
+    use energyml_etp_store::push::Progress as PushProgress;
+    match event {
+        PushProgress::Planned { islands, objects } => {
+            eprintln!("plan	{islands} island(s), {objects} object(s)")
+        }
+        PushProgress::Sent { island, of } => eprintln!("sent	island {}/{of}", island + 1),
+        PushProgress::Split { island, into } => eprintln!("split	island {} into {into}", island + 1),
+    }
+}
+
+/// The report of a push, printed; whether everything went.
+fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
+    use energyml_etp_store::push::{SkipReason, Stop};
     for (rank, island) in report.islands.iter().enumerate() {
         let state = if rank < report.sent {
             "committed"
@@ -1223,6 +1380,28 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
         for uri in &island.uris {
             println!("	{uri}");
         }
+    }
+    for skipped in &report.skipped {
+        let why = match skipped.why {
+            SkipReason::Present => "the dataspace holds it already",
+            SkipReason::Journal => "the journal says it committed",
+        };
+        eprintln!("skipped: {}: {why}", skipped.uri);
+    }
+    for split in &report.splits {
+        eprintln!(
+            "split: island {} ({} object(s)) into {}: {}",
+            split.island + 1,
+            split.uris.len(),
+            split.into,
+            split.why
+        );
+    }
+    if report.reconnections > 0 {
+        eprintln!(
+            "{} new session(s) after the connection fell",
+            report.reconnections
+        );
     }
     if report.without_transactions {
         eprintln!(
@@ -1259,8 +1438,17 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
             None => eprintln!("refused: {what}: {}", refused.message),
         }
     }
-    println!("{} of {} island(s) committed", report.sent, report.islands.len());
-    Ok(report.stopped.is_none() && report.left_out.is_empty())
+    if report.skipped.is_empty() {
+        println!("{} of {} island(s) committed", report.sent, report.islands.len());
+    } else {
+        println!(
+            "{} of {} island(s) committed, {} object(s) there already",
+            report.sent,
+            report.islands.len(),
+            report.skipped.len()
+        );
+    }
+    report.stopped.is_none() && report.left_out.is_empty()
 }
 
 /// Open a session, do one thing, close it: the exit code says whether the
@@ -2483,6 +2671,57 @@ mod tests {
         }
         Etp::command().debug_assert();
         Line::command().debug_assert();
+    }
+
+    /// `push`'s flags reach the library's options under the same meaning,
+    /// and none given is the library's default: a push as it always went.
+    #[test]
+    fn the_push_flags_are_the_librarys_options() {
+        use energyml_etp_store::push::{Options, Split};
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let args_of = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            match Etp::try_parse_from(words).unwrap().command {
+                EtpCommand::Push { args, .. } => args,
+                _ => unreachable!("a push was parsed"),
+            }
+        };
+        let registry = energyml_schemas::all();
+
+        let plain = args_of(&[]);
+        let options = super::push_options(&plain, &registry, None);
+        let default = Options::default();
+        assert!(!options.skip_present && options.journal.is_none());
+        assert_eq!(options.split, default.split);
+        assert_eq!(options.split_limit, default.split_limit);
+        assert_eq!(plain.reconnect, 0, "no reconnection unless asked");
+
+        for (word, split) in [("halve", Split::Halve), ("single", Split::Single)] {
+            let asked = args_of(&[
+                "--skip-present",
+                "--journal",
+                "push.jsonl",
+                "--split",
+                word,
+                "--split-limit",
+                "3",
+                "--reconnect",
+                "2",
+                "--reconnect-pause",
+                "0.5",
+            ]);
+            let options = super::push_options(&asked, &registry, None);
+            assert!(options.skip_present);
+            assert_eq!(options.journal, Some(std::path::Path::new("push.jsonl")));
+            assert_eq!(options.split, split, "--split {word}");
+            assert_eq!(options.split_limit, 3);
+            assert_eq!((asked.reconnect, asked.reconnect_pause), (2, 0.5));
+        }
     }
 
     /// ETP's URIs carry single quotes: they stay, unquoted; double quotes

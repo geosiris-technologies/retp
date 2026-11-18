@@ -34,7 +34,7 @@ retp-client = { workspace = true, features = ["live"] }
 retp-catalog = { workspace = true }
 # The shell's line editor (feature `editor`): history, editing, what arrives
 # printed above the prompt.
-rustyline = { version = "18", optional = true }
+rustyline = { version = "19", optional = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }

@@ -34,13 +34,17 @@
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use energyml_core::identifiers::{EtpUri, QualifiedType, normalize_uuid};
 use energyml_core::registry::{ReadMode, Registry};
 use energyml_etp_store::pack::{Packed, Wanted, pack};
-use energyml_etp_store::push::{Budget, Options, Refusal, Stop, WellKnown, WriteFormat, chosen, push};
+use energyml_etp_store::push::{
+    Budget, Options, Refusal, SkipReason, Split, SplitIsland, Stop, WellKnown, WriteFormat, chosen, push,
+    push_resumable, reconnecting,
+};
 use energyml_etp_store::{DEFAULT_MESSAGE, read_object};
 use energyml_storage::EpcStore;
 use energyml_storage::storage::EnergymlStorage;
@@ -50,7 +54,8 @@ use retp_client::arrays::{
 };
 use retp_client::channels::{channel_metadata, get_ranges};
 use retp_client::login::{Choice, LoginError};
-use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote};
+use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Remote, Reopen};
+use retp_client::resume::Retry;
 use retp_client::{
     Blocking, ClientError, Ended, Opened, ResourceQuery, Transaction, blocking, commit_transaction,
     custom_data_json, custom_data_strings, custom_data_value, dataspace_uri, delete_data_objects,
@@ -221,9 +226,10 @@ impl From<ArrayFailure> for Failure {
 ///
 /// **The token is consumed by [`ConnectOptions::endpoint`]**, which turns it
 /// into `retp_proto::credentials::Credentials` (whose `Debug` hides the
-/// secret) and keeps nothing else. There is deliberately no `Debug` here, and
-/// [`Session`] holds no copy of it. The same holds for every secret of
-/// [`ConnectOptions::login`].
+/// secret) and keeps nothing else. There is deliberately no `Debug` here.
+/// [`Session`] keeps those credentials, and only those, to open the session
+/// again for a push that reconnects; it keeps no password nor client secret
+/// of [`ConnectOptions::login`], and nothing of it crosses to Python.
 #[derive(Default)]
 pub struct ConnectOptions {
     /// `ws://` or `wss://` URL of the ETP endpoint; with [`ConnectOptions::rest`],
@@ -538,6 +544,15 @@ pub struct PushReport {
     /// Every object or array of the island that stopped that the store
     /// refused, with its code (`energyml_etp_store::push::Report::refusals`).
     pub refusals: Vec<Refusal>,
+    /// The objects not sent because they are there already, by their URI in
+    /// the destination, with how that is known: `present` (the dataspace
+    /// holds them) or `journal` (the journal records them).
+    pub skipped: Vec<(String, &'static str)>,
+    /// Each island split and sent as pieces in its place
+    /// (`energyml_etp_store::push::Report::splits`).
+    pub splits: Vec<SplitIsland>,
+    /// How many new sessions were opened after the connection fell.
+    pub reconnections: usize,
 }
 
 impl PushReport {
@@ -547,7 +562,9 @@ impl PushReport {
         self.stopped.is_none() && self.left_out.is_empty()
     }
 
-    fn of(report: energyml_etp_store::push::Report) -> Self {
+    /// The library's report, flattened: each island with its state, the
+    /// stop in a sentence, the reasons of the skipped objects as words.
+    pub fn of(report: energyml_etp_store::push::Report) -> Self {
         let islands = report
             .islands
             .iter()
@@ -589,6 +606,19 @@ impl PushReport {
             without_transactions: report.without_transactions,
             stopped,
             refusals: report.refusals,
+            skipped: report
+                .skipped
+                .into_iter()
+                .map(|one| {
+                    let why = match one.why {
+                        SkipReason::Present => "present",
+                        SkipReason::Journal => "journal",
+                    };
+                    (one.uri, why)
+                })
+                .collect(),
+            splits: report.splits,
+            reconnections: report.reconnections,
         }
     }
 }
@@ -604,16 +634,77 @@ pub struct Session {
     url: String,
     writing: bool,
     warnings: Vec<String>,
+    /// What it was opened from, for a push that opens it again
+    /// (`PushChoices::reconnect`).
+    recipe: Recipe,
+}
+
+/// What a session is opened from: the endpoint - with the credentials it
+/// was opened with, or the last ones [`Session::reauthorize`] had accepted -
+/// and the choices of `connect`. Kept so that a push that reconnects opens
+/// the same session again, the whole way; nothing of it crosses to Python.
+struct Recipe {
+    endpoint: Endpoint,
+    types: Vec<String>,
+    writing: bool,
+    keepalive: Option<u64>,
+    at_once: Option<usize>,
+    rest: bool,
+}
+
+/// Open a session from its recipe: the CLI's own steps (`retp-cli`'s
+/// `Server::open_for`) - an offer (`reading_client` / `writing_client`),
+/// fitted to what the server announces when no type was named, then a live
+/// session. With `rest`, the REST client instead (`native::rest_client`, as
+/// the command line's `open_rest`): nothing is opened, each request goes on
+/// its own.
+fn open_remote(recipe: &Recipe) -> Result<Remote, Failure> {
+    let endpoint = recipe.endpoint.clone();
+    if recipe.rest {
+        let mut client = native::rest_client(&endpoint);
+        if let Some(at_once) = recipe.at_once {
+            client = client.with_at_once(at_once);
+        }
+        return Ok(Remote::Rest(Box::new(client)));
+    }
+    let types = &recipe.types;
+    let (name, version, id) = (APPLICATION_NAME, env!("CARGO_PKG_VERSION"), native::random_uuid());
+    let (offer, handlers) = if recipe.writing {
+        writing_client(name, version, id, types)
+    } else {
+        reading_client(name, version, id, types)
+    };
+    // No type named: whatever the server announces is asked for too.
+    let offer = if types.is_empty() {
+        native::fit_to_server(&endpoint, offer).0
+    } else {
+        offer
+    };
+    // A live session: driven by a task of its own, so that what the server
+    // sends unasked (`Session.subscribe`) arrives while Python does
+    // something else, and nothing has to poll.
+    let mut settings = retp_client::live::LiveSettings::default();
+    if let Some(at_once) = recipe.at_once {
+        settings.at_once = at_once;
+    }
+    let live = retp_client::live::LiveSession::connect(
+        Connect {
+            endpoint,
+            offer,
+            handlers,
+            max_message: None,
+        },
+        settings,
+    )?;
+    if let Some(seconds) = recipe.keepalive {
+        live.client()
+            .set_keepalive((seconds > 0).then(|| Duration::from_secs(seconds)));
+    }
+    Ok(Remote::Live(Box::new(live)))
 }
 
 impl Session {
-    /// Open a session: the CLI's own steps (`retp-cli`'s `Server::open_for`) -
-    /// an offer (`reading_client` / `writing_client`), fitted to what the
-    /// server announces when no type was named, then `native::connect`.
-    ///
-    /// With `rest`, the REST client instead (`native::rest_client`, as the
-    /// command line's `open_rest`): nothing is opened, each request goes on
-    /// its own.
+    /// Open a session ([`open_remote`]), and keep what it was opened from.
     pub fn open(options: ConnectOptions) -> Result<Self, Failure> {
         let (types, keepalive, at_once, writing, rest) = (
             options.types.clone(),
@@ -624,57 +715,22 @@ impl Session {
         );
         let url = options.url.clone();
         let (endpoint, warnings) = options.endpoint()?;
-        if rest {
-            let mut client = native::rest_client(&endpoint);
-            if let Some(at_once) = at_once {
-                client = client.with_at_once(at_once);
-            }
-            return Ok(Session {
-                remote: Some(Remote::Rest(Box::new(client))),
-                registry: Arc::new(energyml_schemas::all()),
-                url,
-                writing,
-                warnings,
-            });
-        }
-        let (name, version, id) = (APPLICATION_NAME, env!("CARGO_PKG_VERSION"), native::random_uuid());
-        let (offer, handlers) = if writing {
-            writing_client(name, version, id, &types)
-        } else {
-            reading_client(name, version, id, &types)
+        let recipe = Recipe {
+            endpoint,
+            types,
+            writing,
+            keepalive,
+            at_once,
+            rest,
         };
-        // No type named: whatever the server announces is asked for too.
-        let offer = if types.is_empty() {
-            native::fit_to_server(&endpoint, offer).0
-        } else {
-            offer
-        };
-        // A live session: driven by a task of its own, so that what the server
-        // sends unasked (`Session.subscribe`) arrives while Python does
-        // something else, and nothing has to poll.
-        let mut settings = retp_client::live::LiveSettings::default();
-        if let Some(at_once) = at_once {
-            settings.at_once = at_once;
-        }
-        let live = retp_client::live::LiveSession::connect(
-            Connect {
-                endpoint,
-                offer,
-                handlers,
-                max_message: None,
-            },
-            settings,
-        )?;
-        if let Some(seconds) = keepalive {
-            live.client()
-                .set_keepalive((seconds > 0).then(|| Duration::from_secs(seconds)));
-        }
+        let remote = open_remote(&recipe)?;
         Ok(Session {
-            remote: Some(Remote::Live(Box::new(live))),
+            remote: Some(remote),
             registry: Arc::new(energyml_schemas::all()),
             url,
             writing,
             warnings,
+            recipe,
         })
     }
 
@@ -891,7 +947,10 @@ impl Session {
     }
 
     /// `energyml_etp_store::push::push` with the options the command line's
-    /// `push-epc` builds from the same words (`retp-cli`'s `push_epc`).
+    /// `push` builds from the same words (`retp-cli`'s `push_options`) - or,
+    /// with `reconnect`, `push::push_resumable`, which opens this session
+    /// again from what it was opened with when the connection falls, and
+    /// leaves the last one here.
     fn push_store(
         &mut self,
         store: &EpcStore,
@@ -905,37 +964,28 @@ impl Session {
         };
         // Its own handle: the options borrow it while the session is borrowed to send.
         let registry = self.registry.clone();
-        let mut budget = Budget::default();
-        if let Some(objects) = choices.objects {
-            budget.objects = objects;
-        }
-        if let Some(bytes) = choices.bytes {
-            budget.bytes = bytes;
-        }
-        let options = Options {
-            budget,
-            format: if choices.json {
-                WriteFormat::Json
-            } else {
-                WriteFormat::Xml
-            },
-            well_known: if choices.well_known {
-                WellKnown::Push(&registry)
-            } else {
-                WellKnown::Leave
-            },
-            only: only.as_deref(),
-            grouping: if choices.one_by_one {
-                Grouping::OneByOne
-            } else {
-                Grouping::Together
-            },
-            // A file knows no `storeLastWrite`: nothing to compare against.
-            expected: None,
-            overwrite: false,
-            ..Options::default()
+        let options = choices.options(&registry, only.as_deref());
+        // A closed session is not opened again, reconnecting or not.
+        self.remote()?;
+        let report = if choices.reconnect == 0 {
+            blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?
+        } else {
+            let retry = reconnecting(
+                choices.reconnect,
+                choices.reconnect_pause.unwrap_or(Retry::default().first_pause),
+            );
+            let recipe = &self.recipe;
+            let mut connector = Reopen(|| open_remote(recipe));
+            push_resumable(
+                &mut connector,
+                &mut self.remote,
+                source,
+                dataspace,
+                &options,
+                &retry,
+                |_event| {},
+            )?
         };
-        let report = blocking(push(self.remote()?, source, dataspace, &options, |_progress| {}))?;
         Ok(PushReport::of(report))
     }
 
@@ -944,10 +994,15 @@ impl Session {
     /// on the open session (ETP v1.2 section 3.13.5) - a refusal raises
     /// `AuthorizationNeeded` and the session stays open; over REST, the token
     /// of every request from now on.
+    ///
+    /// Accepted, the token is also what a push that reconnects opens its new
+    /// sessions with.
     pub fn reauthorize(&mut self, token: &str) -> Result<(), Failure> {
         let credentials = Credentials::bearer(token)
             .map_err(|why| Failure::bad_argument(format!("the token is refused: {why}")))?;
-        Ok(self.remote()?.reauthorize(&credentials)?)
+        self.remote()?.reauthorize(&credentials)?;
+        self.recipe.endpoint.credentials = Some(credentials);
+        Ok(())
     }
 
     /// The metadata of arrays of one resource. `retp_client::arrays::array_metadata`.
@@ -1308,9 +1363,90 @@ pub struct PushChoices {
     /// Send the objects as JSON Energistics, what the Reservoir DDMS REST API
     /// takes (`--json`); XML otherwise.
     pub json: bool,
+    /// Leave out what the dataspace holds already (`--skip-present`).
+    pub skip_present: bool,
+    /// Record each committed island in this file, and leave out what it
+    /// records (`--journal`).
+    pub journal: Option<PathBuf>,
+    /// Send an island the store refuses as a whole again in pieces
+    /// (`--split`, [`parse_split`]).
+    pub split: Split,
+    /// How many times the pieces of one island may be split again
+    /// (`--split-limit`); the library's default when `None`.
+    pub split_limit: Option<u32>,
+    /// Open a new session at most this many times in a row when the
+    /// connection falls (`--reconnect`); 0 stops at the fall.
+    pub reconnect: u32,
+    /// The pause before the first new session (`--reconnect-pause`,
+    /// [`pause_of`]); the runner's default when `None`.
+    pub reconnect_pause: Option<Duration>,
+}
+
+/// `split=` as a caller gives it: `None`, `"halve"` or `"single"`, the
+/// command line's `--split` values. Another word is refused by name.
+pub fn parse_split(name: Option<&str>) -> Result<Split, Failure> {
+    match name {
+        None => Ok(Split::Off),
+        Some("halve") => Ok(Split::Halve),
+        Some("single") => Ok(Split::Single),
+        Some(other) => Err(Failure::bad_argument(format!(
+            "split `{other}` is not one of halve, single (or None, to stop at a refused island)"
+        ))),
+    }
+}
+
+/// `reconnect_pause=` in seconds, as a caller gives it: a negative, infinite
+/// or not-a-number pause is refused by name.
+pub fn pause_of(seconds: Option<f64>) -> Result<Option<Duration>, Failure> {
+    seconds
+        .map(|seconds| {
+            Duration::try_from_secs_f64(seconds).map_err(|why| {
+                Failure::bad_argument(format!("reconnect_pause {seconds} is not a pause: {why}"))
+            })
+        })
+        .transpose()
 }
 
 impl PushChoices {
+    /// The library's options, from the words of the same names - the
+    /// conversion `retp-cli`'s `push_options` makes of its flags.
+    pub fn options<'a>(&'a self, registry: &'a Registry, only: Option<&'a [String]>) -> Options<'a> {
+        let mut budget = Budget::default();
+        if let Some(objects) = self.objects {
+            budget.objects = objects;
+        }
+        if let Some(bytes) = self.bytes {
+            budget.bytes = bytes;
+        }
+        let default = Options::default();
+        Options {
+            budget,
+            format: if self.json {
+                WriteFormat::Json
+            } else {
+                WriteFormat::Xml
+            },
+            well_known: if self.well_known {
+                WellKnown::Push(registry)
+            } else {
+                WellKnown::Leave
+            },
+            only,
+            grouping: if self.one_by_one {
+                Grouping::OneByOne
+            } else {
+                Grouping::Together
+            },
+            // A file knows no `storeLastWrite`: nothing to compare against.
+            expected: None,
+            overwrite: false,
+            skip_present: self.skip_present,
+            journal: self.journal.as_deref(),
+            split: self.split,
+            split_limit: self.split_limit.unwrap_or(default.split_limit),
+        }
+    }
+
     /// A budget of nothing, or an `only` that names nothing, is refused by
     /// name: neither is "everything", and neither can send anything.
     pub fn check(&self) -> Result<(), Failure> {
@@ -1323,6 +1459,15 @@ impl PushChoices {
         if self.only.as_ref().is_some_and(Vec::is_empty) {
             return Err(Failure::bad_argument(
                 "only names no object: leave it out to push everything",
+            ));
+        }
+        if self
+            .journal
+            .as_deref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(Failure::bad_argument(
+                "journal names no file: leave it out to keep no journal",
             ));
         }
         Ok(())

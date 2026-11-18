@@ -12,6 +12,7 @@
 mod connect;
 mod errors;
 mod operations;
+mod push;
 mod scope;
 mod stage;
 mod uris;

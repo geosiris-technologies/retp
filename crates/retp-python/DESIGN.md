@@ -29,9 +29,9 @@ Bound, function by function (Python name, then the Rust item it calls):
 | `Session.dataspaces()` | `retp_client::list_dataspaces`; each `customData` value through `retp_client::custom_data_json` |
 | `Session.resources(dataspace, depth=, scope=, types=, edges=, count=)` | `retp_client::list_resources` with a `ResourceQuery`; `dataspace_uri` |
 | `Session.get_object(uri)`, `get_objects(uris)` | `retp_client::get_data_objects` (format `xml`), then `energyml_etp_store::read_object`, then `energyml_core::json::write_string` |
-| `Session.put_objects(dataspace, objects, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=)` | `energyml_core::json::read_string`, `EpcStore::put` (in memory), then `energyml_etp_store::push::push` (see gap G1) |
-| `Session.push_epc(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` with the `Options` the command line's `push-epc` builds; `push::chosen` for `only`; the report's `refusals` are `push::Report::refusals` |
-| `Session.reauthorize(token)` | `Credentials::bearer`, then `native::Remote::reauthorize` |
+| `Session.put_objects(dataspace, objects, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=, skip_present=, journal=, split=, split_limit=, reconnect=, reconnect_pause=)` | `energyml_core::json::read_string`, `EpcStore::put` (in memory), then `energyml_etp_store::push::push` (see gap G1), as `push_epc` |
+| `Session.push_epc(path, dataspace, objects_per_island=, bytes_per_island=, only=, well_known=, one_by_one=, json=, skip_present=, journal=, split=, split_limit=, reconnect=, reconnect_pause=)` | `energyml_storage::EpcStore::open`, then `energyml_etp_store::push::push` with the `Options` the command line's `push` builds (`PushChoices::options`, `retp-cli`'s `push_options`); `push::chosen` for `only`; with `reconnect`, `push::push_resumable` over `native::Reopen`, whose sessions are opened as `connect` opened this one, and `push::reconnecting` for the `Retry`; the report's `refusals`, `skipped`, `splits`, `reconnections` are `push::Report`'s |
+| `Session.reauthorize(token)` | `Credentials::bearer`, then `native::Remote::reauthorize`; accepted, the credentials a push that reconnects opens its sessions with |
 | `retp.uri(dataspace, qualified_type, uuid, version=)` | `EtpUri::object_versioned`, read back by `EtpUri::parse` |
 | `Session.array_metadata(uri, paths)` | `retp_client::arrays::array_metadata` |
 | `Session.read_array(uri, path, start=, count=)` | `retp_client::arrays::read_arrays`, or `read_regions` with a `Block`; `ArrayValues::decode` |
@@ -257,9 +257,12 @@ TODO(verify): that this works on Linux, macOS and Windows.
 ## 7. Security
 
 - The token is a function argument, consumed into `Credentials` (whose `Debug`
-  hides the secret), and kept nowhere in the bridge: not in `repr`, not in
-  `url`, not in any message. Tokens belong in an environment variable or a
-  secret store, not on a command line; the examples read `RETP_TOKEN`.
+  hides the secret), and kept nowhere in the bridge but in those
+  `Credentials`, which the session holds to open itself again for a push
+  that reconnects: not in `repr`, not in `url`, not in any message. No
+  password nor client secret of a login is kept. Tokens belong in an
+  environment variable or a secret store, not on a command line; the examples
+  read `RETP_TOKEN`.
 - `insecure=True` (no certificate check) is allowed, and said in
   `session.warnings`, as the command line says it. Clear text to a host other
   than this machine is allowed by the specification, and said in the same list.
@@ -283,6 +286,10 @@ TODO(verify): that this works on Linux, macOS and Windows.
 - `tests/stage.rs`: refusals of staging objects for a push (no object, not JSON,
   no `$type`, unknown type). TODO(verify): the positive test, with an object built
   by the library.
+- `tests/push.rs`: the push keywords' conversions (`split`,
+  `reconnect_pause`, `journal`, the library's `Options` and their
+  defaults) and the report's `skipped`, `splits`, `reconnections` and a
+  push that gave up; what a push does is tested in `energyml-etp-store`.
 - `tests/scope.rs`: the dependency allow-list.
 - `tests/live.rs`: three read-only checks against a real server, behind the
   `live-server` feature and `#[ignore]`.

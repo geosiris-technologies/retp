@@ -274,6 +274,31 @@ array in its own message, for a store that mishandles several in one.
 `--well-known` also sends the official dictionary's property kinds the package
 references without holding.
 
+A push that stopped can start again, each with its own flag, all off by default:
+
+- `--journal FILE` records each island in `FILE` (JSON Lines) as it commits;
+  the same command run again leaves out what the file records. A journal
+  written for another package, another `--only` selection or another dataspace
+  is refused by name;
+- `--skip-present` leaves out what the dataspace holds already: an object
+  listed there under its URI, each of its arrays there with the same
+  dimensions. The content is not compared;
+- `--split halve` sends an island the store refuses as a whole again in two
+  halves, down to one object if need be; `--split single` sends it one object
+  per transaction. A cycle of objects is never split; `--split-limit` bounds how
+  far (8 by default). The last refusal is printed as before;
+- `--reconnect N` opens a new session when the connection falls, with the
+  same login, and goes on from the first island not committed, sent again
+  whole; after `N` new sessions in a row that fall too, the push stops. The
+  pause before the first is `--reconnect-pause` seconds (1 by default), and it
+  doubles up to thirty seconds. An island the connection falls on twice in a
+  row is halved. Not in the shell, which keeps its own session: there, push
+  again with `--journal`.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --journal model.push.jsonl --split halve --reconnect 3
+```
+
 ## The client is tolerant of a server's mistakes
 
 When their meaning is not in doubt: Core listed among the protocols, a role

@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,9 +20,10 @@ use energyml_etp_store::push::{
 };
 use retp_avro::{Avro, EtpMessage, Reader, Role};
 use retp_client::memory::{ManualClock, MemoryTransport};
-use retp_client::resume::{Connector, Retry, RunEvent, Setback};
+use retp_client::native::Resuming;
+use retp_client::resume::{Came, Connector, Retry, RunEvent, Setback};
 use retp_client::{Client, Settings, writing_client};
-use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder};
+use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder, Resumable};
 use retp_proto::negotiate::{Offer, ProtocolOffer};
 use retp_proto::wire::{Body, Delivery, EtpError};
 use retp_types::datatypes::MessageHeader;
@@ -82,6 +84,11 @@ struct Log {
     /// End every `GetResources` with this `EREQUEST_DENIED` - a listing the
     /// store cuts short.
     refuse_listing: Option<&'static str>,
+    /// The `(protocol, messageType)` of every message a client put on a
+    /// connection to this store, over every session, in order - the one a
+    /// connection falls on included, and the session's own (`RequestSession`
+    /// is `(0, 1)`, OSDU's `ResumeSession` `(2400, 1)`).
+    sent: Vec<(i32, i32)>,
 }
 
 /// A store that takes writes and remembers them - the destination.
@@ -438,6 +445,33 @@ enum Fall {
 
 /// A writing session with the store whose log is `log`.
 fn session(log: &Arc<Mutex<Log>>, protocols: &[i32], fall: Fall) -> Client<MemoryTransport, ManualClock> {
+    connected(log, protocols, fall, None)
+}
+
+/// How the server of a new connection answers a `ResumeSession` - OSDU's
+/// CoreOSDU extension, protocol 2400, in the wire format `open-etp-server`
+/// publishes (`etp-1.2.avpr`).
+#[derive(Debug, Clone, Copy)]
+enum Answers {
+    /// It gives the lost session back, negotiated from what it kept of it.
+    GivesBack,
+    /// It no longer has it: `ENOT_FOUND`, *Session not found or expired*, as
+    /// OSDU's server answers.
+    NotFound,
+    /// It does not speak 2400: `EUNSUPPORTED_PROTOCOL`, as any protocol
+    /// nobody announced.
+    Unspoken,
+}
+
+/// A writing session with the store whose log is `log`, on a new connection;
+/// with `resuming`, one that first asks back the session it names, from a
+/// server that answers as said.
+fn connected(
+    log: &Arc<Mutex<Log>>,
+    protocols: &[i32],
+    fall: Fall,
+    resuming: Option<(Answers, Resumable)>,
+) -> Client<MemoryTransport, ManualClock> {
     let mut offer = Offer::new("a receiving store", "0.1", Uuid([3; 16]));
     // Both forms, so that a push may say which: the session agrees the
     // intersection, and a JSON push into a store that agreed XML alone is
@@ -460,29 +494,39 @@ fn session(log: &Arc<Mutex<Log>>, protocols: &[i32], fall: Fall) -> Client<Memor
         })
         .collect();
     let server = Connection::server(offer, handlers, None, Uuid([0xBC; 16]), T0).unwrap();
+    let server = match &resuming {
+        Some((Answers::GivesBack | Answers::NotFound, _)) => server.accepting_resume(),
+        Some((Answers::Unspoken, _)) | None => server,
+    };
     let clock = ManualClock::new(T0);
     let transport = MemoryTransport::new(server, clock.clone());
-    let transport = match fall {
-        Fall::Never => transport,
-        Fall::OnThe {
-            nth,
-            protocol,
-            message_type,
-        } => {
-            let seen = AtomicUsize::new(0);
-            transport.falls_when(move |message| {
-                let header = MessageHeader::read(&mut Reader::new(message)).unwrap();
-                (header.protocol, header.message_type) == (protocol, message_type)
-                    && seen.fetch_add(1, Ordering::SeqCst) + 1 == nth
-            })
-        }
-        Fall::OnMoreObjectsThan(most) => transport.falls_when(move |message| {
-            let mut input = Reader::new(message);
-            let header = MessageHeader::read(&mut input).unwrap();
-            (header.protocol, header.message_type) == (PutDataObjects::PROTOCOL, PutDataObjects::MESSAGE_TYPE)
-                && PutDataObjects::read(&mut input).unwrap().data_objects.len() > most
-        }),
+    // What a real server keeps of the session it lost: the RequestSession it
+    // was opened with.
+    let transport = match &resuming {
+        Some((Answers::GivesBack, lost)) => transport.resumes(Some(lost.request.clone())),
+        _ => transport,
     };
+    // Every message is written down, then the fall decides.
+    let seen = AtomicUsize::new(0);
+    let log_of_sent = Arc::clone(log);
+    let transport = transport.falls_when(move |message| {
+        let mut input = Reader::new(message);
+        let header = MessageHeader::read(&mut input).unwrap();
+        let kind = (header.protocol, header.message_type);
+        log_of_sent.lock().unwrap().sent.push(kind);
+        match fall {
+            Fall::Never => false,
+            Fall::OnThe {
+                nth,
+                protocol,
+                message_type,
+            } => kind == (protocol, message_type) && seen.fetch_add(1, Ordering::SeqCst) + 1 == nth,
+            Fall::OnMoreObjectsThan(most) => {
+                kind == (PutDataObjects::PROTOCOL, PutDataObjects::MESSAGE_TYPE)
+                    && PutDataObjects::read(&mut input).unwrap().data_objects.len() > most
+            }
+        }
+    });
     let (offer, handlers) = writing_client(
         "the push's tests",
         "0.1",
@@ -493,7 +537,12 @@ fn session(log: &Arc<Mutex<Log>>, protocols: &[i32], fall: Fall) -> Client<Memor
             "eml23.*".to_string(),
         ],
     );
-    Client::open(transport, clock, offer, handlers, None, Settings::default()).unwrap()
+    match resuming {
+        None => Client::open(transport, clock, offer, handlers, None, Settings::default()).unwrap(),
+        Some((_, lost)) => {
+            Client::resume(transport, clock, offer, handlers, None, Settings::default(), lost).unwrap()
+        }
+    }
 }
 
 const THERE: &str = "eml:///dataspace('there')";
@@ -1548,6 +1597,10 @@ fn a_fallen_connection_is_reopened_and_the_push_goes_on() {
     assert!(report.stopped.is_none(), "{:?}", report.stopped);
     assert_eq!(report.sent, 2);
     assert_eq!(report.reconnections, 1);
+    // A connector that offers no resume: a new session, nothing refused,
+    // and no `ResumeSession` on the wire.
+    assert_eq!(report.reopened, [Came::Fresh { refused: None }]);
+    assert_eq!(sent(&sessions.log, RESUME_SESSION), 0);
     assert_eq!(sessions.opened, 2);
     assert_eq!(sessions.pauses, [Duration::from_millis(10)]);
     assert!(session.is_some(), "the last session is left open");
@@ -1642,4 +1695,177 @@ fn a_server_that_hangs_up_on_heavy_requests_gets_halves() {
     assert_eq!(report.splits.len(), 1, "{:?}", report.splits);
     assert_eq!(report.sent, report.islands.len());
     assert_eq!(report.islands.len(), 3);
+}
+
+// -- asking the server for the lost session (OSDU's ResumeSession, ADR-0003) --
+
+/// `RequestSession` (Core, ETP v1.2 section 5.3.1) and OSDU's `ResumeSession`
+/// (CoreOSDU 2400, message type 1, as `open-etp-server`'s `etp-1.2.avpr`
+/// numbers it).
+const REQUEST_SESSION: (i32, i32) = (0, 1);
+const RESUME_SESSION: (i32, i32) = (2400, 1);
+
+/// What the connector of a push that asks for its lost session did: the
+/// sessions it opened from the start, and those it asked back.
+#[derive(Default)]
+struct Asked {
+    opened: usize,
+    resumed: usize,
+}
+
+/// A push into one receiving store over `retp_client::native::Resuming` -
+/// the connector the command line and the Python bridge build, `ask` being
+/// their option - whose first session falls on its second commit: a new
+/// connection asks the lost session back when `ask` is on, and its server
+/// answers as `answers` says.
+fn pushed_after_a_fall(
+    ask: bool,
+    answers: Answers,
+) -> (energyml_etp_store::push::Report, Arc<Mutex<Log>>, Asked) {
+    let source = store();
+    let log = Arc::new(Mutex::new(Log::default()));
+    let asked = RefCell::new(Asked::default());
+    let first_fall = Fall::OnThe {
+        nth: 2,
+        protocol: CommitTransaction::PROTOCOL,
+        message_type: CommitTransaction::MESSAGE_TYPE,
+    };
+    let mut connector = Resuming {
+        open: || {
+            let mut asked = asked.borrow_mut();
+            let fall = if asked.opened + asked.resumed == 0 {
+                first_fall
+            } else {
+                Fall::Never
+            };
+            asked.opened += 1;
+            Ok::<_, std::convert::Infallible>(session(&log, &[3, 4, 9, 18], fall))
+        },
+        resume: |lost: Resumable| {
+            asked.borrow_mut().resumed += 1;
+            Ok(connected(
+                &log,
+                &[3, 4, 9, 18],
+                Fall::Never,
+                Some((answers, lost)),
+            ))
+        },
+        ask,
+    };
+    let mut session = None;
+    let report = push_resumable(
+        &mut connector,
+        &mut session,
+        &source,
+        "there",
+        &Options::default(),
+        &retrying(3),
+        |_| {},
+    )
+    .unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    assert_eq!(report.sent, 2);
+    assert_eq!(report.reconnections, 1);
+    assert_eq!(
+        report.reopened.len(),
+        report.reconnections,
+        "one word per reconnection"
+    );
+    {
+        let log = log.lock().unwrap();
+        // ADR-0003, and `Connector::resume` point 1: a session given back is
+        // the envelope, not the work - the island cut goes again whole, the
+        // one committed before does not, on either path.
+        assert_eq!(
+            log.transactions,
+            ["start", "commit", "start", "array", "start", "array", "commit"],
+            "the island with the array twice, the first island once"
+        );
+        let crs_writes = log.objects.iter().filter(|(uri, _)| uri.contains(CRS)).count();
+        assert_eq!(crs_writes, 1, "what committed is not sent again");
+    }
+    (report, log, asked.into_inner())
+}
+
+fn sent(log: &Arc<Mutex<Log>>, kind: (i32, i32)) -> usize {
+    log.lock()
+        .unwrap()
+        .sent
+        .iter()
+        .filter(|one| **one == kind)
+        .count()
+}
+
+/// **Asked for, the lost session is given back, and the push goes on in
+/// it.** The new connection's first word is `ResumeSession`, no
+/// `RequestSession` follows it, and the report says the session came back
+/// resumed.
+#[test]
+fn a_push_asked_to_goes_on_in_the_session_the_server_gives_back() {
+    let (report, log, asked) = pushed_after_a_fall(true, Answers::GivesBack);
+    assert_eq!(report.reopened, [Came::Resumed]);
+    assert_eq!((asked.opened, asked.resumed), (1, 1));
+    assert_eq!(sent(&log, RESUME_SESSION), 1);
+    assert_eq!(
+        sent(&log, REQUEST_SESSION),
+        1,
+        "the first session's own: the resumed one is not negotiated again"
+    );
+}
+
+/// **A server that no longer has the session says so, and a new session
+/// opens at once on the same connection.** OSDU's server answers
+/// `ENOT_FOUND`, *Session not found or expired*: the push goes on, and the
+/// report carries the server's words.
+#[test]
+fn a_session_the_server_no_longer_has_is_opened_anew_and_the_reason_said() {
+    let (report, log, asked) = pushed_after_a_fall(true, Answers::NotFound);
+    let [Came::Fresh { refused: Some(why) }] = report.reopened.as_slice() else {
+        panic!("{:?}", report.reopened);
+    };
+    assert!(
+        why.contains("ENOT_FOUND") && why.contains("Session not found or expired"),
+        "{why}"
+    );
+    assert_eq!(
+        (asked.opened, asked.resumed),
+        (1, 1),
+        "the new session is the resuming connection's, not another one"
+    );
+    assert_eq!(sent(&log, RESUME_SESSION), 1);
+    assert_eq!(
+        sent(&log, REQUEST_SESSION),
+        2,
+        "the first session, then the new one"
+    );
+}
+
+/// **A server that does not speak 2400 gets a new session too**, and the
+/// report says why the resume did not serve.
+#[test]
+fn a_server_without_resume_gets_a_new_session_and_the_reason_is_said() {
+    let (report, log, _) = pushed_after_a_fall(true, Answers::Unspoken);
+    let [Came::Fresh { refused: Some(why) }] = report.reopened.as_slice() else {
+        panic!("{:?}", report.reopened);
+    };
+    assert!(
+        why.contains("EUNSUPPORTED_PROTOCOL") && why.contains("2400"),
+        "{why}"
+    );
+    assert_eq!(sent(&log, RESUME_SESSION), 1);
+    assert_eq!(sent(&log, REQUEST_SESSION), 2);
+}
+
+/// **Not asked, no `ResumeSession` ever leaves**, whatever the server would
+/// answer: a new session from the start, as a push always reconnected, and
+/// the report says nothing was refused, because nothing was asked.
+#[test]
+fn a_push_not_asked_to_never_sends_resume_session() {
+    for answers in [Answers::GivesBack, Answers::NotFound, Answers::Unspoken] {
+        let (report, log, asked) = pushed_after_a_fall(false, answers);
+        assert_eq!(report.reopened, [Came::Fresh { refused: None }], "{answers:?}");
+        assert_eq!((asked.opened, asked.resumed), (2, 0), "{answers:?}");
+        assert_eq!(sent(&log, RESUME_SESSION), 0, "{answers:?}");
+        assert_eq!(sent(&log, REQUEST_SESSION), 2, "{answers:?}");
+    }
 }

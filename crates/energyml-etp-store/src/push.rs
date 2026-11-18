@@ -790,6 +790,16 @@ pub struct Report {
     /// How many new sessions [`push_resumable`] opened after the connection
     /// fell.
     pub reconnections: usize,
+    /// How each of those sessions came back, in order - one per
+    /// reconnection: [`Came::Resumed`] when the server gave the lost session
+    /// back (OSDU's `ResumeSession`, asked only when the connector offers it,
+    /// `retp_client::native::Resuming`), or [`Came::Fresh`] - with why the
+    /// resume did not serve, when one was asked: the server's refusal
+    /// (`ENOT_FOUND`, *Session not found or expired*; `EUNSUPPORTED_PROTOCOL`
+    /// from a server that does not speak 2400), or the attempt's failure.
+    /// Either way the island that was cut was sent again whole: a resumed
+    /// session knows nothing of what was in flight.
+    pub reopened: Vec<Came>,
 }
 
 /// An object left out because it is there already.
@@ -973,7 +983,11 @@ pub async fn push<K: Caller>(
 /// (`retp_client::resume::worth_retrying`: the connection fell, a request
 /// timed out, an answer could not be taken) is tried again after `retry`'s
 /// pause, which doubles - in a **new session** when the connection is gone,
-/// opened the whole way by `connector`, whose credentials are its own. The
+/// opened the whole way by `connector`, whose credentials are its own; or,
+/// when the connector offers it (`retp_client::native::Resuming`, off unless
+/// asked), in the lost session given back by the server - OSDU's
+/// `ResumeSession`, tried first, a new session at once when refused
+/// ([`Report::reopened`] says which). The
 /// island it was sending is sent again **whole**, from its first object, and
 /// the islands committed before are not. An island the connection falls on
 /// twice in a row is halved before the next try: a server that hangs up on a
@@ -1630,9 +1644,12 @@ impl<K: Blocking> Operation<K> for Pushing<'_> {
 
     fn resumed(&mut self, came: &Came, since: Option<i64>) {
         // Nothing to catch up on: the island is sent again whole, and what
-        // committed before stays committed.
-        let _ = (came, since);
+        // committed before stays committed - whether the server gave the
+        // session back or not, since it gives back the envelope, not the
+        // work (`Connector::resume`, point 1).
+        let _ = since;
         self.report.reconnections += 1;
+        self.report.reopened.push(came.clone());
     }
 }
 

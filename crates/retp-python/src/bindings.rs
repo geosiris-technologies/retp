@@ -22,6 +22,7 @@ use retp_client::Transaction;
 use retp_client::arrays::Decoded;
 use retp_client::login::Choice;
 use retp_client::notifications::uuid_text;
+use retp_client::resume::Came;
 
 use crate::session::{
     ArrayInfos, ArrayRead, ChannelRecords, ConnectOptions, CustomValue, DataspaceRow, Failure, Kind, Objects,
@@ -235,6 +236,18 @@ fn report_into_py<'py>(py: Python<'py>, report: &PushReport) -> PyResult<Bound<'
     }
     out.set_item("splits", splits)?;
     out.set_item("reconnections", report.reconnections)?;
+    let reopened = PyList::empty(py);
+    for came in &report.reopened {
+        let row = PyDict::new(py);
+        let (resumed, refused) = match came {
+            Came::Resumed => (true, None),
+            Came::Fresh { refused } => (false, refused.as_deref()),
+        };
+        row.set_item("resumed", resumed)?;
+        row.set_item("refused", refused)?;
+        reopened.append(row)?;
+    }
+    out.set_item("reopened", reopened)?;
     Ok(out)
 }
 
@@ -604,7 +617,7 @@ impl PySession {
     /// report as its `report` attribute) when the push did not go through in
     /// full. Needs a session opened with `writing=True`. The keywords are
     /// `push_epc`'s.
-    #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None))]
+    #[pyo3(signature = (dataspace, objects, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None, resume_session = false))]
     #[allow(clippy::too_many_arguments)]
     fn put_objects<'py>(
         &self,
@@ -623,6 +636,7 @@ impl PySession {
         split_limit: Option<u32>,
         reconnect: u32,
         reconnect_pause: Option<f64>,
+        resume_session: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let texts = objects
             .iter()
@@ -641,6 +655,7 @@ impl PySession {
             split_limit,
             reconnect,
             reconnect_pause: pause_of(reconnect_pause).map_err(failed)?,
+            resume_session,
         };
         let report = py
             .detach(|| self.session()?.put_objects(dataspace, &texts, &choices))
@@ -667,11 +682,17 @@ impl PySession {
     /// (`--split`, `--split-limit`); `reconnect` opens a new session, at most
     /// that many times in a row, when the connection falls, after
     /// `reconnect_pause` seconds that double (`--reconnect`,
-    /// `--reconnect-pause`).
+    /// `--reconnect-pause`); with `resume_session`, each new connection
+    /// first asks the server to give the lost session back (OSDU's
+    /// `ResumeSession`, an extension a server may not support; off by
+    /// default), and a new session is opened when it will not
+    /// (`--resume-session`).
+    /// The report's `reopened` says, for each new session, whether it was
+    /// `resumed`, and why a resume was `refused`.
     ///
     /// The report's `refusals` lists each object or array the store refused,
     /// `{"uri", "array", "code", "message"}`, `code` the ETP error code.
-    #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None))]
+    #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None, resume_session = false))]
     #[allow(clippy::too_many_arguments)]
     fn push_epc<'py>(
         &self,
@@ -690,6 +711,7 @@ impl PySession {
         split_limit: Option<u32>,
         reconnect: u32,
         reconnect_pause: Option<f64>,
+        resume_session: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let choices = PushChoices {
             objects: objects_per_island,
@@ -704,6 +726,7 @@ impl PySession {
             split_limit,
             reconnect,
             reconnect_pause: pause_of(reconnect_pause).map_err(failed)?,
+            resume_session,
         };
         let report = py
             .detach(|| self.session()?.push_epc(path, dataspace, &choices))

@@ -225,6 +225,7 @@ sentence.
 | `split_limit` | how many times the pieces of one island may be split again, 8 by default (`--split-limit`) |
 | `reconnect` | when the connection falls, open a new session and go on from the first island not committed, at most this many times in a row (`--reconnect`); 0, the default, stops at the fall |
 | `reconnect_pause` | seconds before the first new session, 1 by default, doubling after each fall in a row up to 30 (`--reconnect-pause`) |
+| `resume_session` | with `reconnect`: on each new connection, first ask the server to give the lost session back (OSDU's `ResumeSession`, an OSDU extension a server may not support), then open a new session if it will not (`--resume-session`); `False` by default, refused without `reconnect` and over REST |
 
 The client does not filter the objects by the types the server announced: what
 the server will not take, it refuses, and the refusal is in the report.
@@ -245,7 +246,7 @@ its error (`ENOCASCADE_DELETE`, 4003).
 
 ### Starting again where a push stopped
 
-The last six keywords of the table are off by default: a push goes as it
+The last seven keywords of the table are off by default: a push goes as it
 always went. A loading job that may be interrupted, or that pushes into a store
 that refuses large transactions, can ask for each:
 
@@ -262,6 +263,8 @@ for skipped in report["skipped"]:
 for split in report["splits"]:
     print(split["island"], split["into"], split["why"], split["refusals"])
 print(report["reconnections"], "new session(s)")
+for came in report["reopened"]:
+    print("resumed" if came["resumed"] else "new session", came["refused"])
 ```
 
 - **What is already there** (`skip_present`) is judged by the URI and the
@@ -291,6 +294,21 @@ print(report["reconnections"], "new session(s)")
   subscriptions of the old session end with it, and a session opened by a
   login at a token endpoint reuses the token obtained then - renew it with
   `reauthorize` before it runs out.
+- **Asking for the lost session** (`resume_session=True`, with `reconnect`)
+  is an **OSDU extension**, OSDU's `ResumeSession` (protocol 2400), off by
+  default. Each new connection is opened the whole way, with the same
+  credentials, and first asks the server to give the lost session back by its
+  `sessionId`. A server that refuses (`ENOT_FOUND`, *Session not found or
+  expired*) or does not speak 2400 is asked a new session at once, and the push
+  goes on as with `reconnect` alone; many servers do not support it. The
+  interrupted island is sent again whole either way: a resumed session
+  restores what was negotiated, not the requests in flight.
+  `report["reopened"]` has one `{"resumed", "refused"}` per new session:
+  `resumed` is `True` when the server gave the session back, and `refused`
+  holds why it did not, when it was asked (`None` otherwise). A caution: with
+  OSDU's resume, nothing on the client side tells which rights the server
+  applies to a resumed session (OSDU issue #232); the client always sends its
+  own credentials on the new connection.
 
 ### Transactions
 

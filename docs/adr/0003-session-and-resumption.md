@@ -44,6 +44,12 @@ the connection itself, as Core is, and only before a session opens.
   hold rights nobody granted it.
 - **Refused, the client opens a new session at once**, on the same WebSocket,
   and says so: a resume is attempted, never awaited.
+- **It is asked only when the caller opts in** (`native::Resuming`, the push's
+  `--resume-session` and `resume_session=`), off by default, for a write as for
+  a read: a resumed session restores the envelope, not the work, so the
+  interrupted step is replayed whole on either path, and the report says how
+  each session came back. The code is ready before the servers are: one that
+  does not speak protocol 2400 only costs the refusal.
 
 ## Consequences
 

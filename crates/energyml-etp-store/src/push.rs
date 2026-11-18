@@ -95,6 +95,7 @@ pub mod journal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Duration;
 
 use energyml_core::identifiers::EtpUri;
 use energyml_core::registry::{DynObject, to_part};
@@ -1005,6 +1006,21 @@ pub fn push_resumable<C: Connector>(
         Err(RunError::Final(never)) => match never {},
     }
     Ok(pushing.report)
+}
+
+/// The [`Retry`] of [`push_resumable`] for *a new session at most `times`
+/// times in a row, the first after `first_pause`*: the pause doubles after
+/// each fall in a row, up to thirty seconds - or `first_pause`, when that is
+/// longer. What the command line's `--reconnect` and `--reconnect-pause`
+/// mean, and the Python bridge's `reconnect` and `reconnect_pause`.
+pub fn reconnecting(times: u32, first_pause: Duration) -> Retry {
+    Retry {
+        // The runner counts failures, the first one included; `times` counts
+        // the sessions opened after one.
+        max_retries: times.saturating_add(1),
+        first_pause,
+        longest_pause: first_pause.max(Retry::default().longest_pause),
+    }
 }
 
 /// Read the source: each object written as it will leave, its arrays

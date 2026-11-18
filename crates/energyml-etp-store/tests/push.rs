@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use energyml_etp_store::push::{
     Options, Progress, SkipReason, Split, Stop, WellKnown, WriteFormat, chosen, push, push_resumable,
+    reconnecting,
 };
 use retp_avro::{Avro, EtpMessage, Reader, Role};
 use retp_client::memory::{ManualClock, MemoryTransport};
@@ -1567,8 +1568,10 @@ fn a_fallen_connection_is_reopened_and_the_push_goes_on() {
 }
 
 /// **A push gives up after so many falls in a row**, and says it did: the
-/// island it stopped at is named, its outcome unknown. An island the
-/// connection falls on twice in a row is halved before the next try.
+/// island it stopped at is named, its outcome unknown. Told to reconnect
+/// twice, it opens two new sessions after the first, and no third. An
+/// island the connection falls on twice in a row is halved before the next
+/// try.
 #[test]
 fn a_push_gives_up_after_so_many_falls_in_a_row() {
     let source = store();
@@ -1584,10 +1587,16 @@ fn a_push_gives_up_after_so_many_falls_in_a_row() {
         &source,
         "there",
         &Options::default(),
-        &retrying(3),
+        &reconnecting(2, Duration::from_millis(10)),
         |_| {},
     )
     .unwrap();
+    assert_eq!(sessions.opened, 3, "the first session and two new ones");
+    assert_eq!(
+        sessions.pauses,
+        [Duration::from_millis(10), Duration::from_millis(20)],
+        "the pause doubles"
+    );
     assert_eq!(report.sent, 0);
     match &report.stopped.as_ref().expect("it gave up").why {
         Stop::GaveUp { attempts, last } => {

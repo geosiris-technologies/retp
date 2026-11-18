@@ -89,7 +89,10 @@
 //!   not commit it (TODO(verify): the ETP v1.2 section that says a store
 //!   rolls back a transaction its session left open), and writing an object
 //!   again replaces it (`PutDataObjects` is an upsert, ETP v1.2 section
-//!   9.1.1, p.178).
+//!   9.1.1, p.178). An array written again over one the store holds - a
+//!   store without transactions keeps what an interrupted island wrote - is
+//!   taken to replace it too (TODO(verify): the DataArray section, protocol
+//!   9, that says what `PutDataArrays` does with an array already there).
 
 pub mod journal;
 

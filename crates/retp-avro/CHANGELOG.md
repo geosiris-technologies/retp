@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/geosiris-technologies/retp/compare/retp-avro-v0.3.0...retp-avro-v0.4.0) - 2026-11-19
+
+### Fixed
+
+- *(avro)* [**breaking**] never size an allocation from a count read off the wire (a new `Error::TooManyItems`)
+
 ## [0.2.0](https://github.com/geosiris-technologies/retp/compare/5248f7e...retp-avro-v0.2.0) - 2026-10-15
 
 ### Other

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/geosiris-technologies/retp/compare/retp-derive-v0.3.0...retp-derive-v0.4.0) - 2026-11-19
+
+### Other
+
+- released with the rest of the workspace at 0.4.0
+
 ## [0.2.0](https://github.com/geosiris-technologies/retp/compare/5248f7e...retp-derive-v0.2.0) - 2026-10-15
 
 ### Other

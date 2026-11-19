@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/geosiris-technologies/retp/compare/retp-cli-v0.4.0...retp-cli-v0.4.1) - 2026-11-19
+
+### Other
+
+- Merge pull request #49 from geosiris-technologies/docs/readmes-0.4
+- push, server catalogue and sessions in the READMEs
+
 ## [0.4.0](https://github.com/geosiris-technologies/retp/compare/retp-cli-v0.3.0...retp-cli-v0.4.0) - 2026-11-19
 
 ### Added

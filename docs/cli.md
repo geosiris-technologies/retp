@@ -3,9 +3,8 @@
 `retp` talks to an ETP v1.2 server: what it says of itself, a session with it,
 what it holds, and objects read from it.
 
-> `retp-cli` is being extracted from the energyml-rust command line, where the
-> same commands exist as `energyml etp <command>`. The examples use
-> `retp <command>`. TODO(verify): flag names against the extracted binary.
+> The energyml-rust command line reaches the same commands as `energyml etp <command>`,
+> which runs `retp` when it is on `PATH`. The examples use `retp <command>`.
 
 The network (WebSocket over rustls, an HTTP client) is part of the binary; it
 is not compiled for wasm.
@@ -35,7 +34,10 @@ Every command also takes the server options, the login options and
 when something is missing, 2 when the command failed.
 
 Reading arrays into HDF5 files (`download-epc`, `push`) needs a build with HDF5
-support. TODO(verify): the feature name in the extracted binary.
+support: the feature `hdf5` (the system's HDF5 library), or `hdf5-static`
+(HDF5 compiled from its sources and linked in). The release archives are built
+with `hdf5-static`, except the musl ones, which have none; the Docker image links
+the system HDF5.
 
 ## As MCP tools for an assistant
 

@@ -71,7 +71,9 @@ retp push wss://etp.example.com/etp model.epc demo --journal push.jsonl --reconn
 Servers by name, their secrets by reference and never by value:
 
 ```sh
-retp server add azure-test wss://etp.example.com/etp     --auth azure --tenant TENANT_ID --client-id APP_ID     --scope 'api://APP_ID/.default' --client-secret-from env:AZURE_TEST_SECRET
+retp server add azure-test wss://etp.example.com/etp \
+    --auth azure --tenant TENANT_ID --client-id APP_ID \
+    --scope 'api://APP_ID/.default' --client-secret-from env:AZURE_TEST_SECRET
 retp azure-test dataspaces
 ```
 

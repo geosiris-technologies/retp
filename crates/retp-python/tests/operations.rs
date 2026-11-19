@@ -19,16 +19,20 @@ use retp_proto::connection::{Connection, Declined, Handled, Handler, Responder};
 use retp_proto::negotiate::{Offer, ProtocolOffer};
 use retp_proto::wire::{Body, Delivery, EtpError};
 use retp_python::session::{
-    CustomValue, Kind, channels, commit, create_dataspaces, dataspace_row, dataspaces_to_put, delete_objects,
-    open_transaction, pack_dataspace, ranges, ranges_from_json, remove_dataspaces, rollback, supported_types,
+    CustomValue, Kind, array_infos, channels, commit, create_dataspaces, dataspace_row, dataspaces_to_put,
+    delete_objects, open_transaction, pack_dataspace, ranges, ranges_from_json, remove_dataspaces, rollback,
+    supported_types,
 };
 use retp_types::datatypes::channel_data::{ChannelMetadataRecord, DataItem};
+use retp_types::datatypes::data_array_types::DataArrayMetadata;
 use retp_types::datatypes::object::{RelationshipKind, SupportedType};
+use retp_types::datatypes::{AnyArrayType, AnyLogicalArrayType};
 use retp_types::datatypes::{
     ArrayOfString, DataValue, DataValueItem, IndexValue, IndexValueItem, SupportedDataObject, Uuid,
 };
 use retp_types::dispatch::Message;
 use retp_types::protocol::channel_subscribe::{GetChannelMetadataResponse, GetRangesResponse};
+use retp_types::protocol::data_array::GetDataArrayMetadataResponse;
 use retp_types::protocol::dataspace::{DeleteDataspacesResponse, PutDataspacesResponse};
 use retp_types::protocol::discovery::GetResourcesResponse;
 use retp_types::protocol::store::DeleteDataObjectsResponse;
@@ -77,6 +81,32 @@ impl Handler for Store {
             return Err(Declined("no private protocol".into()));
         };
         match message {
+            Message::GetDataArrayMetadata(request) => {
+                // Every array as one OSDU store states its float arrays: a
+                // logical type of booleans, carried as floats.
+                let response = GetDataArrayMetadataResponse {
+                    array_metadata: request
+                        .data_arrays
+                        .keys()
+                        .map(|key| {
+                            (
+                                key.clone(),
+                                DataArrayMetadata {
+                                    dimensions: vec![2, 3],
+                                    preferred_subarray_dimensions: Vec::new(),
+                                    transport_array_type: AnyArrayType::ArrayOfFloat,
+                                    logical_array_type: AnyLogicalArrayType::ArrayOfBoolean,
+                                    store_last_write: T0,
+                                    store_created: T0,
+                                    custom_data: BTreeMap::new(),
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                let out = responder.wire().respond(delivery, &response).unwrap();
+                responder.send(out);
+            }
             Message::DeleteDataObjects(request) => {
                 seen(&self.seen).prune_contained = Some(request.prune_contained_objects);
                 let mut reply = responder
@@ -301,8 +331,8 @@ impl Handler for Store {
 }
 
 /// A writing client, open on a store that speaks Discovery (3), Store (4),
-/// Transaction (18), ChannelSubscribe (21), Dataspace (24) and SupportedTypes
-/// (25).
+/// DataArray (9), Transaction (18), ChannelSubscribe (21), Dataspace (24) and
+/// SupportedTypes (25).
 fn session() -> (Client<MemoryTransport, ManualClock>, Shared) {
     let shared = Shared::default();
     let mut offer = Offer::new("the bridge's test store", "0.1", Uuid([2; 16]));
@@ -313,7 +343,7 @@ fn session() -> (Client<MemoryTransport, ManualClock>, Shared) {
             data_object_capabilities: BTreeMap::new(),
         })
         .collect();
-    let handlers: Vec<Box<dyn Handler>> = [3, 4, 18, 21, 24, 25]
+    let handlers: Vec<Box<dyn Handler>> = [3, 4, 9, 18, 21, 24, 25]
         .iter()
         .map(|p| {
             Box::new(Store {
@@ -557,6 +587,25 @@ fn a_refused_rollback_is_said_even_without_a_reason() {
 }
 
 // ---- supported types -------------------------------------------------------
+
+#[test]
+fn array_types_are_named_as_the_etp_schema_names_them_and_as_the_store_stated_them() {
+    let (mut client, _) = session();
+    let infos = array_infos(
+        &mut client,
+        "eml:///dataspace('demo')/resqml20.obj_PointSetRepresentation(11111111-1111-1111-1111-111111111111)",
+        &texts(&["/points"]),
+    )
+    .expect("answered");
+    assert!(infos.failed.is_empty());
+    let one = &infos.found[0];
+    assert_eq!(one.path, "/points");
+    assert_eq!(one.dimensions, vec![2, 3]);
+    // The schema's symbols, not the Rust variant names (`ArrayOfBoolean`):
+    // what the documentation promises, and what a caller compares with.
+    assert_eq!(one.logical, "arrayOfBoolean");
+    assert_eq!(one.transport, "arrayOfFloat");
+}
 
 #[test]
 fn supported_types_come_with_their_counts() {

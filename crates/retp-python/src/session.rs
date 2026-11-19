@@ -484,9 +484,10 @@ pub struct ArrayInfo {
     pub path: String,
     /// Its dimensions, outermost first.
     pub dimensions: Vec<i64>,
-    /// The logical type, by its ETP name (`arrayOfDouble64LE`).
+    /// The logical type, by its ETP schema name (`arrayOfDouble64LE`), as the
+    /// store stated it.
     pub logical: String,
-    /// How it travels, by its ETP name.
+    /// How it travels, by its ETP schema name (`arrayOfDouble`).
     pub transport: String,
     /// The block shape the store prefers to be read in, when it says.
     pub preferred_subarray_dimensions: Vec<i64>,
@@ -1158,32 +1159,9 @@ impl Session {
         Ok(())
     }
 
-    /// The metadata of arrays of one resource. `retp_client::arrays::array_metadata`.
+    /// The metadata of arrays of one resource: [`array_infos`].
     pub fn array_metadata(&mut self, uri: &str, paths: &[String]) -> Result<ArrayInfos, Failure> {
-        if paths.is_empty() {
-            return Err(Failure::bad_argument("no array path given"));
-        }
-        let ids = identifiers(uri, paths);
-        let answers = array_metadata(self.remote()?, &ids)?;
-        let mut out = ArrayInfos {
-            found: Vec::new(),
-            failed: Vec::new(),
-        };
-        for (path, answer) in paths.iter().zip(answers) {
-            match answer {
-                Ok(meta) => out.found.push(ArrayInfo {
-                    path: path.clone(),
-                    dimensions: meta.dimensions,
-                    logical: format!("{:?}", meta.logical_array_type),
-                    transport: format!("{:?}", meta.transport_array_type),
-                    preferred_subarray_dimensions: meta.preferred_subarray_dimensions,
-                }),
-                Err(error) => out
-                    .failed
-                    .push((path.clone(), Failure::server(error.code, error.message))),
-            }
-        }
-        Ok(out)
+        array_infos(self.remote()?, uri, paths)
     }
 
     /// One array, whole - `retp_client::arrays::read_arrays` - or the block
@@ -1775,6 +1753,37 @@ pub fn rollback<K: Blocking>(client: &mut K, transaction: &Transaction) -> Resul
             "the store refused the rollback: {why} (the writes of the transaction may still be there)"
         ))),
     }
+}
+
+/// The metadata of arrays of one resource (`retp_client::arrays::array_metadata`),
+/// each array type by the name the ETP schema gives it (`arrayOfFloat32LE`,
+/// `arrayOfFloat`), as the store stated it: a store may name a logical type its
+/// transport cannot carry, and what a read then does is `read_array`'s to say.
+pub fn array_infos<K: Blocking>(client: &mut K, uri: &str, paths: &[String]) -> Result<ArrayInfos, Failure> {
+    if paths.is_empty() {
+        return Err(Failure::bad_argument("no array path given"));
+    }
+    let ids = identifiers(uri, paths);
+    let answers = array_metadata(client, &ids)?;
+    let mut out = ArrayInfos {
+        found: Vec::new(),
+        failed: Vec::new(),
+    };
+    for (path, answer) in paths.iter().zip(answers) {
+        match answer {
+            Ok(meta) => out.found.push(ArrayInfo {
+                path: path.clone(),
+                dimensions: meta.dimensions,
+                logical: meta.logical_array_type.as_str().to_string(),
+                transport: meta.transport_array_type.as_str().to_string(),
+                preferred_subarray_dimensions: meta.preferred_subarray_dimensions,
+            }),
+            Err(error) => out
+                .failed
+                .push((path.clone(), Failure::server(error.code, error.message))),
+        }
+    }
+    Ok(out)
 }
 
 /// The data object types under a dataspace (a path or a URI) or an object:

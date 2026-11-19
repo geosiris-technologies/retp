@@ -222,7 +222,9 @@ fn the_report_carries_the_stop_sorted_beside_the_sentence() {
         stop.cause,
         Some(Cause::MissingReference {
             count: 2,
-            space: None
+            space: None,
+            named: Vec::new(),
+            more: 0,
         })
     );
     assert_eq!(

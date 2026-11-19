@@ -799,7 +799,9 @@ pub struct Said {
     /// The ETP error code (`ErrorInfo.code`, ETP v1.2 section 24.1) - `None`
     /// for a refused commit or transaction, whose answer carries a reason
     /// and no code (`CommitTransactionResponse.failureReason`), or for a
-    /// refusal of an array this side could not read.
+    /// refusal of an array this side could not read. A transaction that would
+    /// not open because the store answered with an exception carries that
+    /// exception's code.
     pub code: Option<i32>,
     /// The words, as they came (`retp_client` replaces an empty reason by
     /// a sentence of its own saying so).
@@ -859,13 +861,24 @@ pub enum Cause {
     /// `"{N} Missing reference(s)"` at commit (`TransProto.cpp:267-290`): `N`
     /// objects written reference something the dataspace does not hold. Or,
     /// outside a transaction, `EINVALID_STATE` `"{N} Missing reference(s) in
-    /// space {space}"` at once (`StoreProto.cpp`). The server names no
+    /// space {space}"` at once (`StoreProto.cpp`). Those servers name no
     /// target: see [`Diagnosis::candidates`].
+    ///
+    /// A server that names them (open-etp-server from M27, merge request !586)
+    /// writes `"{N} Missing reference(s): from {type}({uuid}) to
+    /// {type}({uuid}) using {xpath}; ..."`, at most 25 entries and then
+    /// `"; ... (+{k} more)"`: they are `named`, and `more` is `k`.
     MissingReference {
         /// How many, as the server counts them.
         count: u64,
         /// The space it names, outside a transaction.
         space: Option<String>,
+        /// The references the server named, in its order - **the server's
+        /// statement**, empty for the count-only form. `named.len() + more`
+        /// is always `count` when `named` is not empty.
+        named: Vec<NamedReference>,
+        /// How many more the server counted and did not name (its cap is 25).
+        more: u64,
     },
     /// `"{N} Orphan reference(s)"` at commit (`TransProto.cpp:277,292-298`).
     OrphanReference {
@@ -895,6 +908,80 @@ pub enum Cause {
     Unknown,
 }
 
+/// A missing reference as a server that names them writes it: `from
+/// {from_type}({from_uuid}) to {to_type}({to_uuid}) using {xpath}`
+/// ([`Cause::MissingReference`]).
+///
+/// The types are the server's own spelling, or a placeholder such as
+/// `<obj_id 7>` or `<unresolved type_id 3>` when it could not resolve one.
+/// They are not checked against any schema here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedReference {
+    /// The type of the object that holds the reference.
+    pub from_type: String,
+    /// Its uuid, as the server wrote it.
+    pub from_uuid: String,
+    /// The type of the object the reference names, which the dataspace lacks.
+    pub to_type: String,
+    /// Its uuid.
+    pub to_uuid: String,
+    /// The path of the reference in the object that holds it.
+    pub xpath: String,
+}
+
+impl NamedReference {
+    /// One entry of the server's list: `from T(U) to T(U) using X`. `None`
+    /// for anything else.
+    fn parse(entry: &str) -> Option<NamedReference> {
+        let rest = entry.strip_prefix("from ")?;
+        let (ends, xpath) = rest.split_once(" using ")?;
+        let (from, to) = ends.split_once(" to ")?;
+        let (from_type, from_uuid) = typed(from)?;
+        let (to_type, to_uuid) = typed(to)?;
+        if xpath.is_empty() {
+            return None;
+        }
+        Some(NamedReference {
+            from_type,
+            from_uuid,
+            to_type,
+            to_uuid,
+            xpath: xpath.to_string(),
+        })
+    }
+}
+
+/// `type(uuid)`: both non-empty, the uuid without a blank or a parenthesis.
+fn typed(text: &str) -> Option<(String, String)> {
+    let inner = text.strip_suffix(')')?;
+    let (kind, uuid) = inner.rsplit_once('(')?;
+    let uuid_ok = !uuid.is_empty() && !uuid.contains(|c: char| c.is_whitespace() || c == ')');
+    (!kind.is_empty() && uuid_ok).then(|| (kind.to_string(), uuid.to_string()))
+}
+
+/// What follows `"{N} Missing reference(s): "`: the entries, `"; "` apart,
+/// and perhaps the tail `"... (+{k} more)"`. The named references and `k`,
+/// or `None` when any part is not in that shape, or when the entries and `k`
+/// do not add up to `count` - nothing documents such a message, so it is not
+/// read as one.
+fn named_references(list: &str, count: u64) -> Option<(Vec<NamedReference>, u64)> {
+    let mut named = Vec::new();
+    let mut more = 0u64;
+    let mut parts = list.split("; ").peekable();
+    while let Some(part) = parts.next() {
+        if let Some(tail) = part.strip_prefix("... (+").and_then(|t| t.strip_suffix(" more)")) {
+            if parts.peek().is_some() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            more = tail.parse().ok()?;
+        } else {
+            named.push(NamedReference::parse(part)?);
+        }
+    }
+    let listed = u64::try_from(named.len()).ok()?;
+    (!named.is_empty() && listed.checked_add(more)? == count).then_some((named, more))
+}
+
 impl Cause {
     /// The cause a store's words name: the **whole** message, trimmed, must
     /// have one of the documented shapes - a message that merely contains one
@@ -916,7 +1003,12 @@ impl Cause {
             return Cause::Unknown;
         };
         match rest {
-            "Missing reference(s)" => Cause::MissingReference { count, space: None },
+            "Missing reference(s)" => Cause::MissingReference {
+                count,
+                space: None,
+                named: Vec::new(),
+                more: 0,
+            },
             "Orphan reference(s)" => Cause::OrphanReference { count },
             "Missing array(s)" => Cause::MissingArray { count },
             "Orphan array(s)" => Cause::OrphanArray { count },
@@ -924,8 +1016,38 @@ impl Cause {
                 Some(space) if !space.is_empty() => Cause::MissingReference {
                     count,
                     space: Some(space.to_string()),
+                    named: Vec::new(),
+                    more: 0,
                 },
-                _ => Cause::Unknown,
+                // The form that names them: open-etp-server MR !586, which
+                // changed `OpenKVTransProto::CommitTransaction` in
+                // `src/lib/oes/eml/openkv/TransProto.cpp` (the
+                // `joined`/`kMaxListed` block, hunk `@@ -255,6 +255,12 @@`
+                // and the hunks after it in the merge request's diff) to
+                // write `"{N} Missing reference(s): "` and the entries joined
+                // by `"; "`, an entry being `ReferenceInfo::to_string()`, then
+                // `"; ... (+{k} more)"` past 25 entries; its test
+                // `test_Transaction18_missing_reference_failure_reason`
+                // (`TransProtoTests.cpp`) checks `from {type}({guid})`,
+                // `to {type}({guid})` and the xpath. A list that does not
+                // parse whole, or whose entries and `k` do not add up to `N`,
+                // is `Unknown`, not the count alone.
+                // TODO(verify): the entry's exact text is read from the
+                // merge request's description and test, not from
+                // `ReferenceInfo::to_string()` (SpaceDML.cpp), which the diff
+                // does not show; a capture from a live M27 server.
+                _ => match rest.strip_prefix("Missing reference(s): ") {
+                    Some(list) => match named_references(list, count) {
+                        Some((named, more)) => Cause::MissingReference {
+                            count,
+                            space: None,
+                            named,
+                            more,
+                        },
+                        None => Cause::Unknown,
+                    },
+                    None => Cause::Unknown,
+                },
             },
         }
     }
@@ -966,7 +1088,9 @@ pub struct Diagnosis {
     /// the [`Report::dangling`] pairs whose `from` is in the stopped island.
     ///
     /// **This side's deduction, not the server's statement** - the server
-    /// counts the missing references and names none. It holds because the
+    /// counts the missing references and names none. Empty when the server
+    /// named them ([`Cause::MissingReference`]'s `named`, its statement,
+    /// which comes first). It holds because the
     /// plan sends every target the source holds *before* what references it
     /// (targets go in earlier islands, or earlier in the same one, a cycle
     /// whole), so a reference from the stopped island can only miss when its
@@ -977,7 +1101,12 @@ pub struct Diagnosis {
     /// server's count. They may also be fewer: a target the source holds and
     /// that could not be sent ([`Report::left_out`]) is not in `dangling`, and
     /// the server may count a reference its own reading found and this
-    /// library's did not. Empty for any other cause.
+    /// library's did not. **It is wrong** when a RESQML 2.0.1 reference names
+    /// an object of the package under `obj_` (`obj_LocalDepth3dCrs`) on a
+    /// server that stores it without it (an OSDU RDDMS deployment, M26): the
+    /// server then counts the reference missing although its target is in the
+    /// dataspace, and the deduction names the wrong pair or none. Empty for
+    /// any other cause.
     pub candidates: Vec<(String, String)>,
 }
 
@@ -1097,7 +1226,9 @@ impl Report {
             _ => None,
         };
         let candidates = match &cause {
-            Some(Cause::MissingReference { .. }) => {
+            // A server that named the targets said so itself: the deduction
+            // is only for the count-only form.
+            Some(Cause::MissingReference { named, .. }) if named.is_empty() => {
                 let island: BTreeSet<&str> = self
                     .islands
                     .get(stopped.island)
@@ -1892,6 +2023,17 @@ impl<'a> Pushing<'a> {
                     );
                     return Ok(());
                 }
+                Opened::Failed { code, message } => {
+                    self.refused_at(
+                        rank,
+                        format!("the transaction would not open: {message} (ETP error {code})"),
+                        Some(Said {
+                            code: Some(code),
+                            message,
+                        }),
+                    );
+                    return Ok(());
+                }
                 Opened::Unsupported(_) => {
                     self.said_no_transactions = true;
                     self.report.without_transactions = true;
@@ -1923,6 +2065,18 @@ impl<'a> Pushing<'a> {
                             code: None,
                             message: said,
                         };
+                        // Roll the island's own transaction back before the
+                        // push stops or splits it. ETP 1.2 18.1.1.1 step
+                        // 8.b.ii ends a transaction whose commit was
+                        // refused, but some servers (open-etp-server) keep it
+                        // open, and the push opens another one next in the
+                        // same session - which such a server then refuses.
+                        // The outcome is ignored, as after a refused put: a
+                        // server that already ended it answers with an error
+                        // that changes nothing. Only the push does this, for
+                        // a transaction it opened itself; the library's own
+                        // `commit_transaction` never rolls back.
+                        let _ = rollback_transaction(client, transaction).await;
                         self.refused(rank, why, Some(said), Vec::new());
                     }
                 },

@@ -219,7 +219,8 @@ sentence. Each refusal also carries `"cause"`, what its words name (below).
     "kind": "refused",        # "refused", "failed", "timeout", "gave_up" or "journal"
     "message": "2 Missing reference(s)",  # a refusal: the store's own words
     "code": None,             # the ETP error code, when there is one
-    "cause": {"kind": "missing_reference", "count": 2, "space": None},
+    "cause": {"kind": "missing_reference", "count": 2, "space": None,
+              "named": [], "more": 0},
     "candidates": [(from_uri, to_uri), ...],
 }
 ```
@@ -230,21 +231,41 @@ sentence. Each refusal also carries `"cause"`, what its words name (below).
   journal that would not serve;
 - `message`: for a refusal, the store's words **alone**, without the hint
   `report["stopped"]` may add about the references that leave the package;
+- `code`: for a refusal, the ETP error code when the store gave one. A
+  transaction the store would not open because it answered with an exception
+  (for instance `EINVALID_STATE` when another transaction is still open in the
+  session) is a `refused` stop that carries that `code` and `message`. A
+  refused commit carries no code, only a reason. The push rolls its own
+  transaction back when its commit is refused, because some servers
+  (open-etp-server) keep it open and refuse the next `StartTransaction`; the
+  library never rolls back on its own anywhere else (`Session.commit` does
+  not);
 - `cause` (a refusal only, `None` otherwise) is read from those words, and only
   from the messages open-etp-server (the OSDU Reservoir DDMS server) is
   documented in its sources to use at commit or on a write outside a
   transaction: `missing_reference` (`count`, and `space` outside a
   transaction), `orphan_reference`, `missing_array`, `orphan_array` (with
   `count`), `missing_array_container` (with `containers`). Any other words are
-  `{"kind": "unknown"}`: nothing is guessed for another server;
-- `candidates`, for a missing reference: the `report["dangling"]` pairs whose
+  `{"kind": "unknown"}`: nothing is guessed for another server. A
+  `missing_reference` also has `named` and `more`: from M27 (open-etp-server
+  merge request !586) the server writes `N Missing reference(s): from
+  <type>(<uuid>) to <type>(<uuid>) using <xpath>; ...`, at most 25 entries and
+  then `; ... (+k more)`. `named` lists them, each `{"from_type", "from_uuid",
+  "to_type", "to_uuid", "xpath"}`, and `more` is `k`; they are the server's
+  statement. A list that does not parse whole, or whose entries and `more` do
+  not add up to `count`, is `unknown`, not a count;
+- `candidates`, for a missing reference **when the server named none** (the
+  M26 form, `named` empty): the `report["dangling"]` pairs whose
   `from` is in the island that stopped. **This is the client's deduction, not
-  the server's statement** (the server counts the missing references and names
+  the server's statement** (that server counts the missing references and names
   none): every target the package holds is sent before what references it, so
   a reference from that island can only miss when its target leaves the
   package, and every such reference is in `dangling`, `only=` included. A target
   already in the dataspace is not missing, so there may be more candidates than
-  the server counts.
+  the server counts. The deduction is also wrong when a RESQML 2.0.1 reference
+  names an object of the package under `obj_` (`obj_LocalDepth3dCrs`) and the
+  server stores it without `obj_` (an OSDU RDDMS deployment, M26): the server
+  counts that reference missing although its target is there.
 
 `report["stopped"]` is unchanged, for the code that reads it.
 

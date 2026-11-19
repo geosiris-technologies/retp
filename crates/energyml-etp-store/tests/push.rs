@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use energyml_etp_store::push::{
-    Budget, Cause, NoPlan, Options, Progress, SkipReason, Split, Stop, StopKind, WellKnown, WriteFormat,
-    chosen, dry_run, islands, push, push_resumable, reconnecting,
+    Budget, Cause, NamedReference, NoPlan, Options, Progress, SkipReason, Split, Stop, StopKind, WellKnown,
+    WriteFormat, chosen, dry_run, islands, push, push_resumable, reconnecting,
 };
 use retp_avro::{Avro, EtpMessage, Reader, Role};
 use retp_client::memory::{ManualClock, MemoryTransport};
@@ -57,6 +57,17 @@ struct Log {
     transactions: Vec<&'static str>,
     /// Refuse every commit with this reason.
     refuse_commit: Option<&'static str>,
+    /// With `refuse_commit`: refuse only this many commits, then take them.
+    refuse_commit_times: Option<usize>,
+    /// Behave as open-etp-server (M26) does: a transaction stays open after a
+    /// refused commit until it is rolled back, and a `StartTransaction` while
+    /// one is open is answered with `EINVALID_STATE`.
+    sticky_transactions: bool,
+    /// Whether a transaction is open, for `sticky_transactions`.
+    open_transaction: bool,
+    /// Answer every `StartTransaction` with an `EINVALID_STATE` exception
+    /// saying this.
+    refuse_start: Option<&'static str>,
     /// Refuse every object written, with this reason - a dataspace opened
     /// read-only, which most are.
     refuse_objects: Option<&'static str>,
@@ -120,6 +131,19 @@ impl Handler for Receiving {
                     responder.send(out);
                     return Ok(Handled::Answered);
                 }
+                let stuck = log.sticky_transactions && log.open_transaction;
+                if stuck || log.refuse_start.is_some() {
+                    let words = log
+                        .refuse_start
+                        .unwrap_or("a transaction is already open in this session");
+                    let out = responder
+                        .wire()
+                        .refuse(delivery, &EtpError::EINVALID_STATE.with_detail(words));
+                    responder.send(out);
+                    log.transactions.push("start-refused");
+                    return Ok(Handled::Answered);
+                }
+                log.open_transaction = true;
                 log.transactions.push("start");
                 let response = StartTransactionResponse {
                     transaction_uuid: Uuid([9; 16]),
@@ -131,16 +155,28 @@ impl Handler for Receiving {
             }
             Message::CommitTransaction(request) => {
                 log.transactions.push("commit");
+                let refused = match (log.refuse_commit, log.refuse_commit_times) {
+                    (Some(why), None) => Some(why),
+                    (Some(why), Some(left)) if left > 0 => {
+                        log.refuse_commit_times = Some(left - 1);
+                        Some(why)
+                    }
+                    _ => None,
+                };
+                // A refused commit leaves the transaction open on a sticky
+                // store; any other commit ends it.
+                log.open_transaction = log.sticky_transactions && refused.is_some();
                 let response = CommitTransactionResponse {
                     transaction_uuid: request.transaction_uuid,
-                    successful: log.refuse_commit.is_none(),
-                    failure_reason: log.refuse_commit.unwrap_or("").to_string(),
+                    successful: refused.is_none(),
+                    failure_reason: refused.unwrap_or("").to_string(),
                 };
                 let out = responder.wire().respond(delivery, &response).unwrap();
                 responder.send(out);
             }
             Message::RollbackTransaction(request) => {
                 log.transactions.push("rollback");
+                log.open_transaction = false;
                 let response = RollbackTransactionResponse {
                     transaction_uuid: request.transaction_uuid,
                     successful: true,
@@ -642,8 +678,88 @@ fn a_refused_commit_stops_the_push_and_says_where() {
         other => panic!("{other:?}"),
     }
     // One island tried, none after it: a second `start` would be the push
-    // carrying on past a refusal.
-    assert_eq!(log.lock().unwrap().transactions, ["start", "commit"]);
+    // carrying on past a refusal. It rolls its own transaction back first.
+    assert_eq!(log.lock().unwrap().transactions, ["start", "commit", "rollback"]);
+}
+
+/// **After a refused commit the push rolls its own transaction back**, because
+/// open-etp-server keeps it open (its `TransProto.cpp` does not end the
+/// transaction on a failed check, where ETP 1.2 18.1.1.1 step 8.b.ii does),
+/// and a split's next island opens another one in the same session: that
+/// `StartTransaction` is refused while the first is open. The store here
+/// behaves so, and refuses the first commit only.
+#[test]
+fn a_refused_commit_is_rolled_back_before_the_split_opens_the_next_transaction() {
+    let source = store();
+    let (mut client, log) = receiving_with(Log {
+        refuse_commit: Some("the dataspace is read-only today"),
+        refuse_commit_times: Some(1),
+        sticky_transactions: true,
+        ..Log::default()
+    });
+    let options = Options {
+        split: Split::Halve,
+        ..Default::default()
+    };
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert!(report.stopped.is_none(), "{:?}", report.stopped);
+    assert_eq!(report.splits.len(), 1, "{:?}", report.splits);
+    assert_eq!(report.sent, report.islands.len());
+    let log = log.lock().unwrap();
+    // The first island: start, commit (refused), rollback - and only then the
+    // pieces' own transactions, none refused for one still open.
+    assert_eq!(
+        &log.transactions[..3],
+        ["start", "commit", "rollback"],
+        "{:?}",
+        log.transactions
+    );
+    assert!(
+        !log.transactions.contains(&"start-refused"),
+        "a start was refused for a transaction left open: {:?}",
+        log.transactions
+    );
+}
+
+/// **A transaction the store answers with an exception says its code and its
+/// words.** open-etp-server answers `EINVALID_STATE` to a `StartTransaction`
+/// while another transaction is open; the report carries that code and
+/// message, not "the store answered nothing about the transaction".
+#[test]
+fn a_transaction_refused_with_an_exception_reaches_the_report_with_its_code() {
+    let source = store();
+    let (mut client, log) = receiving_with(Log {
+        refuse_start: Some("another transaction is open in this session"),
+        ..Log::default()
+    });
+    let report = block(push(&mut client, &source, "there", &Options::default(), |_| {})).unwrap();
+    assert_eq!(report.sent, 0);
+    let stopped = report.stopped.as_ref().expect("the push stopped");
+    match &stopped.why {
+        Stop::Refused(why) => {
+            assert!(why.contains("the transaction would not open"), "{why}");
+            assert!(
+                why.contains("another transaction is open in this session"),
+                "{why}"
+            );
+            assert!(!why.contains("answered nothing"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let said = stopped.said.as_ref().expect("the store's words");
+    assert_eq!(said.code, Some(8), "EINVALID_STATE, ETP v1.2 section 24.3");
+    assert!(
+        said.message.contains("another transaction is open"),
+        "{}",
+        said.message
+    );
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.kind, StopKind::Refused);
+    assert_eq!(diagnosis.code, Some(8));
+    assert!(diagnosis.message.contains("another transaction is open"));
+    assert_eq!(diagnosis.cause, Some(Cause::Unknown));
+    // Nothing was opened, so nothing to roll back.
+    assert_eq!(log.lock().unwrap().transactions, ["start-refused"]);
 }
 
 /// **A write the store refuses rolls the island back and stops there.** The
@@ -2101,7 +2217,9 @@ fn the_documented_refusals_are_classified_and_nothing_else() {
         Cause::of("3 Missing reference(s)"),
         Cause::MissingReference {
             count: 3,
-            space: None
+            space: None,
+            named: Vec::new(),
+            more: 0,
         }
     );
     // "{} Missing reference(s) in space {}", StoreProto.cpp, outside a transaction.
@@ -2109,7 +2227,9 @@ fn the_documented_refusals_are_classified_and_nothing_else() {
         Cause::of("1 Missing reference(s) in space demo"),
         Cause::MissingReference {
             count: 1,
-            space: Some("demo".into())
+            space: Some("demo".into()),
+            named: Vec::new(),
+            more: 0,
         }
     );
     // "{} Orphan reference(s)", TransProto.cpp:277,292-298.
@@ -2192,12 +2312,155 @@ fn a_refused_commit_is_classified_from_the_stores_words_not_the_hint() {
         diagnosis.cause,
         Some(Cause::MissingReference {
             count: 2,
-            space: None
+            space: None,
+            named: Vec::new(),
+            more: 0,
         })
     );
     assert_eq!(report.dangling.len(), 2, "{:?}", report.dangling);
     assert_eq!(diagnosis.candidates, report.dangling);
     assert!(diagnosis.candidates.iter().all(|(from, _)| *from == points));
+}
+
+/// **A server that names the missing references is read whole, or not at
+/// all.** The form is open-etp-server's from M27 (merge request !586,
+/// `TransProto.cpp`, test `test_Transaction18_missing_reference_failure_reason`
+/// in `TransProtoTests.cpp`): `"{N} Missing reference(s): from {type}({uuid})
+/// to {type}({uuid}) using {xpath}; ..."`, 25 entries at most, then `"; ...
+/// (+{k} more)"`. A list that does not parse, or whose entries and `k` do not
+/// add up to `N`, is `unknown`: nothing documents it.
+#[test]
+fn the_missing_references_a_server_names_are_parsed_whole_or_not_at_all() {
+    let a = "resqml20.obj_PointSetRepresentation";
+    let from = "11111111-1111-1111-1111-111111111111";
+    let to = "22222222-2222-2222-2222-222222222222";
+    let entry = |n: u32| format!("from {a}({from}) to resqml20.obj_LocalDepth3dCrs({to}) using /LocalCrs{n}");
+
+    // One entry.
+    let one = format!("1 Missing reference(s): {}", entry(0));
+    assert_eq!(
+        Cause::of(&one),
+        Cause::MissingReference {
+            count: 1,
+            space: None,
+            named: vec![NamedReference {
+                from_type: a.into(),
+                from_uuid: from.into(),
+                to_type: "resqml20.obj_LocalDepth3dCrs".into(),
+                to_uuid: to.into(),
+                xpath: "/LocalCrs0".into(),
+            }],
+            more: 0,
+        }
+    );
+    // Two entries, in the server's order.
+    let two = format!("2 Missing reference(s): {}; {}", entry(0), entry(1));
+    match Cause::of(&two) {
+        Cause::MissingReference {
+            count, named, more, ..
+        } => {
+            assert_eq!((count, named.len(), more), (2, 2, 0));
+            assert_eq!(
+                (named[0].xpath.as_str(), named[1].xpath.as_str()),
+                ("/LocalCrs0", "/LocalCrs1")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // Capped: 25 named, the rest counted.
+    let list: Vec<String> = (0..25).map(entry).collect();
+    let capped = format!("40 Missing reference(s): {}; ... (+15 more)", list.join("; "));
+    match Cause::of(&capped) {
+        Cause::MissingReference {
+            count, named, more, ..
+        } => {
+            assert_eq!((count, named.len(), more), (40, 25, 15));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A placeholder the server writes for what it could not resolve (MR !586,
+    // `SpaceWriter::get_references_infos`).
+    let placeholder = format!(
+        "1 Missing reference(s): from <obj_id 7>({from}) to <unresolved type_id 3>({to}) using <xpa_id 9>"
+    );
+    match Cause::of(&placeholder) {
+        Cause::MissingReference { named, .. } => {
+            assert_eq!(named[0].from_type, "<obj_id 7>");
+            assert_eq!(named[0].to_type, "<unresolved type_id 3>");
+            assert_eq!(named[0].xpath, "<xpa_id 9>");
+        }
+        other => panic!("{other:?}"),
+    }
+    // The count-only form is unchanged, and has no names.
+    match Cause::of("3 Missing reference(s)") {
+        Cause::MissingReference { named, more, .. } => assert_eq!((named.len(), more), (0, 0)),
+        other => panic!("{other:?}"),
+    }
+
+    // Malformed named forms are `unknown`, not the count alone.
+    let good = entry(0);
+    for malformed in [
+        "1 Missing reference(s): ".to_string(),
+        "1 Missing reference(s): something".to_string(),
+        "1 Missing reference(s): from a(b) to c(d)".to_string(),
+        format!("1 Missing reference(s): from {a}({from}) to x({to}) using "),
+        format!("1 Missing reference(s): from {a}() to x({to}) using /p"),
+        format!("1 Missing reference(s): from {a} to x({to}) using /p"),
+        // Entries and tail do not add up to the count.
+        format!("2 Missing reference(s): {good}"),
+        format!("1 Missing reference(s): {good}; ... (+3 more)"),
+        // A tail that is not last, or has no number.
+        format!("3 Missing reference(s): {good}; ... (+2 more); {good}"),
+        format!("2 Missing reference(s): {good}; ... (+ more)"),
+        format!("2 Missing reference(s): {good}; ... (+x more)"),
+        // Only a tail.
+        "3 Missing reference(s): ... (+3 more)".to_string(),
+        // A second entry that is not one.
+        format!("2 Missing reference(s): {good}; garbage"),
+        // Not the documented separator.
+        format!("2 Missing reference(s): {good}, {good}"),
+    ] {
+        assert_eq!(Cause::of(&malformed), Cause::Unknown, "{malformed:?}");
+    }
+}
+
+/// **When the server names the missing references, they are its statement and
+/// the deduction stays out**; the count-only form keeps the candidates.
+#[test]
+fn a_named_missing_reference_comes_before_the_deduction() {
+    let source = store();
+    let listed = block(energyml_storage::storage::EnergymlStorage::resources(&source)).unwrap();
+    let points = listed
+        .iter()
+        .find(|one| one.qualified_type.contains("PointSetRepresentation"))
+        .unwrap()
+        .uri
+        .clone();
+    let only = [points];
+    let options = Options {
+        only: Some(&only),
+        ..Default::default()
+    };
+    let named = "1 Missing reference(s): from resqml20.obj_PointSetRepresentation(11111111-1111-1111-1111-111111111111) to resqml20.obj_LocalDepth3dCrs(22222222-2222-2222-2222-222222222222) using /LocalCrs";
+    let (mut client, _) = receiving(Some(named));
+    let report = block(push(&mut client, &source, "there", &options, |_| {})).unwrap();
+    assert_eq!(report.dangling.len(), 2, "this side's deduction exists");
+    let diagnosis = report.diagnosis().expect("a stop");
+    assert_eq!(diagnosis.message, named);
+    match diagnosis.cause {
+        Some(Cause::MissingReference {
+            count, named, more, ..
+        }) => {
+            assert_eq!((count, named.len(), more), (1, 1, 0));
+            assert_eq!(named[0].xpath, "/LocalCrs");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        diagnosis.candidates.is_empty(),
+        "the server named the target: {:?}",
+        diagnosis.candidates
+    );
 }
 
 /// **The candidates are the stopped island's alone.** With the CRS hidden,
@@ -2221,7 +2484,9 @@ fn the_candidates_are_those_of_the_island_that_stopped() {
         diagnosis.cause,
         Some(Cause::MissingReference {
             count: 1,
-            space: None
+            space: None,
+            named: Vec::new(),
+            more: 0,
         })
     );
     assert!(diagnosis.candidates.is_empty(), "{:?}", diagnosis.candidates);
@@ -2261,6 +2526,8 @@ fn a_refused_object_is_classified_from_its_own_words() {
     let expected = Cause::MissingReference {
         count: 2,
         space: Some("there".into()),
+        named: Vec::new(),
+        more: 0,
     };
     let alone = Refusal {
         uri: "eml:///dataspace('there')/resqml20.obj_PointSetRepresentation(p)".into(),

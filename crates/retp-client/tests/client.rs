@@ -604,6 +604,18 @@ impl Handler for Store {
                 responder.send_all(out);
                 Ok(Handled::Answered)
             }
+            Message::StartTransaction(request)
+                if request.dataspace_uris.iter().any(|u| u.contains("excepted")) =>
+            {
+                // open-etp-server, while the session's previous transaction is
+                // still open: an exception, not `successful: false`.
+                let out = responder.wire().refuse(
+                    delivery,
+                    &EtpError::EINVALID_STATE.with_detail("a transaction is already open in this session"),
+                );
+                responder.send(out);
+                Ok(Handled::Answered)
+            }
             Message::StartTransaction(request) => {
                 // A store says no with `successful: false` and a reason, not
                 // with an exception - which is why a client reading only the
@@ -4160,6 +4172,24 @@ fn a_transaction_the_store_would_not_open_is_not_one() {
         Opened::Refused(why) => assert!(why.contains("another transaction"), "{why}"),
         Opened::Open(_) => panic!("a refusal was read as an open transaction"),
         Opened::Unsupported(why) => panic!("a refusal was read as no transactions at all: {why}"),
+        Opened::Failed { code, message } => panic!("an answer was read as an exception: {code} {message}"),
+    }
+}
+
+/// **An exception other than "no transactions here" keeps its code and its
+/// words.** A store that kept a transaction open answers the next
+/// `StartTransaction` with `EINVALID_STATE`; a client that dropped it said
+/// "the store answered nothing about the transaction", which is false.
+#[test]
+fn a_transaction_the_store_answers_with_an_exception_keeps_its_code_and_words() {
+    let mut client = open_writing(None);
+    let excepted = "eml:///dataspace('excepted')".to_string();
+    match start_transaction(&mut client, &[excepted], false, "").unwrap() {
+        Opened::Failed { code, message } => {
+            assert_eq!(code, EtpError::EINVALID_STATE.code());
+            assert!(message.contains("already open in this session"), "{message}");
+        }
+        other => panic!("{other:?}"),
     }
 }
 

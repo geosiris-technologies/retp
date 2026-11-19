@@ -625,6 +625,14 @@ pub fn run_with<K: Session>(
                         Verdict::Fail,
                         format!("refused: {why}"),
                     )),
+                    Ok(Opened::Failed { code, message }) => report.findings.push(Finding::new(
+                        "transaction.start-rollback",
+                        "§18.2.1",
+                        "A read-only transaction on one dataspace opens",
+                        Some(18),
+                        Verdict::Fail,
+                        format!("refused: {message} (ETP error {code})"),
+                    )),
                     Ok(Opened::Unsupported(why)) => report.findings.push(Finding::new(
                         "transaction.start-rollback",
                         "§18.2.1, §3.1.1.2 §3",
@@ -2024,6 +2032,9 @@ fn sample_checks<K: Session>(
             }) {
                 Ok(Opened::Open(opened)) => transaction = Some(opened),
                 Ok(Opened::Refused(why)) | Ok(Opened::Unsupported(why)) => without_transaction = Some(why),
+                Ok(Opened::Failed { code, message }) => {
+                    without_transaction = Some(format!("{message} (ETP error {code})"))
+                }
                 Err(why) => without_transaction = Some(why.to_string()),
             }
         }
@@ -2812,6 +2823,14 @@ fn transaction_checks<K: Session>(client: &mut K, seen: &mut Seen, report: &mut 
             Verdict::Fail,
             format!("refused: {why}"),
         )),
+        Ok(Opened::Failed { code, message }) => report.findings.push(Finding::new(
+            "transaction.rollback-leaves-nothing",
+            "§18.1.1.1",
+            "A writing transaction on one dataspace opens",
+            Some(18),
+            Verdict::Fail,
+            format!("refused: {message} (ETP error {code})"),
+        )),
         Ok(Opened::Unsupported(why)) => report.findings.push(Finding::new(
             "transaction.rollback-leaves-nothing",
             "§18.1.1.1",
@@ -2860,6 +2879,14 @@ fn transaction_checks<K: Session>(client: &mut K, seen: &mut Seen, report: &mut 
             Some(18),
             Verdict::Fail,
             format!("refused: {why}"),
+        )),
+        Ok(Opened::Failed { code, message }) => report.findings.push(Finding::new(
+            "transaction.commit-keeps",
+            "§18.1.1.1",
+            "A writing transaction on one dataspace opens",
+            Some(18),
+            Verdict::Fail,
+            format!("refused: {message} (ETP error {code})"),
         )),
         Ok(Opened::Unsupported(why)) => report.findings.push(Finding::new(
             "transaction.commit-keeps",

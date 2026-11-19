@@ -68,6 +68,7 @@ impl AsyncWrite for Stream {
 /// An open WebSocket to an ETP server.
 pub(super) struct Ws {
     inner: WebSocketStream<Stream>,
+    max_message: usize,
 }
 
 impl Ws {
@@ -109,7 +110,12 @@ impl Ws {
         } else {
             Stream::Plain(tcp)
         };
-        let (inner, response) = tokio_tungstenite::client_async(request, stream)
+        // A frame is part of a message: neither may pass the limit.
+        let limit = crate::native::announced_message_limit(handshake);
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
+        let (inner, response) = tokio_tungstenite::client_async_with_config(request, stream, Some(config))
             .await
             .map_err(|why| refused_handshake(&handshake.url, why))?;
         let agreed = response
@@ -123,7 +129,10 @@ impl Ws {
                 probe::SUBPROTOCOL
             )));
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            max_message: limit,
+        })
     }
 
     /// Send one binary message, flushed.
@@ -153,6 +162,9 @@ impl Ws {
                     }));
                 }
                 Some(Ok(_)) => continue,
+                Some(Err(tungstenite::Error::Capacity(
+                    tungstenite::error::CapacityError::MessageTooLong { size, .. },
+                ))) => return Err(crate::native::message_too_long(size, self.max_message)),
                 Some(Err(why)) => return Err(TransportError::new(format!("receiving: {why}"))),
                 None => return Err(TransportError::new("the WebSocket is closed")),
             }

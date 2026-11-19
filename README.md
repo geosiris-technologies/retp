@@ -2,6 +2,12 @@
 
 **An Energistics Transfer Protocol (ETP) v1.2 stack in Rust.**
 
+[![crates.io](https://img.shields.io/crates/v/retp-client.svg)](https://crates.io/crates/retp-client)
+[![docs.rs](https://img.shields.io/docsrs/retp-client)](https://docs.rs/retp-client)
+[![PyPI](https://img.shields.io/pypi/v/retp.svg)](https://pypi.org/project/retp/)
+[![CI](https://github.com/geosiris-technologies/retp/actions/workflows/ci.yml/badge.svg)](https://github.com/geosiris-technologies/retp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 ETP is the WebSocket protocol the energy industry uses to exchange subsurface
 data objects (RESQML, WITSML, PRODML), data arrays and streams with a server,
 including OSDU's Reservoir DDMS. `retp` is its Rust implementation: encode and

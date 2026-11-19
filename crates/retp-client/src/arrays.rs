@@ -1215,6 +1215,36 @@ pub mod asynchronous {
         client: &mut K,
         requests: &[(DataArrayIdentifier, Option<Block>)],
         default_message: u64,
+        progress: impl FnMut(ArrayProgress),
+    ) -> Result<Vec<Result<Array, ArrayFailure>>, ClientError> {
+        read_regions_with(client, requests, &[], default_message, progress).await
+    }
+
+    /// [`read_regions`] for a caller that already holds the arrays' metadata
+    /// (it asked for it in one `GetDataArrayMetadata`, to show shapes): no
+    /// round trip is spent on it again.
+    ///
+    /// `known` runs along `requests`: entry `i` is the metadata of request
+    /// `i`, or `None` to have it asked. The arrays with `None` (and those
+    /// past the end of a shorter `known`) are asked **together, in one
+    /// message**; when every array is known, none is sent. The metadata,
+    /// given or asked, goes through the same planning ([`plan`], the budgets,
+    /// the region check): a region that does not lie inside the given
+    /// dimensions is refused by name, exactly as for asked ones.
+    ///
+    /// Given metadata is used as given. If it is **stale** (the array was
+    /// rewritten since), it shows as an [`ArrayFailure::Inconsistent`] naming
+    /// the metadata as the caller's, when the store's data disagrees with it:
+    /// a whole-array read whose dimensions changed, a data type that changed,
+    /// or a block of another element count. A read of a region cannot tell
+    /// that the array grew or shrank, only that the store refused the region
+    /// (as a failure of that array) or sent data of another type; ask for
+    /// the metadata again when in doubt.
+    pub async fn read_regions_with<K: Caller>(
+        client: &mut K,
+        requests: &[(DataArrayIdentifier, Option<Block>)],
+        known: &[Option<DataArrayMetadata>],
+        default_message: u64,
         mut progress: impl FnMut(ArrayProgress),
     ) -> Result<Vec<Result<Array, ArrayFailure>>, ClientError> {
         let ids: Vec<DataArrayIdentifier> = requests.iter().map(|(id, _)| id.clone()).collect();
@@ -1224,7 +1254,24 @@ pub mod asynchronous {
         // limits: blocks of the first size ride together up to the second.
         let per_message = message_budget(&client.negotiated(), default_message);
         let tolerance = client.tolerance();
-        let metadata = array_metadata(client, ids).await?;
+        // Only what the caller does not hold is asked, in one message.
+        let given = |i: usize| known.get(i).and_then(|m| m.as_ref());
+        let asked_ids: Vec<DataArrayIdentifier> = (0..ids.len())
+            .filter(|i| given(*i).is_none())
+            .map(|i| ids[i].clone())
+            .collect();
+        let mut asked = if asked_ids.is_empty() {
+            Vec::new()
+        } else {
+            array_metadata(client, &asked_ids).await?
+        }
+        .into_iter();
+        let metadata: Vec<Result<DataArrayMetadata, ErrorInfo>> = (0..ids.len())
+            .map(|i| match given(i) {
+                Some(meta) => Ok(meta.clone()),
+                None => asked.next().expect("one answer for each array asked"),
+            })
+            .collect();
 
         // What each array needs.
         let mut assemblies: Vec<Option<Assembly>> = Vec::new();
@@ -1346,6 +1393,11 @@ pub mod asynchronous {
                 transport: meta.transport_array_type,
                 unit,
                 blocks,
+                metadata_of: if given(i).is_some() {
+                    "the metadata given by the caller"
+                } else {
+                    "the metadata"
+                },
                 failure: None,
             }));
         }
@@ -1565,6 +1617,23 @@ pub fn write_arrays_with<K: Blocking>(
     ))
 }
 
+/// [`asynchronous::read_regions_with`], on the blocking client.
+pub fn read_regions_with<K: Blocking>(
+    client: &mut K,
+    requests: &[(DataArrayIdentifier, Option<Block>)],
+    known: &[Option<DataArrayMetadata>],
+    default_message: u64,
+    progress: impl FnMut(ArrayProgress),
+) -> Result<Vec<Result<Array, ArrayFailure>>, ClientError> {
+    run(asynchronous::read_regions_with(
+        client,
+        requests,
+        known,
+        default_message,
+        progress,
+    ))
+}
+
 /// [`asynchronous::read_regions`], on the blocking client.
 pub fn read_regions<K: Blocking>(
     client: &mut K,
@@ -1600,6 +1669,8 @@ struct Assembly {
     unit: usize,
     values: ArrayValues,
     blocks: usize,
+    /// Whose the metadata is, for the words of a refusal.
+    metadata_of: &'static str,
     failure: Option<ArrayFailure>,
 }
 
@@ -1613,15 +1684,16 @@ impl Assembly {
         let dims: Vec<u64> = data.dimensions.iter().map(|d| *d as u64).collect();
         if dims != block.counts {
             self.failure = Some(ArrayFailure::Inconsistent(format!(
-                "a block of {:?} was asked, one of {dims:?} came",
-                block.counts
+                "a block of {:?} was asked, one of {dims:?} came ({} may be stale)",
+                block.counts, self.metadata_of
             )));
             return;
         }
         let values = ArrayValues::from_item(data.data.item);
         if values.transport() != self.transport {
             self.failure = Some(ArrayFailure::Inconsistent(format!(
-                "the metadata says {:?}, the data is {:?}",
+                "{} says {:?}, the data is {:?}",
+                self.metadata_of,
                 self.transport,
                 values.transport()
             )));
@@ -1630,11 +1702,12 @@ impl Assembly {
         let expected = block.len() as usize * self.unit;
         if values.units() != expected {
             self.failure = Some(ArrayFailure::Inconsistent(format!(
-                "a block of {:?} holds {} {}, {} came",
+                "a block of {:?} holds {} {}, {} came ({} may be stale)",
                 block.counts,
                 expected,
                 if self.unit > 1 { "bytes" } else { "values" },
-                values.units()
+                values.units(),
+                self.metadata_of
             )));
             return;
         }

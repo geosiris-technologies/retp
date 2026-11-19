@@ -163,3 +163,4 @@ When a command line gives maturin `--features`, it replaces the list of
 is declared with PEP 639 (`license` and `license-files`): left to find the files, maturin
 recorded a `License-File` that was not in the sdist, and the index refused it; the sdist
 job checks it.
+

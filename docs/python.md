@@ -149,13 +149,16 @@ with retp.connect(url, token=token, writing=True) as session:
             "owners": ["data.default.owners@example.org"],
             "viewers": ["data.default.viewers@example.org"],
             "legaltags": ["opendes-public-usa-dataset-1"],
+            "otherRelevantDataCountries": ["US"],
         },
     )
     deleted, errors = session.delete_dataspaces(["eml:///dataspace('old')"])
 ```
 
 Each dataspace is a path or a URI. `custom_data` goes with each (an OSDU store
-reads its ACLs and legal tags there): a list of strings goes as that list; a
+reads its ACLs and legal tags there; some OSDU deployments also require
+`otherRelevantDataCountries`, a list of country codes, as in the Reservoir DDMS
+API's own example): a list of strings goes as that list; a
 string is read as the command line's `--custom KEY=VALUE` reads it, a text with a
 comma a list of strings and any other text one string. Any other value is
 refused (`ValueError`). Each dataspace answers for itself: the ones the store took
@@ -210,12 +213,16 @@ the refusal is this side's, an array that could not be read). A
 `report["stopped"]` quotes the first in a sentence; read the list, not the
 sentence. Each refusal also carries `"cause"`, what its words name (below).
 
+**Island numbers**: the sentence counts islands from 1 ("island 1 was refused"
+is `report["islands"][0]`), while `report["stop"]["island"]`, the indexes of
+`report["islands"]` and `report["splits"][*]["island"]` count from 0.
+
 `report["stop"]` says why the push stopped, sorted for a program to act on:
 `None` when every island went through, or
 
 ```python
 {
-    "island": 3,              # its rank in report["islands"]
+    "island": 3,              # its index in report["islands"], counted from 0
     "kind": "refused",        # "refused", "failed", "timeout", "gave_up" or "journal"
     "message": "2 Missing reference(s)",  # a refusal: the store's own words
     "code": None,             # the ETP error code, when there is one

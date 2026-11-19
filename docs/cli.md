@@ -264,12 +264,16 @@ retp delete-dataspace wss://etp.example.com/etp demo
 
 An OSDU store asks for `owners`, `viewers` and `legaltags` in the dataspace's
 custom data: `--custom owners=OWNERS --custom viewers=VIEWERS --custom
-legaltags=LEGALTAG`.
+legaltags=LEGALTAG`. Some OSDU deployments also require
+`otherRelevantDataCountries` (a list of country codes): `--custom
+otherRelevantDataCountries=US`.
 
 `push` sends targets before what references them, an object with its arrays in
-one transaction, and stops at a refused island. Arrays travel as many whole
-arrays per `PutDataArrays` as the negotiated message size takes; big ones are
-declared in one message and filled block by block. `--one-by-one` sends each
+one transaction, and stops at a refused island. The islands are numbered from
+1 in what `push` prints (the Python report counts its indexes from 0). Arrays
+travel as many whole arrays per `PutDataArrays` as the negotiated message size
+takes; big ones are declared in one message and filled block by block.
+`--one-by-one` sends each
 array in its own message, for a store that mishandles several in one.
 `--well-known` also sends the official dictionary's property kinds the package
 references without holding.

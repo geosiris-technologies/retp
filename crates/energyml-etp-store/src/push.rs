@@ -782,7 +782,8 @@ pub enum Stop {
 /// Where a push stopped, when it did.
 #[derive(Debug)]
 pub struct Stopped {
-    /// The island that did not go through, by rank in [`Report::islands`].
+    /// The island that did not go through, by rank in [`Report::islands`]
+    /// (0-based; the messages and the CLI print it plus one).
     pub island: usize,
     /// Why.
     pub why: Stop,
@@ -1069,7 +1070,8 @@ impl Cause {
 /// Why a push stopped, sorted - [`Report::diagnosis`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnosis {
-    /// The island that did not go through, by rank in [`Report::islands`].
+    /// The island that did not go through, by rank in [`Report::islands`]
+    /// (0-based; the messages and the CLI print it plus one).
     pub island: usize,
     /// What kind of stop.
     pub kind: StopKind,
@@ -1275,7 +1277,7 @@ pub enum SkipReason {
 /// An island split, and sent as pieces in its place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitIsland {
-    /// Its rank in [`Report::islands`]: its pieces start there.
+    /// Its 0-based rank in [`Report::islands`]: its pieces start there.
     pub island: usize,
     /// Its objects, as the plan names them.
     pub uris: Vec<String>,

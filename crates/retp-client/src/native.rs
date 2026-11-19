@@ -243,15 +243,75 @@ pub(crate) fn refused_header(why: HeaderRefusal) -> ClientError {
     ClientError::Transport(TransportError::new(why.to_string()))
 }
 
+/// The largest WebSocket message, in bytes, a connection accepts when the
+/// handshake announced no `MaxWebSocketMessagePayloadSize`: 64 MiB, which is
+/// what the WebSocket library already assumed, now said and tested. Array
+/// reads are cut into messages of 16 MiB at most by default
+/// ([`crate::arrays`]), so this leaves four times that for the other
+/// messages. A larger one is refused by name; the way to raise it is
+/// [`WebSocketTransport::connect_limited`].
+pub const DEFAULT_MAX_WEBSOCKET_MESSAGE: usize = 64 * 1024 * 1024;
+
+/// The most a WebSocket message may weigh on a connection opened with
+/// `handshake`: the `MaxWebSocketMessagePayloadSize` it announces to the
+/// server - the size this end says it can receive - or
+/// [`DEFAULT_MAX_WEBSOCKET_MESSAGE`] when it announces none.
+/// TODO(verify): the ETP 1.2 text of that capability, read against the
+/// specification; here it is taken as the size the announcing end receives.
+pub(crate) fn announced_message_limit(handshake: &Handshake) -> usize {
+    const NAME: &str = "maxwebsocketmessagepayloadsize";
+    let from_header = handshake
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(NAME))
+        .map(|(_, value)| value.as_str());
+    let from_query = handshake.url.split_once('?').and_then(|(_, query)| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| key.eq_ignore_ascii_case(NAME))
+            .map(|(_, value)| value)
+    });
+    from_header
+        .or(from_query)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|size| *size > 0)
+        .and_then(|size| usize::try_from(size).ok())
+        .unwrap_or(DEFAULT_MAX_WEBSOCKET_MESSAGE)
+}
+
+/// A message above the limit, said as what it is.
+pub(crate) fn message_too_long(size: usize, max_size: usize) -> TransportError {
+    TransportError::new(format!(
+        "the server sent a WebSocket message of {size} bytes, above the {max_size} this connection accepts; \
+         it was refused before being buffered. Raise the limit by announcing a larger \
+         MaxWebSocketMessagePayloadSize (`Connect::max_message`) or with `connect_limited`"
+    ))
+}
+
 /// A WebSocket to an ETP server.
 pub struct WebSocketTransport {
     socket: WebSocket<Stream>,
     closed: bool,
+    max_message: usize,
 }
 
 impl WebSocketTransport {
-    /// Open the WebSocket a [`Handshake`] describes.
+    /// Open the WebSocket a [`Handshake`] describes. A message larger than
+    /// the size the handshake announces (see [`announced_message_limit`]) -
+    /// [`DEFAULT_MAX_WEBSOCKET_MESSAGE`] when it announces none - is refused
+    /// by name, before it is buffered.
     pub fn connect(handshake: &Handshake, certificates: CertificateCheck) -> Result<Self, TransportError> {
+        Self::connect_limited(handshake, certificates, announced_message_limit(handshake))
+    }
+
+    /// [`WebSocketTransport::connect`], accepting messages of `max_message`
+    /// bytes at most, whatever the handshake announced.
+    pub fn connect_limited(
+        handshake: &Handshake,
+        certificates: CertificateCheck,
+        max_message: usize,
+    ) -> Result<Self, TransportError> {
         let mut request = handshake
             .url
             .as_str()
@@ -286,8 +346,12 @@ impl WebSocketTransport {
         } else {
             Stream::Plain(tcp)
         };
-        let (socket, response) =
-            tungstenite::client(request, stream).map_err(|why| refused_handshake(&handshake.url, why))?;
+        // A frame is part of a message: neither may pass the limit.
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(max_message))
+            .max_frame_size(Some(max_message));
+        let (socket, response) = tungstenite::client::client_with_config(request, stream, Some(config))
+            .map_err(|why| refused_handshake(&handshake.url, why))?;
         let agreed = response
             .headers()
             .get("sec-websocket-protocol")
@@ -302,6 +366,7 @@ impl WebSocketTransport {
         Ok(Self {
             socket,
             closed: false,
+            max_message,
         })
     }
 }
@@ -414,6 +479,13 @@ impl Transport for WebSocketTransport {
                     if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
                 {
                     return Ok(None);
+                }
+                Err(tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+                    size,
+                    ..
+                })) => {
+                    self.closed = true;
+                    return Err(message_too_long(size, self.max_message));
                 }
                 Err(why) => {
                     self.closed = true;
@@ -552,9 +624,24 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
 /// the probe's: an array's block is a large answer.
 pub struct UreqHttp {
     agent: ureq::Agent,
+    max_body: u64,
 }
 
+/// The largest HTTP answer body, in bytes, [`UreqHttp`] reads by default:
+/// 256 MiB. Array blocks are cut to 16 MiB by default and the other answers
+/// (lists, objects) are far smaller, so this is generous; a larger body is
+/// refused by name, and [`UreqHttp::with_max_body`] raises the limit.
+pub const DEFAULT_MAX_HTTP_BODY: u64 = 256 * 1024 * 1024;
+
 impl UreqHttp {
+    /// Read answer bodies of `bytes` at most (the default is
+    /// [`DEFAULT_MAX_HTTP_BODY`]); a larger one is a [`TransportError`] that
+    /// says the limit, and is not buffered beyond it.
+    pub fn with_max_body(mut self, bytes: u64) -> Self {
+        self.max_body = bytes;
+        self
+    }
+
     /// An HTTP client checking certificates as `check` says.
     pub fn new(check: CertificateCheck) -> Self {
         Self::following(check, REDIRECTS)
@@ -579,7 +666,10 @@ impl UreqHttp {
             .timeout_global(Some(Duration::from_secs(300)))
             .build()
             .new_agent();
-        Self { agent }
+        Self {
+            agent,
+            max_body: DEFAULT_MAX_HTTP_BODY,
+        }
     }
 
     fn send_now(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
@@ -621,9 +711,16 @@ impl UreqHttp {
         let body = response
             .body_mut()
             .with_config()
-            .limit(u64::MAX)
+            .limit(self.max_body)
             .read_to_vec()
-            .map_err(|why| TransportError::new(format!("{}: reading the body: {why}", request.url)))?;
+            .map_err(|why| match why {
+                ureq::Error::BodyExceedsLimit(limit) => TransportError::new(format!(
+                    "{}: the answer body is larger than the {limit} bytes this client reads; \
+                     raise the limit with `UreqHttp::with_max_body`",
+                    request.url
+                )),
+                why => TransportError::new(format!("{}: reading the body: {why}", request.url)),
+            })?;
         Ok(HttpResponse {
             status,
             challenge,

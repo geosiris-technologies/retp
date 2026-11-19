@@ -965,8 +965,8 @@ pub fn put_dataspaces<K: Blocking>(
 }
 
 /// One `customData` value of a dataspace, from the text a person types:
-/// `a,b` is a list of strings (OSDU's `owners`, `viewers`, `legaltags`), any
-/// other text one string. The command line and the conformance suite read
+/// `a,b` is a list of strings (OSDU's `owners`, `viewers`, `legaltags`, and on
+/// some deployments `otherRelevantDataCountries`), any other text one string. The command line and the conformance suite read
 /// `KEY=VALUE` through this, so both send the same value for the same text.
 pub fn custom_data_value(value: &str) -> retp_types::datatypes::DataValue {
     use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem};
@@ -981,7 +981,8 @@ pub fn custom_data_value(value: &str) -> retp_types::datatypes::DataValue {
 }
 
 /// One `customData` value that is a list of strings, as given - OSDU's
-/// `owners`, `viewers`, `legaltags` from a caller that holds them as a list,
+/// `owners`, `viewers`, `legaltags` (and `otherRelevantDataCountries` where a
+/// deployment requires it) from a caller that holds them as a list,
 /// with no comma rule: a value that holds a comma stays one value.
 pub fn custom_data_strings(values: &[String]) -> retp_types::datatypes::DataValue {
     use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem};

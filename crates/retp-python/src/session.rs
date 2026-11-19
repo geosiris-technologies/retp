@@ -409,7 +409,8 @@ pub struct DataspaceRow {
     pub store_created: i64,
     /// Its `customData`, each value as JSON text - a flag, a number, a
     /// string, a list of strings, `null` (`retp_client::custom_data_json`):
-    /// what an OSDU store keeps there, `owners`, `viewers`, `legaltags`.
+    /// what an OSDU store keeps there, `owners`, `viewers`, `legaltags`, and on some
+    /// deployments `otherRelevantDataCountries`.
     pub custom_data: Vec<(String, String)>,
     /// The keys of `customData` whose value is of a kind plain JSON does not
     /// carry, named rather than dropped.

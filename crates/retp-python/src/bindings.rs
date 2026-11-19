@@ -906,7 +906,8 @@ impl PySession {
     /// Create or replace dataspaces, each given by its path (`demo`) or URI:
     /// `(created, errors)`, `created` the URIs the store took, in the order
     /// given. `custom_data` goes with each (an OSDU store reads its ACLs and
-    /// legal tags there: `owners`, `viewers`, `legaltags`): a list of strings
+    /// legal tags there: `owners`, `viewers`, `legaltags`, and on some deployments
+    /// `otherRelevantDataCountries`): a list of strings
     /// goes as that list; a string as the command line's `--custom KEY=VALUE`
     /// reads it, `"a,b"` a list of strings and any other text one string.
     /// Needs a session opened with `writing=True`.

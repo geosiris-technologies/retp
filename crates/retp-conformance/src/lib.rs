@@ -217,7 +217,8 @@ pub struct Options {
     /// dataspace it created itself.
     pub write_dataspace: Option<String>,
     /// The `customData` the created dataspace is put with - what an OSDU
-    /// store asks for (`legaltags`, `owners`, `viewers`).
+    /// store asks for (`legaltags`, `owners`, `viewers`, and on some deployments
+    /// `otherRelevantDataCountries`).
     pub custom_data: BTreeMap<String, retp_types::datatypes::DataValue>,
     /// When the suite may not create a dataspace: an **existing** one to
     /// write its samples into instead. Only the suite's own objects are

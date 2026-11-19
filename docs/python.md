@@ -135,7 +135,8 @@ supports and holds none of. A listing that a server cut short with an error
 raises `retp.ServerError`; it is not returned as if it were complete.
 
 Each dataspace carries its `custom_data` as plain values: a string, a number, a
-flag, a list of strings (OSDU's `owners`, `viewers`, `legaltags`). A value of
+flag, a list of strings (OSDU's `owners`, `viewers`, `legaltags`, and on some deployments
+`otherRelevantDataCountries`). A value of
 another kind is not turned into something else: its key is named in the
 dataspace's `notes`.
 
@@ -149,6 +150,7 @@ with retp.connect(url, token=token, writing=True) as session:
             "owners": ["data.default.owners@example.org"],
             "viewers": ["data.default.viewers@example.org"],
             "legaltags": ["opendes-public-usa-dataset-1"],
+            "otherRelevantDataCountries": ["US"],  # only where a deployment requires it
         },
     )
     deleted, errors = session.delete_dataspaces(["eml:///dataspace('old')"])

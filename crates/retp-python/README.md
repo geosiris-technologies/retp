@@ -4,8 +4,8 @@ An [ETP v1.2](https://www.energistics.org/) client for Python, over the Rust
 `retp` stack: open a session with an ETP server (or the Reservoir DDMS REST
 API), list its dataspaces, resources and supported types, read, write and
 delete EnergyML objects, create and delete dataspaces, hold transactions, read
-data arrays and channel values into Python, subscribe to notifications, and take
-a dataspace as an EPC.
+data arrays and channel values into Python, subscribe to notifications, take
+a dataspace as an EPC, and push an EPC package to one.
 
 ```python
 import retp
@@ -20,6 +20,22 @@ with retp.connect("wss://etp.example.org/", token=token) as session:
     values, dimensions = session.read_array(uri, "/RESQML/.../points")
     points = values.reshape(dimensions)
 ```
+
+**Pushing a package.** `session.push_epc(path, dataspace)` sends the objects and
+arrays of an EPC in islands of short transactions, planned in Rust; the session
+must be opened with `writing=True`. A push that did not go through raises
+`retp.PushIncomplete`, whose `report["stop"]` says why it stopped in a form a
+program can act on. A push that may be interrupted can start again:
+`journal`, `skip_present`, `split`, `reconnect` and `resume_session`.
+`retp.plan_push(path, dataspace)` says what a push would send, with no session.
+
+```python
+with retp.connect(url, token=token, writing=True) as session:
+    report = session.push_epc("model.epc", "demo", journal="model.push.jsonl", reconnect=3)
+```
+
+**One thread at a time.** A session handles one request at a time: another
+thread that calls it meanwhile gets `retp.SessionBusy`, and nothing is sent.
 
 **It is only a bridge.** Every operation is a call into the Rust library
 (`retp-client`, `energyml-etp-store`); the Python layer converts arguments and

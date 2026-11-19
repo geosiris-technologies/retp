@@ -116,6 +116,29 @@ carries a credential or the body of an object or an array.
 A mistake that would make the two ends disagree refuses the session and says
 why. A strict tolerance refuses both.
 
+## Size limits on what a server sends
+
+A message from a server is read only up to a limit, so that one that lies about its size
+does not fill the memory. A message above it is refused by name, before it is buffered,
+as a transport error that says the size and how to raise the limit.
+
+- **WebSocket messages**: the `MaxWebSocketMessagePayloadSize` the client announces in its
+  handshake (`Connect::max_message`), or, when none is announced,
+  `native::DEFAULT_MAX_WEBSOCKET_MESSAGE` (64 MiB). To accept more, announce a larger
+  size, or open the socket yourself with
+  `WebSocketTransport::connect_limited(&handshake, certificates, max_message)`, whatever
+  the handshake says. A `LiveSession` applies the same rule to the size it announces.
+- **HTTP bodies** (the REST API): `native::DEFAULT_MAX_HTTP_BODY` (256 MiB), changed with
+  `UreqHttp::with_max_body(bytes)`; a larger body is refused and not buffered beyond the
+  limit.
+- **Avro counts**: an array or a map whose block announces more items than the input has
+  bytes left (or an endless run of items with no content) is refused as
+  `retp_avro::Error::TooManyItems`, before anything is allocated for it. Nothing to
+  configure.
+
+Array reads are cut into messages of 16 MiB at most by default, so the WebSocket default
+leaves room for the other messages.
+
 ## Time
 
 Nothing in the protocol crate reads the clock: every call that needs the time
@@ -279,6 +302,35 @@ console says "an event this version does not know"; the Python bridge raises the
 `Credentials` is wiped from memory when dropped (`zeroize`), every clone with it; a copy made
 by whoever reads `header()` is theirs to wipe.
 
+## Reading regions with metadata you already hold
+
+`retp_client::arrays::read_regions` reads arrays whole, or a region of each (a `Block`).
+It first asks the server for the arrays' metadata (`GetDataArrayMetadata`) to plan the
+blocks. An application that already asked, to show shapes for instance, passes what it
+holds to `read_regions_with`, and no round trip is spent on it again. It exists on the
+async client (`retp_client::asynchronous::read_regions_with`) and on the blocking one
+(`retp_client::arrays::read_regions_with`).
+
+```rust,ignore
+let requests = vec![(id_a, Some(block)), (id_b, None)]; // a region of `a`, all of `b`
+let known = vec![Some(metadata_of_a), None];            // `known[i]` goes with `requests[i]`
+let read = retp_client::arrays::read_regions_with(
+    &mut client, &requests, &known, default_message, |_progress| {},
+)?;
+```
+
+`known[i]` is the metadata of request `i`, or `None` to have it asked; entries past the
+end of a shorter `known` count as `None`. Only the unknown ones are asked, together in one
+`GetDataArrayMetadata`, and none is sent when every array is known. Given or asked,
+metadata goes through the same planning and the same checks: a region that does not lie
+inside the dimensions is refused by name, not clipped.
+
+Metadata you give is used as given, and **its staleness is your risk**. When the store's
+data disagrees with it (a whole array whose dimensions changed, another data type, a block
+of another element count), that array's result is `ArrayFailure::Inconsistent`. A region
+cannot show that the array grew or shrank: the store refuses the region, or sends data of
+another type. Ask for the metadata again when in doubt.
+
 ## wasm
 
 `cargo check --target wasm32-unknown-unknown` on the client is part of CI. The
@@ -290,3 +342,99 @@ page brings its own transport (the browser's `WebSocket` and `fetch`).
 `energyml-etp-store` implements energyml-rust's `EnergymlStorage` on top of the
 client, so code that lists and reads objects from an EPC file lists and reads
 them from a server. See that crate's rustdoc.
+
+## Pushing a package by islands
+
+The module `energyml_etp_store::push` sends everything an `EnergymlStorage` holds (an EPC,
+another dataspace) into a dataspace, in **islands**: one transaction each, so that a
+connection lost halfway costs an island and not the model. The command line's `retp push`
+and the Python bridge's `push_epc` are this module; their options are described in
+[Command line](cli.md#examples) and [Python](python.md#the-plan-without-a-session).
+
+An island follows two rules, the first winning over the second:
+
+1. **Targets before sources.** An object goes after everything it references, so that no
+   island asks a store to hold a reference to something it has not seen. A cycle (two
+   objects naming each other) is never split: it stays whole in one island.
+2. **What carries no array goes first**, in islands of its own, as far as the first rule
+   allows. An object and its arrays are never apart.
+
+A budget cuts the rest: `Budget { objects, bytes }`, 100 objects or 32 MiB by default
+(a cycle larger than that still goes whole).
+
+```rust,ignore
+use energyml_etp_store::push::{self, Options};
+
+let options = Options { skip_present: true, ..Options::default() };
+let report = retp_client::blocking(push::push(
+    &mut client, &source, "demo", &options, |progress| println!("{progress:?}"),
+))?;
+```
+
+`push::push` goes over one session: a connection that falls stops the push there.
+`push::push_resumable(connector, &mut session, &source, dataspace, &options, &retry,
+on_event)` opens a new session instead and goes on from the first island not committed,
+which is sent again whole; `push::reconnecting(times, first_pause)` builds its `Retry`.
+What starts a push again, or narrows a refusal, is chosen in `Options`, and is off by
+default:
+
+| Field | Meaning |
+|---|---|
+| `journal` | a file where each island is recorded as it commits; a push started again with it leaves out what it records. A journal written for another package or dataspace is refused |
+| `skip_present` | leave out an object the dataspace holds under the same URI, its arrays answering metadata of the same dimensions. The content is not compared |
+| `split` | what becomes of an island the store refuses: `Split::Off` (stop, the default), `Halve`, or `Single` (object by object); a cycle is never split |
+| `split_limit` | how many times the pieces of one island may be split again (8) |
+| `well_known` | `WellKnown::Push(registry)` also sends the official dictionary's `PropertyKind`s the source references and does not hold |
+| `only` | only these objects, by URI |
+| `budget` | the `Budget` above |
+
+`Options` also holds `format` (XML or JSON), `grouping`, `expected` and `overwrite`.
+
+### The plan, without a session
+
+`push::dry_run(&source, dataspace, &options).await` does the same work up to the point
+where it would ask the destination anything, and returns a `Plan`: the islands with their
+cycles, each object's URI in the destination, what is left out and what leaves the
+source. It is the same code path as the push, so the plan is the one the push follows. An
+option only the destination can honour (`skip_present`, `expected`) is refused by name,
+as `NoPlan::NeedsDestination`.
+
+### Reading a result
+
+A push returns a `Report`; an `Err` is for a source that could not be read, not for a
+store that refused. Its fields: `islands` (the plan), `sent` (how many committed: the
+first `sent` of `islands`), `stopped` (where it stopped, `None` when all went through),
+`refusals` (every object or array of the stopped island the store would not take, each
+with its code and words), `skipped` (left out by `skip_present` or the journal), `splits`
+(islands cut and sent as pieces), `reconnections` and `reopened` (how each new session
+came back, resumed or fresh).
+
+`Report::diagnosis()` sorts the stop for a program that acts on it, and is `None` when all
+went through:
+
+```rust,ignore
+if let Some(why) = report.diagnosis() {
+    // `island` is 0-based; `kind` is a StopKind: Refused, Failed, Timeout, GaveUp, Journal.
+    eprintln!("island {} {}: {} ({:?})", why.island, why.kind.name(), why.message, why.code);
+    if let Some(Cause::MissingReference { count, named, more, .. }) = &why.cause {
+        // `named` is the server's statement; `more` it counted and did not name.
+        eprintln!("{count} missing, {} named, {more} more", named.len());
+    }
+}
+```
+
+- `message` and `code` are the store's own words for a refusal, apart from any hint this
+  side adds; for another stop, what stopped it.
+- `cause` is `Some` for a refusal only. `Cause` reads the words of open-etp-server (the
+  OSDU Reservoir DDMS server) and nothing else: any other words are `Cause::Unknown`,
+  never a guess. `Cause::MissingReference` carries the `named` references (from, to,
+  xpath) when the server names them, and `more` it counted without naming.
+- `candidates` is the client's **deduction**, not the server's statement: for a missing
+  reference the server does not name, the references that leave the source from the
+  stopped island. It is empty when the server named them, since those come first, and it
+  may be wrong on a server that counts a reference missing although its target is there.
+
+Inside the push only, when a commit is refused the island's transaction is rolled back,
+because some servers keep it open and refuse the next one. The library's own
+`commit_transaction` never rolls back by itself: a caller that commits its own transaction
+and is refused ends it with `rollback_transaction`.

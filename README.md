@@ -2,12 +2,18 @@
 
 **An Energistics Transfer Protocol (ETP) v1.2 stack in Rust.**
 
+[![crates.io](https://img.shields.io/crates/v/retp-client.svg)](https://crates.io/crates/retp-client)
+[![docs.rs](https://img.shields.io/docsrs/retp-client)](https://docs.rs/retp-client)
+[![PyPI](https://img.shields.io/pypi/v/retp.svg)](https://pypi.org/project/retp/)
+[![CI](https://github.com/geosiris-technologies/retp/actions/workflows/ci.yml/badge.svg)](https://github.com/geosiris-technologies/retp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 ETP is the WebSocket protocol the energy industry uses to exchange subsurface
 data objects (RESQML, WITSML, PRODML), data arrays and streams with a server,
 including OSDU's Reservoir DDMS. `retp` is its Rust implementation: encode and
 decode, hold a session, talk to a server, and check one.
 
-> **Status: early.** Version 0.1 is on crates.io; the API will still move. This
+> **Status: early.** Version 0.4 is on crates.io; the API will still move. This
 > repository replaces the proof of concept `etp-rs`. The energyml crates it
 > builds on come from crates.io, like any other dependency.
 
@@ -32,8 +38,8 @@ decode, hold a session, talk to a server, and check one.
 
 ## Command line
 
-> `retp-cli` is being extracted from the energyml-rust command line, where the
-> same commands exist today as `energyml etp <command>`.
+> The energyml-rust command line reaches the same commands as `energyml etp <command>`,
+> which runs `retp` when it is on `PATH`.
 
 ```sh
 # What the server says of itself, before any session
@@ -55,6 +61,26 @@ retp shell wss://etp.example.com/etp
 
 # One dataspace as MCP tools for an AI assistant (feature `mcp`)
 retp mcp wss://etp.example.com/etp --dataspace demo
+```
+
+Writing: send an EPC package, in islands of short transactions, so that a lost
+connection costs one island and not the model.
+
+```sh
+# What the push would send; nothing is sent, no session is opened
+retp push wss://etp.example.com/etp model.epc demo --plan
+
+# Send it; a journal and reconnection let a stopped push start again
+retp push wss://etp.example.com/etp model.epc demo --journal push.jsonl --reconnect 3
+```
+
+Servers by name, their secrets by reference and never by value:
+
+```sh
+retp server add azure-test wss://etp.example.com/etp \
+    --auth azure --tenant TENANT_ID --client-id APP_ID \
+    --scope 'api://APP_ID/.default' --client-secret-from env:AZURE_TEST_SECRET
+retp azure-test dataspaces
 ```
 
 Secrets go through the environment (`ETP_TOKEN`, `ETP_USER`, `ETP_PASSWORD`,
@@ -81,8 +107,9 @@ pip install retp          # the Python package, imported as `retp`
 ```
 
 A Python client over the Rust stack: sessions, dataspaces, EnergyML objects as
-dictionaries, arrays as numpy arrays. It carries nothing the Rust library does
-not have. See [docs/python.md](docs/python.md).
+dictionaries, arrays as numpy arrays, and `session.push_epc(path, dataspace)` to
+send an EPC package (`retp.plan_push` says what it would send, and the report
+says why a push stopped). It carries nothing the Rust library does not have. See [docs/python.md](docs/python.md).
 
 ## Claude Code plugin
 

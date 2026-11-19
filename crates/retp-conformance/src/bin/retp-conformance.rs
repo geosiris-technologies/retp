@@ -102,7 +102,8 @@ struct Args {
     write_dataspace: Option<String>,
     /// With `--write`: a `customData` entry of the created dataspace,
     /// `KEY=VALUE` (`a,b` is a list) - what an OSDU store asks for:
-    /// `legaltags=…`, `owners=…`, `viewers=…`. Repeatable.
+    /// `legaltags=…`, `owners=…`, `viewers=…` (and `otherRelevantDataCountries=…`
+    /// where a deployment requires it). Repeatable.
     #[arg(long = "dataspace-custom", value_name = "KEY=VALUE", requires = "write")]
     dataspace_custom: Vec<String>,
     /// With `--write`: when the server refuses to let the suite create its

@@ -783,7 +783,8 @@ struct DataspaceArgs {
     /// The dataspace: its path (`demo`, `carl/teapot`) or its URI.
     dataspace: String,
     /// A `customData` entry, `key=value`, repeatable - an OSDU store wants
-    /// `owners`, `viewers` and `legaltags`; a value with commas is a list.
+    /// `owners`, `viewers` and `legaltags` (some deployments also
+    /// `otherRelevantDataCountries`); a value with commas is a list.
     #[arg(long = "custom", value_name = "KEY=VALUE")]
     custom: Vec<String>,
 }

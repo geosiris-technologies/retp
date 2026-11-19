@@ -394,6 +394,7 @@ fn a_dataspace_created_on_a_server_gets_its_write_defaults_unless_the_line_says_
         legal_tags: vec!["tag-1".into(), "tag-2".into()],
         owners: vec!["owners@example.com".into()],
         viewers: vec![],
+        other_relevant_data_countries: vec!["US".into(), "UK".into()],
     };
     let catalog = catalog_with(&sandbox, &[("azure", entry)]);
 
@@ -404,7 +405,14 @@ fn a_dataspace_created_on_a_server_gets_its_write_defaults_unless_the_line_says_
         .filter(|(_, a)| *a == "--custom")
         .map(|(i, _)| line[i + 1].as_str())
         .collect();
-    assert_eq!(customs, ["legaltags=tag-1,tag-2", "owners=owners@example.com"]);
+    assert_eq!(
+        customs,
+        [
+            "legaltags=tag-1,tag-2",
+            "owners=owners@example.com",
+            "otherRelevantDataCountries=US,UK"
+        ]
+    );
 
     let line = run(
         &[
@@ -420,6 +428,27 @@ fn a_dataspace_created_on_a_server_gets_its_write_defaults_unless_the_line_says_
     .expect("expanded");
     assert!(line.iter().filter(|a| a.starts_with("owners=")).count() == 1);
     assert!(line.contains(&"legaltags=tag-1,tag-2".to_string()));
+    assert!(line.contains(&"otherRelevantDataCountries=US,UK".to_string()));
+
+    let line = run(
+        &[
+            "retp",
+            "azure",
+            "create-dataspace",
+            "demo",
+            "--custom",
+            "otherRelevantDataCountries=FR",
+        ],
+        &catalog,
+    )
+    .expect("expanded");
+    assert_eq!(
+        line.iter()
+            .filter(|a| a.starts_with("otherRelevantDataCountries="))
+            .count(),
+        1
+    );
+    assert!(line.contains(&"otherRelevantDataCountries=FR".to_string()));
 
     let line = run(&["retp", "azure", "dataspaces"], &catalog).expect("expanded");
     assert_eq!(count(&line, "--custom"), 0, "only the command that creates");

@@ -266,8 +266,43 @@ fn full(auth: AuthSpec) -> Entry {
         legal_tags: vec!["tag-1".into(), "tag-2".into()],
         owners: vec!["data.default.owners@opendes.example.com".into()],
         viewers: vec![],
+        other_relevant_data_countries: vec!["US".into(), "UK".into()],
     };
     entry
+}
+
+#[test]
+fn the_write_defaults_are_read_and_written_with_their_countries() {
+    let text = file(
+        "[auth]
+method = \"none\"
+
+[defaults]
+legal_tags = [\"t\"]
+other_relevant_data_countries = [\"US\", \"UK\"]
+",
+    );
+    let entry = Entry::parse(&text).expect("valid");
+    assert_eq!(entry.defaults.other_relevant_data_countries, ["US", "UK"]);
+    assert!(!entry.defaults.is_empty());
+    let written = entry.to_toml();
+    assert!(
+        written.contains("other_relevant_data_countries = [\"US\", \"UK\"]"),
+        "{written}"
+    );
+    assert_eq!(Entry::parse(&written).expect("valid"), entry);
+
+    let only = Entry::parse(&file(
+        "[auth]
+method = \"none\"
+
+[defaults]
+other_relevant_data_countries = [\"FR\"]
+",
+    ))
+    .expect("valid");
+    assert!(!only.defaults.is_empty(), "countries alone are a default");
+    assert!(only.to_toml().contains("[defaults]"));
 }
 
 #[test]

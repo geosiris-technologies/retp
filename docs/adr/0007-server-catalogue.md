@@ -92,8 +92,8 @@ to decide the method would drift from the first.
   holds extra request headers: a literal for a header that carries nothing
   secret, a reference for one that does; a literal is refused for a name that
   looks secret (`authorization`, `cookie`, anything with `key`, `token`,
-  `secret` or `password`). `[defaults]` holds `legal_tags`, `owners` and
-  `viewers`, not secrets, added as `--custom` entries to `create-dataspace` unless
+  `secret` or `password`). `[defaults]` holds `legal_tags`, `owners`,
+  `viewers` and `other_relevant_data_countries` (some OSDU deployments require it), not secrets, added as `--custom` entries to `create-dataspace` unless
   the line gives its own. The headers are sent with every request to the server,
   and checked when the file is read
   ([ADR 8](0008-headers-a-server-wants.md)); before the client could send them,

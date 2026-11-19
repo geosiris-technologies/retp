@@ -338,7 +338,8 @@ pub struct Header {
 }
 
 /// What a write needs that is not a secret: the `customData` of a dataspace
-/// created on this server (an OSDU store asks for legal tags, owners and viewers).
+/// created on this server (an OSDU store asks for legal tags, owners and viewers, and some
+/// deployments also for `otherRelevantDataCountries`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteDefaults {
     /// Legal tags (`legaltags`).
@@ -347,12 +348,18 @@ pub struct WriteDefaults {
     pub owners: Vec<String>,
     /// Viewers (`viewers`).
     pub viewers: Vec<String>,
+    /// Other relevant data countries (`otherRelevantDataCountries`), country
+    /// codes; some OSDU deployments require it.
+    pub other_relevant_data_countries: Vec<String>,
 }
 
 impl WriteDefaults {
     /// Whether nothing is set.
     pub fn is_empty(&self) -> bool {
-        self.legal_tags.is_empty() && self.owners.is_empty() && self.viewers.is_empty()
+        self.legal_tags.is_empty()
+            && self.owners.is_empty()
+            && self.viewers.is_empty()
+            && self.other_relevant_data_countries.is_empty()
     }
 
     /// The `KEY=VALUE` entries of `create-dataspace --custom`, a list joined by commas.
@@ -361,6 +368,7 @@ impl WriteDefaults {
             ("legaltags", &self.legal_tags),
             ("owners", &self.owners),
             ("viewers", &self.viewers),
+            ("otherRelevantDataCountries", &self.other_relevant_data_countries),
         ]
         .into_iter()
         .filter(|(_, values)| !values.is_empty())
@@ -433,6 +441,8 @@ struct FileDefaults {
     owners: Vec<String>,
     #[serde(default)]
     viewers: Vec<String>,
+    #[serde(default)]
+    other_relevant_data_countries: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -862,6 +872,7 @@ impl Entry {
                 legal_tags: root.defaults.legal_tags,
                 owners: root.defaults.owners,
                 viewers: root.defaults.viewers,
+                other_relevant_data_countries: root.defaults.other_relevant_data_countries,
             },
             description: root.description,
             aliases: root.alias,
@@ -1034,6 +1045,10 @@ impl Entry {
                 ("legal_tags", &self.defaults.legal_tags),
                 ("owners", &self.defaults.owners),
                 ("viewers", &self.defaults.viewers),
+                (
+                    "other_relevant_data_countries",
+                    &self.defaults.other_relevant_data_countries,
+                ),
             ] {
                 if !values.is_empty() {
                     let list: Vec<String> = values.iter().map(|v| quote(v)).collect();
@@ -1136,6 +1151,8 @@ pub struct Draft {
     pub owners: Vec<String>,
     /// Viewers of a dataspace this server creates.
     pub viewers: Vec<String>,
+    /// Other relevant data countries of a dataspace this server creates (some OSDU deployments require them).
+    pub other_relevant_data_countries: Vec<String>,
 }
 
 fn kind_of(url: &str) -> Option<Transport> {
@@ -1262,6 +1279,7 @@ impl Draft {
                 legal_tags: self.legal_tags,
                 owners: self.owners,
                 viewers: self.viewers,
+                other_relevant_data_countries: self.other_relevant_data_countries,
             },
             description: self.description,
             aliases: self.aliases,

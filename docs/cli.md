@@ -196,6 +196,7 @@ x-api-key = { env = "RETP_AZURE_TEST_KEY" }
 legal_tags = ["opendes-public-usa-dataset-1"]
 owners = ["data.default.owners@opendes.example.com"]
 viewers = ["data.default.viewers@opendes.example.com"]
+other_relevant_data_countries = ["US"]   # some OSDU deployments require it
 ```
 
 The methods are the ones of [Logging in](#logging-in); the catalogue fills the same
@@ -212,8 +213,10 @@ is read, by the rules of `--header`: a header the client could not send is refus
 by name, and so is `data-partition-id` beside `partition` (keep one of the two). A
 `--header` on the line is added to the entry's; one the entry already has is refused, not
 replaced. The file keeps no order between its headers. **Write defaults** (`legal_tags`, `owners`,
-`viewers`) become `--custom legaltags=...`, `owners=...`, `viewers=...` on
-`create-dataspace`, unless the line gives its own.
+`viewers`, `other_relevant_data_countries`) become `--custom legaltags=...`, `owners=...`,
+`viewers=...`, `otherRelevantDataCountries=...` on `create-dataspace`, unless the line
+gives its own. `retp server add` takes them as `--legal-tag`, `--owner`, `--viewer` and
+`--other-relevant-data-country`, each repeatable.
 
 **Naming.** A name is lowercase letters, digits, `.`, `_` and `-` (it becomes a folder
 name). Aliases share the namespace. A built-in command always wins: a server cannot be
@@ -266,7 +269,7 @@ An OSDU store asks for `owners`, `viewers` and `legaltags` in the dataspace's
 custom data: `--custom owners=OWNERS --custom viewers=VIEWERS --custom
 legaltags=LEGALTAG`. Some OSDU deployments also require
 `otherRelevantDataCountries` (a list of country codes): `--custom
-otherRelevantDataCountries=US`.
+otherRelevantDataCountries=US,UK`.
 
 `push` sends targets before what references them, an object with its arrays in
 one transaction, and stops at a refused island. The islands are numbered from

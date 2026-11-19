@@ -448,6 +448,10 @@ pub(super) struct AddArgs {
     /// A viewer of a dataspace created on this server, repeatable.
     #[arg(long = "viewer", value_name = "VIEWER")]
     viewers: Vec<String>,
+    /// A country code for `otherRelevantDataCountries` of a dataspace created on this server, repeatable
+    /// (some OSDU deployments require it).
+    #[arg(long = "other-relevant-data-country", value_name = "COUNTRY")]
+    other_relevant_data_countries: Vec<String>,
     /// Replace a server of the same name.
     #[arg(long)]
     force: bool,
@@ -497,6 +501,7 @@ fn draft_of(args: &AddArgs, url: String) -> Result<Draft> {
         legal_tags: args.legal_tags.clone(),
         owners: args.owners.clone(),
         viewers: args.viewers.clone(),
+        other_relevant_data_countries: args.other_relevant_data_countries.clone(),
     })
 }
 
@@ -753,6 +758,8 @@ fn guided() -> Result<(String, Draft)> {
     draft.legal_tags = ask_list("  legal tags")?;
     draft.owners = ask_list("  owners")?;
     draft.viewers = ask_list("  viewers")?;
+    draft.other_relevant_data_countries =
+        ask_list("  other relevant data countries (some OSDU deployments)")?;
     draft.insecure = ask_yes_no(
         "Skip the certificate check (a known-bad certificate only)?",
         false,

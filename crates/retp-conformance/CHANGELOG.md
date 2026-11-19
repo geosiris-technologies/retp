@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha.2](https://github.com/geosiris-technologies/retp/compare/retp-conformance-v0.4.0-alpha.1...retp-conformance-v0.4.0-alpha.2) - 2026-11-19
+
+### Added
+
+- *(catalog)* [**breaking**] add otherRelevantDataCountries to the write defaults
+- *(client)* [**breaking**] ask the server for the lost session, opt-in (native::Resuming)
+- *(client)* [**breaking**] the data partition is a header and nothing else
+- *(client)* [**breaking**] the headers a server wants in addition, given once with the endpoint
+
+### Fixed
+
+- *(push)* [**breaking**] roll back a refused commit, keep the code of a refused start, name the missing references
+- *(client)* an extra header cannot say its value in an error, a Debug or to another host
+
+### Other
+
+- Merge remote-tracking branch 'origin/dev' into feat/catalog-other-relevant-data-countries
+- *(deps)* [**breaking**] move to energyml 0.4.0
+
 ## [0.3.0](https://github.com/geosiris-technologies/retp/compare/retp-conformance-v0.2.0...retp-conformance-v0.3.0) - 2026-10-16
 
 ### Added

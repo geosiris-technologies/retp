@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha.2](https://github.com/geosiris-technologies/retp/compare/retp-proto-v0.4.0-alpha.1...retp-proto-v0.4.0-alpha.2) - 2026-11-19
+
+### Added
+
+- *(client)* [**breaking**] Event and ClientError are non-exhaustive
+- *(client)* renew the authorization of an open session, credentials from a source, and a typed handshake refusal
+
+### Fixed
+
+- *(proto)* the Debug of a handshake shows no header that may carry a secret
+
 ## [0.3.0](https://github.com/geosiris-technologies/retp/compare/retp-proto-v0.2.0...retp-proto-v0.3.0) - 2026-10-16
 
 ### Added

@@ -20,9 +20,11 @@ name: docker
 
 on:
   pull_request:
-    paths: ["crates/**", "Cargo.*", "docker/**", ".github/workflows/docker.yml"]
+    paths: ["crates/**", "!crates/**/*.md", "Cargo.*", "docker/**", ".github/workflows/docker.yml"]
   push:
     branches: [main]
+    # The image `edge` is rebuilt for what goes into it, not for documentation.
+    paths: ["crates/**", "!crates/**/*.md", "Cargo.*", "docker/**", ".github/workflows/docker.yml"]
   release:
     types: [published]
   workflow_dispatch:

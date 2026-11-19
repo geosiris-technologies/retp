@@ -419,6 +419,10 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
                 store: KIND,
                 reason: format!("the server would not open the transaction: {why}"),
             }),
+            Opened::Failed { code, message } => Err(Error::Transaction {
+                store: KIND,
+                reason: format!("the server would not open the transaction: {message} (ETP error {code})"),
+            }),
             // "Never here", apart from "not now": ETP 1.2 §18.
             Opened::Unsupported(_) => Err(Error::Unsupported {
                 operation: "transactions (the server has none)",

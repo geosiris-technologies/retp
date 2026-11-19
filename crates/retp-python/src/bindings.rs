@@ -232,15 +232,34 @@ fn skipped_into_py<'py>(py: Python<'py>, skipped: &[(String, &'static str)]) -> 
     Ok(out)
 }
 
-/// A cause as `{"kind", ...}`: `count` for the counted ones, `space` too for
-/// a missing reference, `containers` for a missing array container.
+/// A cause as `{"kind", ...}`: `count` for the counted ones, `space`, `named`
+/// (a list of `{"from_type", "from_uuid", "to_type", "to_uuid", "xpath"}`)
+/// and `more` too for a missing reference, `containers` for a missing array
+/// container.
 fn cause_into_py<'py>(py: Python<'py>, cause: &Cause) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     out.set_item("kind", cause.name())?;
     match cause {
-        Cause::MissingReference { count, space } => {
+        Cause::MissingReference {
+            count,
+            space,
+            named,
+            more,
+        } => {
             out.set_item("count", count)?;
             out.set_item("space", space)?;
+            let list = PyList::empty(py);
+            for one in named {
+                let row = PyDict::new(py);
+                row.set_item("from_type", &one.from_type)?;
+                row.set_item("from_uuid", &one.from_uuid)?;
+                row.set_item("to_type", &one.to_type)?;
+                row.set_item("to_uuid", &one.to_uuid)?;
+                row.set_item("xpath", &one.xpath)?;
+                list.append(row)?;
+            }
+            out.set_item("named", list)?;
+            out.set_item("more", more)?;
         }
         Cause::OrphanReference { count } | Cause::MissingArray { count } | Cause::OrphanArray { count } => {
             out.set_item("count", count)?;
@@ -767,12 +786,15 @@ impl PySession {
     /// `gave_up`, `journal`; `message` the store's own words for a refusal,
     /// without the hint `stopped` may add; `cause` (a refusal only) what
     /// those words name when open-etp-server is documented to use them -
-    /// `{"kind": "missing_reference", "count", "space"}`,
+    /// `{"kind": "missing_reference", "count", "space", "named", "more"}`
+    /// (`named` the references a server that names them lists, each
+    /// `{"from_type", "from_uuid", "to_type", "to_uuid", "xpath"}`, `more` how
+    /// many it counted and did not name),
     /// `orphan_reference`, `missing_array`, `orphan_array` (with `count`),
     /// `missing_array_container` (with `containers`) - or
     /// `{"kind": "unknown"}`; `candidates`, for a missing reference, the
     /// `dangling` pairs leaving the stopped island: this side's deduction,
-    /// the server names no target. `plan_push` says beforehand which islands
+    /// empty when the server named them (`cause["named"]`). `plan_push` says beforehand which islands
     /// a push sends.
     #[pyo3(signature = (path, dataspace, *, objects_per_island = None, bytes_per_island = None, only = None, well_known = false, one_by_one = false, json = false, skip_present = false, journal = None, split = None, split_limit = None, reconnect = 0, reconnect_pause = None, resume_session = false))]
     #[allow(clippy::too_many_arguments)]

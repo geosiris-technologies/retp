@@ -13,7 +13,7 @@ use retp_avro::Role;
 use retp_avro::{Avro, Reader};
 use retp_client::arrays::{
     Array, ArrayFailure, ArrayProgress, ArrayValues, Block, Grouping, Plan as ArrayPlan, allowed_transports,
-    array_metadata, logical_element_size, plan, read_arrays, read_regions, reading_type,
+    array_metadata, logical_element_size, plan, read_arrays, read_regions, read_regions_with, reading_type,
     transport_element_bound, write_arrays, write_arrays_with,
 };
 use retp_client::download::{Download, Progress, download};
@@ -604,6 +604,18 @@ impl Handler for Store {
                 responder.send_all(out);
                 Ok(Handled::Answered)
             }
+            Message::StartTransaction(request)
+                if request.dataspace_uris.iter().any(|u| u.contains("excepted")) =>
+            {
+                // open-etp-server, while the session's previous transaction is
+                // still open: an exception, not `successful: false`.
+                let out = responder.wire().refuse(
+                    delivery,
+                    &EtpError::EINVALID_STATE.with_detail("a transaction is already open in this session"),
+                );
+                responder.send(out);
+                Ok(Handled::Answered)
+            }
             Message::StartTransaction(request) => {
                 // A store says no with `successful: false` and a reason, not
                 // with an exception - which is why a client reading only the
@@ -805,6 +817,15 @@ impl Handler for Store {
                 Ok(Handled::Answered)
             }
             Message::GetDataArrayMetadata(request) => {
+                METADATA_ASKED.with(|log| {
+                    log.borrow_mut().push(
+                        request
+                            .data_arrays
+                            .values()
+                            .map(|id| id.path_in_resource.clone())
+                            .collect(),
+                    )
+                });
                 let mut reply = responder
                     .wire()
                     .begin_response(delivery)
@@ -1993,6 +2014,124 @@ fn a_region_is_read_as_its_start_and_count_say() {
         matches!(&read[2], Err(ArrayFailure::Plan(why)) if why.contains("not inside")),
         "{:?}",
         read[2]
+    );
+}
+
+thread_local! {
+    /// The paths of each `GetDataArrayMetadata` the store received on this
+    /// thread, one entry a request.
+    static METADATA_ASKED: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn metadata_asked() -> Vec<Vec<String>> {
+    METADATA_ASKED.with(|log| log.borrow().clone())
+}
+
+/// The metadata of a stored array as the store says it, the way a caller got
+/// it from one `GetDataArrayMetadata` for many arrays.
+fn metadata_of(client: &mut Client<Loopback, ManualClock>, paths: &[&str]) -> Vec<Option<DataArrayMetadata>> {
+    let ids: Vec<_> = paths.iter().map(|p| id(p)).collect();
+    array_metadata(client, &ids)
+        .unwrap()
+        .into_iter()
+        .map(|m| Some(m.unwrap()))
+        .collect()
+}
+
+/// A caller that holds the metadata does not pay a round trip for it again:
+/// no `GetDataArrayMetadata` is sent, and the values are the same as when the
+/// store is asked.
+#[test]
+fn known_metadata_is_not_asked_again() {
+    let mut client = open(false, None);
+    let known = metadata_of(&mut client, &["/small", "/large"]);
+    METADATA_ASKED.with(|log| log.borrow_mut().clear());
+    let region = Block {
+        starts: vec![100, 10],
+        counts: vec![150, 20],
+    };
+    let asked = [(id("/small"), None), (id("/large"), Some(region.clone()))];
+    let read = read_regions_with(&mut client, &asked, &known, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert_eq!(metadata_asked(), Vec::<Vec<String>>::new(), "nothing asked");
+    assert_eq!(read[0].as_ref().unwrap().dimensions, vec![3, 4]);
+    let expected: Vec<f64> = block_indices(&[300, 100], &region.starts, &region.counts)
+        .into_iter()
+        .map(|i| i as f64)
+        .collect();
+    assert_eq!(read[1].as_ref().unwrap().values, ArrayValues::Doubles(expected));
+    // The same call without the metadata asks once.
+    let plain = read_regions(&mut client, &asked, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert_eq!(metadata_asked().len(), 1);
+    assert_eq!(plain, read);
+}
+
+/// Some known, some not: one `GetDataArrayMetadata`, for the unknown ones only.
+#[test]
+fn only_the_unknown_metadata_is_asked() {
+    let mut client = open(false, None);
+    let mut known = metadata_of(&mut client, &["/small", "/large", "/ints"]);
+    known[0] = None;
+    known[2] = None;
+    METADATA_ASKED.with(|log| log.borrow_mut().clear());
+    let asked = [(id("/small"), None), (id("/large"), None), (id("/ints"), None)];
+    let read = read_regions_with(&mut client, &asked, &known, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert!(read.iter().all(|r| r.is_ok()), "{read:?}");
+    assert_eq!(
+        metadata_asked(),
+        vec![vec!["/small".to_string(), "/ints".to_string()]],
+        "one message, the unknown arrays only, in order"
+    );
+}
+
+/// A region outside the **given** dimensions is refused by name, with no data
+/// request: the same planning as for asked metadata.
+#[test]
+fn a_region_outside_known_dimensions_is_refused() {
+    let mut client = open(false, None);
+    let mut known = metadata_of(&mut client, &["/large"]);
+    known[0].as_mut().unwrap().dimensions = vec![10, 10];
+    let region = Block {
+        starts: vec![100, 10],
+        counts: vec![150, 20],
+    };
+    let asked = [(id("/large"), Some(region))];
+    METADATA_ASKED.with(|log| log.borrow_mut().clear());
+    let read = read_regions_with(&mut client, &asked, &known, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert!(
+        matches!(&read[0], Err(ArrayFailure::Plan(why)) if why.contains("not inside") && why.contains("[10, 10]")),
+        "{:?}",
+        read[0]
+    );
+    assert!(metadata_asked().is_empty());
+}
+
+/// A store whose data contradicts the given metadata is refused by name,
+/// never reshaped: other dimensions, or another type, and the refusal says
+/// whose metadata it was.
+#[test]
+fn data_that_contradicts_known_metadata_is_refused() {
+    let mut client = open(false, None);
+    let right = metadata_of(&mut client, &["/small"]);
+    let mut wrong_shape = right.clone();
+    wrong_shape[0].as_mut().unwrap().dimensions = vec![2, 6];
+    let mut wrong_type = right;
+    {
+        let meta = wrong_type[0].as_mut().unwrap();
+        meta.logical_array_type = AnyLogicalArrayType::ArrayOfInt32Le;
+        meta.transport_array_type = AnyArrayType::ArrayOfInt;
+    }
+    let asked = [(id("/small"), None)];
+    let shape = read_regions_with(&mut client, &asked, &wrong_shape, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert!(
+        matches!(&shape[0], Err(ArrayFailure::Inconsistent(why)) if why.contains("given by the caller") && why.contains("[2, 6]")),
+        "{:?}",
+        shape[0]
+    );
+    let kind = read_regions_with(&mut client, &asked, &wrong_type, 16 * 1024 * 1024, |_| {}).unwrap();
+    assert!(
+        matches!(&kind[0], Err(ArrayFailure::Inconsistent(why)) if why.contains("given by the caller") && why.contains("ArrayOfInt")),
+        "{:?}",
+        kind[0]
     );
 }
 
@@ -4160,6 +4299,24 @@ fn a_transaction_the_store_would_not_open_is_not_one() {
         Opened::Refused(why) => assert!(why.contains("another transaction"), "{why}"),
         Opened::Open(_) => panic!("a refusal was read as an open transaction"),
         Opened::Unsupported(why) => panic!("a refusal was read as no transactions at all: {why}"),
+        Opened::Failed { code, message } => panic!("an answer was read as an exception: {code} {message}"),
+    }
+}
+
+/// **An exception other than "no transactions here" keeps its code and its
+/// words.** A store that kept a transaction open answers the next
+/// `StartTransaction` with `EINVALID_STATE`; a client that dropped it said
+/// "the store answered nothing about the transaction", which is false.
+#[test]
+fn a_transaction_the_store_answers_with_an_exception_keeps_its_code_and_words() {
+    let mut client = open_writing(None);
+    let excepted = "eml:///dataspace('excepted')".to_string();
+    match start_transaction(&mut client, &[excepted], false, "").unwrap() {
+        Opened::Failed { code, message } => {
+            assert_eq!(code, EtpError::EINVALID_STATE.code());
+            assert!(message.contains("already open in this session"), "{message}");
+        }
+        other => panic!("{other:?}"),
     }
 }
 

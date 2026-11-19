@@ -1744,6 +1744,11 @@ pub fn open_transaction<K: Blocking>(
         Opened::Refused(why) => Err(Failure::said_no(format!(
             "the store did not open the transaction: {why}"
         ))),
+        // An exception keeps the store's code, as any other server error does.
+        Opened::Failed { code, message } => Err(Failure::server(
+            code,
+            format!("the store did not open the transaction: {message}"),
+        )),
         Opened::Unsupported(why) => Err(Failure::unsupported(format!(
             "the store has no transactions: {why}"
         ))),

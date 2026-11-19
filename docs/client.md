@@ -18,6 +18,12 @@
 instantiated with its role. A client built on it, and a server one day, agree on
 every rule of the wire because they run the same code.
 
+One dependency is enough: `retp-client` re-exports the crates whose types its
+signatures use, whole, as `retp_client::types` (`retp-types`),
+`retp_client::proto` (`retp-proto`) and `retp_client::avro` (`retp-avro`).
+Write `retp_client::types::datatypes::ErrorInfo`, not a second dependency on
+`retp-types` that must be kept at the same version.
+
 ## Opening a session
 
 A client is a `Client<T, C>`: a `Transport` (the WebSocket on native targets, a

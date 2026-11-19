@@ -1569,7 +1569,13 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
     }
     if let Some(stopped) = &report.stopped {
         match &stopped.why {
-            Stop::Refused(why) => eprintln!("stopped at island {}: refused: {why}", stopped.island + 1),
+            Stop::Refused(why) => match stopped.said.as_ref().and_then(|said| said.code) {
+                Some(code) => eprintln!(
+                    "stopped at island {}: refused (ETP error {code}): {why}",
+                    stopped.island + 1
+                ),
+                None => eprintln!("stopped at island {}: refused: {why}", stopped.island + 1),
+            },
             Stop::Failed(why) => eprintln!(
                 "stopped at island {}: {why} (the island's outcome is unknown)",
                 stopped.island + 1
@@ -1588,6 +1594,17 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
         && *cause != energyml_etp_store::push::Cause::Unknown
     {
         eprintln!("cause: {}", said_cause(cause));
+        if let energyml_etp_store::push::Cause::MissingReference { named, more, .. } = cause {
+            for one in named {
+                eprintln!(
+                    "missing (named by the server): {}({}) -> {}({}) using {}",
+                    one.from_type, one.from_uuid, one.to_type, one.to_uuid, one.xpath
+                );
+            }
+            if *more > 0 {
+                eprintln!("missing (named by the server): ... and {more} more it did not name");
+            }
+        }
         for (from, to) in &diagnosis.candidates {
             eprintln!("may be missing (deduced here, the server names none): {from} -> {to}");
         }
@@ -1619,10 +1636,13 @@ fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
 fn said_cause(cause: &energyml_etp_store::push::Cause) -> String {
     use energyml_etp_store::push::Cause;
     match cause {
-        Cause::MissingReference { count, space: None } => format!("{} ({count})", cause.name()),
+        Cause::MissingReference {
+            count, space: None, ..
+        } => format!("{} ({count})", cause.name()),
         Cause::MissingReference {
             count,
             space: Some(space),
+            ..
         } => format!("{} ({count}, in space {space})", cause.name()),
         Cause::OrphanReference { count } | Cause::MissingArray { count } | Cause::OrphanArray { count } => {
             format!("{} ({count})", cause.name())

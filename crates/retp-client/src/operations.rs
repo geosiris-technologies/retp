@@ -68,6 +68,20 @@ pub enum Opened {
     /// untouched*, and this one was sent and answered. Losing that
     /// difference would make a store's decision look like a bug of ours.
     Refused(String),
+    /// It answered with a `ProtocolException` other than the two that say
+    /// *no transactions here* ([`Opened::Unsupported`]): `EINVALID_STATE`
+    /// when a transaction is already open in the session, `ENOT_FOUND` for a
+    /// dataspace it does not have, and so on. The code and the words are the
+    /// store's, kept so that a caller can show them - a server that keeps a
+    /// transaction open after a refused commit answers the next
+    /// `StartTransaction` this way, and a caller told only *the store answered
+    /// nothing* cannot tell why.
+    Failed {
+        /// The ETP error code (`ErrorInfo.code`, ETP v1.2 section 24.1).
+        code: i32,
+        /// The store's words, or a sentence saying it gave none.
+        message: String,
+    },
     /// The store has no transactions at all - it answered
     /// `ENOTSUPPORTED` or `EUNSUPPORTED_PROTOCOL`, or, over REST, named the
     /// transaction `null`. Apart from [`Opened::Refused`] because a caller
@@ -746,6 +760,7 @@ pub mod asynchronous {
         };
         let mut answer = None;
         let mut unsupported = None;
+        let mut excepted = None;
         for delivery in client.call(&request).await? {
             if let Body::Message(Message::StartTransactionResponse(r)) = &delivery.body {
                 answer = Some(r.clone());
@@ -755,16 +770,25 @@ pub mod asynchronous {
                     retp_proto::wire::Exception::Single(info) => Some(info),
                     retp_proto::wire::Exception::Map(map) => map.into_values().next(),
                 };
-                if let Some(info) = info
-                    && (info.code == EtpError::ENOTSUPPORTED.code()
-                        || info.code == EtpError::EUNSUPPORTED_PROTOCOL.code())
-                {
-                    unsupported = Some(info.message);
+                if let Some(info) = info {
+                    if info.code == EtpError::ENOTSUPPORTED.code()
+                        || info.code == EtpError::EUNSUPPORTED_PROTOCOL.code()
+                    {
+                        unsupported = Some(info.message);
+                    } else if excepted.is_none() {
+                        excepted = Some((info.code, info.message));
+                    }
                 }
             }
         }
         if let Some(why) = unsupported {
             return Ok(Opened::Unsupported(said_why(&why)));
+        }
+        if let Some((code, message)) = excepted {
+            return Ok(Opened::Failed {
+                code,
+                message: said_why(&message),
+            });
         }
         let Some(answer) = answer else {
             return Ok(Opened::Refused(

@@ -16,6 +16,17 @@
 //! root run it on the blocking client. The tests bring a transport that talks
 //! to a server connection in memory - every rule of tiers 1 and 2 is
 //! exercised without a socket.
+//!
+//! # One dependency is enough
+//!
+//! The signatures here take and return types of the crates underneath
+//! (`ErrorInfo`, `Resource`, `DataArrayIdentifier`, `DataValue`, `Negotiated`,
+//! `Delivery`...). Rather than ask a downstream application to depend on them
+//! and keep their versions aligned with this one, the crate re-exports each
+//! of them whole, at one path each: [`types`] (`retp-types`, every message and
+//! data type), [`proto`] (`retp-proto`, the connection and the wire) and
+//! [`avro`] (`retp-avro`, the codec). They are the very crates this one is
+//! built on, so a type named through them is the type in its signatures.
 
 #![forbid(unsafe_code)]
 
@@ -47,6 +58,10 @@ pub mod memory;
 pub mod native;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
+
+pub use retp_avro as avro;
+pub use retp_proto as proto;
+pub use retp_types as types;
 
 pub use async_client::{AsyncClient, Sink};
 pub use caller::{Blocking, Caller, run as blocking};

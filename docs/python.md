@@ -498,6 +498,12 @@ points = values.reshape(dimensions)            # flat, row-major, in the logical
 block, dims = session.read_array(uri, path, start=[0, 0], count=[10, 3])
 ```
 
+`array_metadata` names each array's `logical` and `transport` types as the ETP
+schema spells them (`"arrayOfFloat32LE"`, `"arrayOfFloat"`), and as the store
+stated them. A store may name a logical type its transport cannot carry (one
+OSDU store names `arrayOfBoolean` for floats carried as `arrayOfFloat`):
+`read_array` then reads what the transport means and logs it.
+
 `values` is a numpy array **copied** out of the Rust buffer, in the array's
 logical type (`float64`, `int32`, `uint8`...), flat. Why flat and why copied is in
 the crate's `ARCHITECTURE.md`. String arrays, and bytes of a type without a fixed

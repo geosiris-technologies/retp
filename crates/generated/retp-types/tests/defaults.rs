@@ -1,6 +1,6 @@
 // Generated from the Energistics ETP v1.2 Avro schemas (Apache-2.0).
 // Generator: energyml-codegen 0.1.0
-// Input fingerprint (SHA-256, see schemas.lock): 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
+// Input fingerprint (SHA-256, see schemas.lock): 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
 //! Every record's `Default` against the schema - the test `defaults_match_schema`.
 //!
 //! Do not edit: run `cargo run -p energyml-codegen -- generate --etp` instead.
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use retp_avro::Avro;
 
 /// How many records the schemas define.
-const RECORD_COUNT: usize = 197;
+const RECORD_COUNT: usize = 199;
 
 fn entry<T: Avro + Default>() -> (&'static str, Vec<u8>) {
     (T::FULL_NAME, T::default().to_avro())
@@ -141,6 +141,8 @@ fn generated() -> BTreeMap<&'static str, Vec<u8>> {
         entry::<retp_types::protocol::core::Pong>(),
         entry::<retp_types::protocol::core::ProtocolException>(),
         entry::<retp_types::protocol::core::RequestSession>(),
+        entry::<retp_types::protocol::core_osdu::ResumeSession>(),
+        entry::<retp_types::protocol::core_osdu::ResumeSessionResponse>(),
         entry::<retp_types::protocol::data_array::GetDataArrayMetadata>(),
         entry::<retp_types::protocol::data_array::GetDataArrayMetadataResponse>(),
         entry::<retp_types::protocol::data_array::GetDataArrays>(),

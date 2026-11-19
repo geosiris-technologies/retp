@@ -110,6 +110,15 @@ fn record(event: &Event, received: &str) -> Value {
             json!({"received": received, "event": "authorization_needed", "challenges": challenges})
         }
         Event::AuthorizationExpiring => json!({"received": received, "event": "authorization_expiring"}),
+        Event::Reauthorized { request } => {
+            json!({"received": received, "event": "reauthorized", "request": request})
+        }
+        Event::AuthorizationRefused { request, challenges } => json!({
+            "received": received,
+            "event": "authorization_refused",
+            "request": request,
+            "challenges": challenges,
+        }),
         Event::TimedOut { request, incident } => json!({
             "received": received,
             "event": "timed_out",
@@ -134,6 +143,17 @@ fn record(event: &Event, received: &str) -> Value {
         Event::Fault(incident) => {
             json!({"received": received, "event": "fault", "incident": incident.to_string()})
         }
+        Event::ResumeAsked(resume) => json!({
+            "received": received,
+            "event": "resume_asked",
+            "session": uuid_text(&resume.session_id),
+        }),
+        Event::ResumeRefused(incident) => {
+            json!({"received": received, "event": "resume_refused", "incident": incident.to_string()})
+        }
+        // `Event` is non-exhaustive: a case added by a later version of the library. It is
+        // recorded by a generic name, never by its debug text.
+        _ => json!({"received": received, "event": "unknown"}),
     }
 }
 
@@ -145,6 +165,13 @@ fn notice(event: &Event) -> String {
             format!("the server wants credentials: {}", challenges.join("; "))
         }
         Event::AuthorizationExpiring => "the server says the authorization runs out soon".to_string(),
+        Event::Reauthorized { request } => {
+            format!("the renewal of the authorization (#{request}) was accepted")
+        }
+        Event::AuthorizationRefused { request, challenges } => format!(
+            "the renewal of the authorization (#{request}) was refused: {}",
+            challenges.join("; ")
+        ),
         Event::TimedOut { request, incident } => format!("request #{request} timed out: {incident}"),
         Event::Refused(incident) => format!("the session was refused: {incident}"),
         Event::CapabilityProblems(problems) => {
@@ -156,6 +183,17 @@ fn notice(event: &Event) -> String {
         Event::Closed { reason } => format!("the server closed the session: {reason}"),
         Event::Fault(incident) => format!("the server sent what could not be taken: {incident}"),
         Event::Delivered(_) => "a message was delivered".to_string(),
+        Event::ResumeAsked(resume) => {
+            format!(
+                "the client asks back the session {}",
+                uuid_text(&resume.session_id)
+            )
+        }
+        Event::ResumeRefused(incident) => {
+            format!("the lost session was not given back, a new one is opened: {incident}")
+        }
+        // `Event` is non-exhaustive: a case added by a later version of the library.
+        _ => "an event this version does not know".to_string(),
     }
 }
 
@@ -584,6 +622,14 @@ mod tests {
                 "timed_out",
             ),
             (Event::Fault(incident), "fault"),
+            (Event::Reauthorized { request: 3 }, "reauthorized"),
+            (
+                Event::AuthorizationRefused {
+                    request: 4,
+                    challenges: vec!["Bearer".into()],
+                },
+                "authorization_refused",
+            ),
         ];
         for (event, _) in &events {
             lines.deliver(event).unwrap();

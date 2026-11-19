@@ -14,8 +14,8 @@
 //!   thread. A Python exception it raises ends that destination (the session says so
 //!   once); it never panics.
 //!
-//! TODO(verify): this file has never been compiled. It follows pyo3 0.29 as the crate locks
-//! it (`Python::attach`, `Python::detach`, `Py::get`, `Python::check_signals`).
+//! It follows pyo3 0.29 as the crate locks it (`Python::attach`, `Python::detach`, `Py::get`,
+//! `Python::check_signals`).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -213,8 +213,8 @@ impl PySubscription {
         let Some((uuid, route)) = self.open().take() else {
             return Ok(());
         };
-        // `Session` is not frozen (its methods take `&mut self`): borrowed, and the
-        // borrow kept while the GIL is released - one call at a time per session.
+        // Borrowed, and the borrow kept while the GIL is released; the session's own
+        // lock refuses (`SessionBusy`) when another thread is using it.
         let guard = self.session.borrow(py);
         let session: &PySession = &guard;
         let outcome = py.detach(|| session.with_live(|live| live.unsubscribe_from(uuid, route)));

@@ -16,7 +16,7 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*", "NOTICE*"]
 autotests = false
 
 [dependencies]
-# `Choice`, `Login`, `Endpoint`, `ServerProfile`, `CertificateCheck`: the catalogue
+# `Choice`, `Login`, `Endpoint`, `ExtraHeaders`, `CertificateCheck`: the catalogue
 # fills what the client already knows how to use, it decides nothing about a login.
 # The client does not depend on this crate, never the other way round.
 retp-client = { workspace = true }

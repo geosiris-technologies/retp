@@ -16,6 +16,17 @@
 //! root run it on the blocking client. The tests bring a transport that talks
 //! to a server connection in memory - every rule of tiers 1 and 2 is
 //! exercised without a socket.
+//!
+//! # One dependency is enough
+//!
+//! The signatures here take and return types of the crates underneath
+//! (`ErrorInfo`, `Resource`, `DataArrayIdentifier`, `DataValue`, `Negotiated`,
+//! `Delivery`...). Rather than ask a downstream application to depend on them
+//! and keep their versions aligned with this one, the crate re-exports each
+//! of them whole, at one path each: [`types`] (`retp-types`, every message and
+//! data type), [`proto`] (`retp-proto`, the connection and the wire) and
+//! [`avro`] (`retp-avro`, the codec). They are the very crates this one is
+//! built on, so a type named through them is the type in its signatures.
 
 #![forbid(unsafe_code)]
 
@@ -26,12 +37,14 @@ pub mod channels;
 mod client;
 mod clock;
 pub mod engine;
+mod headers;
 pub mod notifications;
 mod offer;
 mod operations;
 mod profile;
 pub mod rest;
 pub mod resume;
+mod source;
 mod transport;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -46,21 +59,28 @@ pub mod native;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
+pub use retp_avro as avro;
+pub use retp_proto as proto;
+pub use retp_types as types;
+
 pub use async_client::{AsyncClient, Sink};
 pub use caller::{Blocking, Caller, run as blocking};
 pub use client::{Acknowledged, Client, ClientError, Settings};
 pub use clock::{Clock, SystemClock};
+pub use headers::{ExtraHeaders, HeaderRefusal, sensitive_header};
 pub use offer::{
     EVERY_RELEASE, FORMATS, READING, WRITING, customer_of, described_client, reading_client, writing_client,
 };
 pub use operations::{
     DataspaceList, Ended, Listed, Opened, ResourceList, ResourceQuery, SupportedTypeList, Transaction,
-    commit_transaction, custom_data_value, dataspace_uri, delete_data_objects, delete_dataspaces,
-    get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
-    put_data_objects, put_dataspaces, rollback_transaction, start_transaction,
+    commit_transaction, custom_data_json, custom_data_strings, custom_data_value, dataspace_uri,
+    delete_data_objects, delete_dataspaces, get_data_objects, list_dataspaces, list_resources,
+    list_supported_types, object_file_name, put_data_objects, put_dataspaces, rollback_transaction,
+    start_transaction,
 };
-pub use profile::{ServerProfile, plain_text_warning};
-pub use transport::{Transport, TransportError, browser_fetch_hint};
+pub use profile::plain_text_warning;
+pub use source::{CredentialSource, Fresh, GaveUp, Refused, SourceError, Witness};
+pub use transport::{HandshakeRefusal, Transport, TransportError, browser_fetch_hint};
 
 /// Every operation, for any [`Caller`] - the [`AsyncClient`] of a front end among
 /// them. Each is written once, here; the functions of the same name at the

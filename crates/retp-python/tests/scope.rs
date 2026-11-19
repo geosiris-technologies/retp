@@ -39,6 +39,7 @@ fn the_bridge_depends_only_on_the_client_and_what_it_reads_objects_with() {
         "retp-client",
         "retp-proto",
         "retp-types",
+        "retp-avro",
         "energyml-etp-store",
         "energyml-core",
         "energyml-schemas",

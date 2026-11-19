@@ -93,6 +93,27 @@ pub struct Obtained {
     pub expires_in: Option<Duration>,
 }
 
+impl Obtained {
+    /// When the credentials end, if the server said how long they last:
+    /// `expires_in` counted from `obtained_at` (the moment the answer came,
+    /// which the caller knows and this type does not read from a clock).
+    pub fn valid_until(&self, obtained_at: std::time::SystemTime) -> Option<std::time::SystemTime> {
+        self.expires_in.and_then(|lasts| obtained_at.checked_add(lasts))
+    }
+
+    /// These credentials as what a [`CredentialSource`](crate::CredentialSource)
+    /// gives: with the application's `witness`, and the end `expires_in`
+    /// tells of, counted from `obtained_at`.
+    pub fn into_fresh(self, witness: crate::Witness, obtained_at: std::time::SystemTime) -> crate::Fresh {
+        let valid_until = self.valid_until(obtained_at);
+        crate::Fresh {
+            credentials: self.credentials,
+            witness,
+            valid_until,
+        }
+    }
+}
+
 /// Why no credentials came out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginError {

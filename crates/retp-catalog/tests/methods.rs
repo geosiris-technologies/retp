@@ -5,7 +5,7 @@
 use retp_catalog::{
     AuthSpec, CatalogError, Entry, Handshake, OsSecrets, Overrides, SecretRef, ServerSpec, Tls,
 };
-use retp_client::ServerProfile;
+use retp_client::ExtraHeaders;
 use retp_client::login::{Login, azure_token_url};
 use retp_client::native::CertificateCheck;
 use retp_proto::probe::Profile;
@@ -252,9 +252,8 @@ fn credentials_go_to_the_entrys_own_urls_only() {
 }
 
 #[test]
-fn the_command_line_settles_partition_certificate_and_handshake() {
+fn the_command_line_settles_certificate_and_handshake() {
     let mut server = ServerSpec::etp(URL);
-    server.partition = Some("from-entry".into());
     server.tls = Tls::Skip;
     let entry = Entry::new(server.clone(), AuthSpec::None);
 
@@ -262,9 +261,6 @@ fn the_command_line_settles_partition_certificate_and_handshake() {
         .resolve("t", &secrets(), &Overrides::default())
         .expect("resolved");
     let endpoint = from_entry.endpoint(None);
-    assert!(
-        matches!(&endpoint.profile, ServerProfile::Rddms { data_partition } if data_partition == "from-entry")
-    );
     assert_eq!(endpoint.certificates, CertificateCheck::Skip);
     assert!(matches!(endpoint.handshake, Profile::Native));
     assert_eq!(endpoint.url, URL);
@@ -274,16 +270,12 @@ fn the_command_line_settles_partition_certificate_and_handshake() {
             "t",
             &secrets(),
             &Overrides {
-                partition: Some("from-line".into()),
                 as_browser: true,
                 ..Overrides::default()
             },
         )
         .expect("resolved");
     let endpoint = overridden.endpoint(None);
-    assert!(
-        matches!(&endpoint.profile, ServerProfile::Rddms { data_partition } if data_partition == "from-line")
-    );
     assert!(matches!(endpoint.handshake, Profile::Browser));
 
     server.tls = Tls::Verify;
@@ -329,19 +321,179 @@ fn what_resolution_returns_shows_no_value_in_debug() {
     );
 }
 
-#[test]
-fn extra_headers_are_read_but_not_sent_until_the_client_can() {
+/// An entry with a header read from a reference and a header written as it is.
+fn with_headers(server: ServerSpec) -> Entry {
     use retp_catalog::{Header, HeaderValue};
+    let mut entry = Entry::new(server, AuthSpec::None);
+    entry.headers = vec![
+        Header {
+            name: "x-routing".into(),
+            value: HeaderValue::Secret(env("T")),
+        },
+        Header {
+            name: "x-tenant".into(),
+            value: HeaderValue::Literal("acme".into()),
+        },
+    ];
+    entry
+}
+
+fn line(pairs: &[(&str, &str)]) -> ExtraHeaders {
+    ExtraHeaders::from_pairs(pairs.iter().copied()).expect("headers a command line may give")
+}
+
+#[test]
+fn the_headers_of_an_entry_go_with_the_endpoint() {
+    let resolved = with_headers(ServerSpec::etp(URL))
+        .resolve("t", &secrets(), &Overrides::default())
+        .expect("resolved");
+    assert_eq!(
+        resolved.headers().iter().collect::<Vec<_>>(),
+        [("x-routing", "tok"), ("x-tenant", "acme")]
+    );
+    // The endpoint carries them: a connection sends what the entry defines.
+    let opened = resolved.obtain_endpoint().expect("no login to do");
+    assert_eq!(&opened.endpoint.headers, resolved.headers());
+    assert_eq!(
+        opened.endpoint.headers.iter().collect::<Vec<_>>(),
+        [("x-routing", "tok"), ("x-tenant", "acme")]
+    );
+    // And no value is shown, the literal no more than the one read.
+    let shown = format!("{resolved:?} {:?} {:?}", resolved.headers(), opened.endpoint);
+    assert!(!shown.contains("tok") && !shown.contains("acme"), "{shown}");
+}
+
+#[test]
+fn the_command_line_adds_its_headers_to_the_entry_s() {
+    let entry = with_headers(ServerSpec::etp(URL));
+    let resolved = entry
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                headers: line(&[("x-zone", "eu")]),
+                ..Overrides::default()
+            },
+        )
+        .expect("resolved");
+    assert_eq!(
+        resolved.headers().iter().collect::<Vec<_>>(),
+        [("x-routing", "tok"), ("x-tenant", "acme"), ("x-zone", "eu")]
+    );
+
+    // The same header from both: which value is meant is not guessed.
+    let error = entry
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                headers: line(&[("X-Tenant", "other")]),
+                ..Overrides::default()
+            },
+        )
+        .expect_err("refused by name");
+    let said = error.to_string();
+    assert!(
+        said.contains("`t`") && said.contains("X-Tenant") && said.contains("twice"),
+        "{said}"
+    );
+    assert!(!said.contains("other") && !said.contains("acme"), "{said}");
+}
+
+#[test]
+fn the_partition_is_a_header_like_any_other_and_is_not_given_twice() {
+    // The entry's header and the line's.
     let mut entry = Entry::new(ServerSpec::etp(URL), AuthSpec::None);
-    entry.headers = vec![Header {
-        name: "x-api-key".into(),
-        value: HeaderValue::Secret(env("T")),
+    entry.headers = vec![retp_catalog::Header {
+        name: "data-partition-id".into(),
+        value: retp_catalog::HeaderValue::Literal("opendes".into()),
     }];
+    let error = entry
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                headers: line(&[("Data-Partition-Id", "another")]),
+                ..Overrides::default()
+            },
+        )
+        .expect_err("refused by name");
+    let said = error.to_string();
+    assert!(
+        said.contains("Data-Partition-Id") && said.contains("twice"),
+        "{said}"
+    );
+
+    // Given once, by the entry or by the line, the endpoint sends it.
     let resolved = entry
         .resolve("t", &secrets(), &Overrides::default())
         .expect("resolved");
-    assert_eq!(resolved.headers(), [("x-api-key".to_string(), "tok".to_string())]);
-    // Connecting without them would be a quiet departure from the definition.
-    let error = resolved.obtain_endpoint().err().expect("refused by name");
-    assert!(error.to_string().contains("extra headers"), "{error}");
+    assert_eq!(
+        resolved.endpoint(None).headers.iter().collect::<Vec<_>>(),
+        [("data-partition-id", "opendes")]
+    );
+    let resolved = Entry::new(ServerSpec::etp(URL), AuthSpec::None)
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                headers: line(&[("data-partition-id", "opendes")]),
+                ..Overrides::default()
+            },
+        )
+        .expect("resolved");
+    assert_eq!(
+        resolved.endpoint(None).headers.iter().collect::<Vec<_>>(),
+        [("data-partition-id", "opendes")]
+    );
+}
+
+#[test]
+fn a_header_that_carries_a_secret_is_refused_for_a_front_end_handshake() {
+    // A front end writes its attributes in the URL (ETP 1.2 §4.3.2, p.102):
+    // a value read from a reference is a secret whatever the header's name.
+    let mut server = ServerSpec::etp(URL);
+    server.handshake = Handshake::Browser;
+    let canary = MemorySecrets::of(&[("env:T", CANARY)]);
+    let error = with_headers(server.clone())
+        .resolve("t", &canary, &Overrides::default())
+        .expect_err("refused when resolved, before any connection");
+    let shown = format!("{error} {error:?}");
+    assert!(shown.contains("x-routing") && shown.contains("URL"), "{shown}");
+    assert!(!shown.contains(CANARY), "{shown}");
+
+    // `--as-browser` on the line is the same refusal.
+    let error = with_headers(ServerSpec::etp(URL))
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                as_browser: true,
+                ..Overrides::default()
+            },
+        )
+        .expect_err("refused");
+    assert!(error.to_string().contains("x-routing"), "{error}");
+
+    // A header that carries no secret goes in the query string.
+    let mut entry = with_headers(server.clone());
+    entry.headers.remove(0);
+    let resolved = entry
+        .resolve("t", &secrets(), &Overrides::default())
+        .expect("resolved");
+    assert!(matches!(resolved.endpoint(None).handshake, Profile::Browser));
+
+    // And the REST API is HTTP: it has headers, whatever the handshake says.
+    server.rest_url = Some("https://h.example.com/rest".into());
+    let resolved = with_headers(server)
+        .resolve(
+            "t",
+            &secrets(),
+            &Overrides {
+                rest: Some(true),
+                ..Overrides::default()
+            },
+        )
+        .expect("resolved");
+    assert_eq!(resolved.headers().len(), 2);
 }

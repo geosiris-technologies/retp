@@ -1,11 +1,11 @@
 // Generated from the Energistics ETP v1.2 Avro schemas (Apache-2.0).
 // Generator: energyml-codegen 0.1.0
-// Input fingerprint (SHA-256, see schemas.lock): 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
+// Input fingerprint (SHA-256, see schemas.lock): 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
 //! The ETP v1.2 types - generated from the Avro schemas.
 //!
 //! Do not edit: run `cargo run -p energyml-codegen -- generate --etp` instead.
 //!
-//! 197 records, 14 enumerations, 1 fixed, 3 named unions; 138 of the records
+//! 199 records, 14 enumerations, 1 fixed, 3 named unions; 140 of the records
 //! are messages.
 //!
 //! There is **no re-export at the crate root**: five simple names occur in

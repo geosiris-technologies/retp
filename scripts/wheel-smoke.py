@@ -15,10 +15,20 @@ What the bridge exposes without a server is its connection layer, so that is wha
 is exercised:
 
   * the exception tree, as the compiled classes declare it;
-  * the refusals `retp.connect` makes before any socket is opened (a REST URL,
-    zero requests in flight, a token that is not a bearer token), each raised
-    by the Rust code as the exception of its kind, and a refused token never
-    echoed in the message;
+  * the refusals `retp.connect` makes before any socket is opened (an HTTP URL
+    without `rest=True`, zero requests in flight, a token that is not a bearer
+    token, a login without its password), each raised by the Rust code as the
+    exception of its kind, and a refused token never echoed in the message;
+  * a REST session, which opens nothing: what REST does not do (notifications)
+    and what a read-only session does not do (writing) are refused by name;
+    a writing one refuses what the bridge cannot convert (a customData value,
+    an empty island) and takes a renewed token;
+  * `retp.uri`, the canonical URI of an object;
+  * `retp.plan_push`, which needs no session: its refusals before any package
+    is planned (a package that is not there, an island of no object);
+  * one session called from two threads: the second is refused by name
+    (`SessionBusy`) while the first request is out, against a loopback server
+    that never answers;
   * one real connection attempt, to a loopback port nothing listens on, which
     must fail with an exception of the retp tree (the native WebSocket
     transport and the error mapping run).
@@ -27,7 +37,9 @@ What it does not exercise, because the bridge offers it only over a session:
 reading and writing objects and arrays (and so the HDF5 backend the wheel carries).
 """
 
+import socket
 import sys
+import threading
 
 import retp
 
@@ -72,17 +84,124 @@ for name in (
 ):
     check(issubclass(getattr(retp, name), retp.RetpError), f"{name} is a RetpError")
 check(issubclass(retp.OutcomeUnknown, retp.ConnectionLost), "OutcomeUnknown is a ConnectionLost")
+check(issubclass(retp.SessionBusy, retp.NotSent), "SessionBusy is a NotSent")
 check(issubclass(retp.RetpError, Exception), "RetpError is an Exception")
 
 # Refusals made by the Rust code before anything is sent.
-err = raised(lambda: retp.connect("https://etp.example.org/api/reservoir-ddms/v2"), retp.Unsupported)
-check(err is not None and "REST" in str(err), "a REST URL is refused by name (Unsupported)")
+REST_URL = "https://etp.example.org/api/reservoir-ddms/v2"
+err = raised(lambda: retp.connect(REST_URL), ValueError)
+check(err is not None and "rest=True" in str(err), "an HTTP URL without rest=True is refused (ValueError)")
+
+err = raised(lambda: retp.connect("wss://etp.example.org/", user="someone"), ValueError)
+check(err is not None and "password" in str(err), "a login without its password is refused (ValueError)")
 
 err = raised(lambda: retp.connect("wss://etp.example.org/", at_once=0), ValueError)
 check(err is not None and "at_once" in str(err), "at_once=0 is refused (ValueError)")
 
 err = raised(lambda: retp.connect("wss://etp.example.org/", token="Bearer s3cret value"), ValueError)
 check(err is not None and "s3cret" not in str(err), "a bad token is refused without being echoed (ValueError)")
+
+# A REST session opens nothing; what it cannot do is refused by name.
+try:
+    session = retp.connect(REST_URL, rest=True)
+except BaseException as err:
+    check(False, f"a REST session did not open: {type(err).__name__}: {err}")
+else:
+    check(isinstance(session, retp.Session), "a REST session opens without a network")
+    err = raised(lambda: session.subscribe("eml:///"), retp.Unsupported)
+    check(err is not None, "a REST session refuses notifications (Unsupported)")
+    err = raised(lambda: session.put_dataspaces(["demo"]), retp.Unsupported)
+    check(err is not None and "writing=True" in str(err), "a read-only session refuses to write (Unsupported)")
+    err = raised(lambda: session.start_transaction(["demo"]), retp.Unsupported)
+    check(err is not None, "a read-only session opens no transaction (Unsupported)")
+    session.close()
+
+# A writing REST session still opens nothing: the conversions of the bridge run,
+# and refuse, before any request leaves; a renewed token is taken as it is.
+try:
+    session = retp.connect(REST_URL, token="t0", rest=True, writing=True)
+except BaseException as err:
+    check(False, f"a writing REST session did not open: {type(err).__name__}: {err}")
+else:
+    err = raised(lambda: session.put_dataspaces(["demo"], custom_data={"owners": 3}), ValueError)
+    check(err is not None and "list of strings" in str(err), "a customData value of another kind is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", objects_per_island=0), ValueError)
+    check(err is not None and "objects" in str(err), "an island of no object is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", split="sideways"), ValueError)
+    check(err is not None and "halve" in str(err), "a split of another word is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", reconnect=1, reconnect_pause=-1.0), ValueError)
+    check(err is not None and "pause" in str(err), "a negative reconnect pause is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", resume_session=True), ValueError)
+    check(err is not None and "reconnect" in str(err), "resume_session without reconnect is refused (ValueError)")
+    err = raised(lambda: session.push_epc("in.epc", "demo", journal=""), ValueError)
+    check(err is not None and "journal" in str(err), "a journal that names no file is refused (ValueError)")
+    check(session.reauthorize("t1") is None, "a REST session takes a renewed token")
+    err = raised(lambda: session.reauthorize("s3cret token"), ValueError)
+    check(err is not None and "s3cret" not in str(err), "a bad renewed token is refused without being echoed (ValueError)")
+    session.close()
+
+# The canonical URI of an object (ETP v1.2 section 25.3.7), typed here as the
+# specification spells it: a quote written twice (section 25.3.10), the uuid in
+# lower case.
+check(
+    retp.uri("carl's", "resqml20.obj_HorizonInterpretation", "421A7A05-033A-450D-BCEF-051352023578")
+    == "eml:///dataspace('carl''s')/resqml20.obj_HorizonInterpretation(421a7a05-033a-450d-bcef-051352023578)",
+    "retp.uri spells the canonical URI",
+)
+err = raised(lambda: retp.uri("demo", "resqml20.obj_HorizonInterpretation", "not-a-uuid"), ValueError)
+check(err is not None, "retp.uri refuses what is not a uuid (ValueError)")
+
+# The plan of a push, with no session: refusals the Rust code makes before any
+# package is planned. No package ships with this script, so the plan itself is
+# tested in Rust (energyml-etp-store's push tests, retp-python's tests/push.rs).
+err = raised(lambda: retp.plan_push("no-such-package.epc", "demo"), retp.LocalError)
+check(err is not None and "no-such-package.epc" in str(err), "plan_push of a missing package is a LocalError")
+err = raised(lambda: retp.plan_push("in.epc", "demo", objects_per_island=0), ValueError)
+check(err is not None and "objects" in str(err), "plan_push refuses an island of no object (ValueError)")
+
+# One session, two threads: a REST request goes to a loopback server that takes
+# the connection and never answers, so the first thread holds the session; the
+# second is refused by name at once (`SessionBusy`), not by pyo3's "Already
+# borrowed". The server's accept says the first request is out.
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+port = listener.getsockname()[1]
+accepted = threading.Event()
+held = []
+
+
+def serve_silently() -> None:
+    try:
+        connection, _ = listener.accept()
+    except OSError:
+        return
+    held.append(connection)
+    accepted.set()
+
+
+threading.Thread(target=serve_silently, daemon=True).start()
+try:
+    session = retp.connect(f"http://127.0.0.1:{port}/api/reservoir-ddms/v2", token="t0", rest=True)
+except BaseException as err:
+    check(False, f"a REST session on the loopback did not open: {type(err).__name__}: {err}")
+else:
+    first = threading.Thread(target=lambda: raised(session.dataspaces, retp.RetpError), daemon=True)
+    first.start()
+    if not accepted.wait(30):
+        check(False, "the first request did not reach the loopback server")
+    else:
+        err = raised(session.dataspaces, retp.SessionBusy)
+        check(
+            err is not None and "one request at a time" in str(err),
+            "a second thread on a busy session gets SessionBusy",
+        )
+        check(session.url.startswith("http://127.0.0.1"), "the getters answer while a request is out")
+    for connection in held:
+        connection.close()
+    listener.close()
+    first.join(30)
+    check(not first.is_alive(), "the first request ends once its connection is closed")
 
 # One real attempt: nothing listens on port 1 of the loopback interface.
 # TODO(verify): which subclass of RetpError this gives on each platform; only the

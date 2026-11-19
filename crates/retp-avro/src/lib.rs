@@ -33,6 +33,14 @@ pub mod json;
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// The most a decoder reserves ahead for one array, in bytes, whatever its
+/// blocks announce: the vector grows as items arrive.
+const MAX_PREALLOCATED_BYTES: usize = 64 * 1024;
+
+/// The most items with no content (`null`, an empty record) one array may
+/// have: they take no input, so the input cannot bound them.
+const MAX_EMPTY_ITEMS: usize = 1 << 20;
+
 /// What can go wrong reading Avro, named rather than counted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -49,6 +57,21 @@ pub enum Error {
     VarintTooLong,
     /// A length or block count that cannot be a length.
     BadLength(i64),
+    /// A block announced more items than the input can hold.
+    ///
+    /// Every item of an array or a map takes at least one byte on the wire,
+    /// except a type with no content at all (`null`, an empty record); a
+    /// count above the bytes left, or an endless run of such empty items,
+    /// can only be a broken or hostile sender. Refused before anything is
+    /// allocated for it.
+    TooManyItems {
+        /// What the reader was building.
+        reading: &'static str,
+        /// The items the block announced (or, for empty items, the run so far).
+        count: usize,
+        /// The bytes left in the input (for empty items, the most allowed).
+        available: usize,
+    },
     /// A union branch index outside the branches the schema declares.
     NoSuchBranch {
         /// The type whose union it is.
@@ -144,6 +167,14 @@ impl fmt::Display for Error {
             ),
             Error::VarintTooLong => write!(f, "variable-length integer longer than 10 bytes"),
             Error::BadLength(n) => write!(f, "{n} is not a usable length"),
+            Error::TooManyItems {
+                reading,
+                count,
+                available,
+            } => write!(
+                f,
+                "{reading}: {count} items announced, more than the {available} the input can hold"
+            ),
             Error::NoSuchBranch {
                 in_type,
                 index,
@@ -526,14 +557,44 @@ impl<'a> Reader<'a> {
         F: FnMut(&mut Self) -> Result<T>,
     {
         let mut out = Vec::new();
+        let mut empty = 0usize;
         loop {
             let count = match self.block_count()? {
                 None => return Ok(out),
                 Some(count) => count,
             };
-            out.reserve(count);
-            for _ in 0..count {
+            // A count comes from the wire and is never trusted to size an
+            // allocation: what is reserved is what the input can hold and a
+            // fixed bound, and the vector grows as items really arrive.
+            out.reserve(
+                count
+                    .min(self.remaining())
+                    .min(MAX_PREALLOCATED_BYTES / size_of::<T>().max(1)),
+            );
+            for n in 0..count {
+                let before = self.at;
                 out.push(item(self)?);
+                if self.at == before {
+                    // An item with no content: a type fixed by the schema, so
+                    // the block can be as long as the sender likes. Bound the
+                    // run, not the schema.
+                    empty += 1;
+                    if empty > MAX_EMPTY_ITEMS {
+                        return Err(Error::TooManyItems {
+                            reading: "array",
+                            count: empty,
+                            available: MAX_EMPTY_ITEMS,
+                        });
+                    }
+                } else if n == 0 && count - 1 > self.remaining() {
+                    // Items of this type take bytes, so the rest of the block
+                    // cannot fit in what is left.
+                    return Err(Error::TooManyItems {
+                        reading: "array",
+                        count,
+                        available: self.remaining(),
+                    });
+                }
             }
         }
     }
@@ -549,6 +610,14 @@ impl<'a> Reader<'a> {
                 None => return Ok(out),
                 Some(count) => count,
             };
+            // A key is a length and its bytes: one byte at least.
+            if count > self.remaining() {
+                return Err(Error::TooManyItems {
+                    reading: "map",
+                    count,
+                    available: self.remaining(),
+                });
+            }
             for _ in 0..count {
                 let key = self.string()?;
                 out.insert(key, value(self)?);
@@ -585,6 +654,13 @@ impl<'a> Reader<'a> {
                 Some(count) => count,
             };
             let wanted = count.checked_mul(WIDTH).ok_or(Error::BadLength(count as i64))?;
+            if wanted > self.remaining() {
+                return Err(Error::TooManyItems {
+                    reading: "array block",
+                    count,
+                    available: self.remaining() / WIDTH,
+                });
+            }
             let block = self.take(wanted, "array block")?;
             out.reserve(count);
             out.extend(block.as_chunks::<WIDTH>().0.iter().map(|chunk| from_le(chunk)));

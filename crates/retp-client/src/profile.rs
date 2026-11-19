@@ -1,39 +1,4 @@
-//! A server has habits, and the client can follow them without the protocol
-//! knowing.
-
-use retp_proto::probe::Handshake;
-
-/// Which server the client talks to, as far as its habits go.
-///
-/// A profile only ever **adds to the handshake**. It never reaches a message:
-/// the day a divergence needs to, it goes here and nowhere else -
-/// `server_profile_changes_no_protocol_code` holds that.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ServerProfile {
-    /// A server that follows the specification.
-    #[default]
-    Standard,
-    /// OSDU's Reservoir DDMS (`open-etp-server`): every request names its
-    /// data partition in a `data-partition-id` header (issue #18 and its
-    /// README).
-    Rddms {
-        /// The OSDU data partition.
-        data_partition: String,
-    },
-}
-
-impl ServerProfile {
-    /// The handshake, with what this server expects in addition - as a
-    /// header, or in the query string for a browser, which sets no header.
-    pub fn adapt(&self, handshake: Handshake) -> Handshake {
-        match self {
-            ServerProfile::Standard => handshake,
-            ServerProfile::Rddms { data_partition } => {
-                handshake.with_attribute("data-partition-id", data_partition)
-            }
-        }
-    }
-}
+//! What the client says of a server before it connects.
 
 /// A `ws://` URL to a host that is not this machine: the session would travel
 /// in clear, credentials included. The specification allows it - so this is said,

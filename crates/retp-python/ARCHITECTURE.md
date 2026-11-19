@@ -76,10 +76,12 @@ server cut short with an error is refused, not returned as if it were whole.
 
 ## The token
 
-`ConnectOptions::endpoint` turns the token into
-`retp_proto::credentials::Credentials` (whose `Debug` shows the scheme and hides
-the rest) and keeps nothing else. `ConnectOptions` has no `Debug`; `Session`
-holds no copy; a refusal of a token names the rule and never echoes the value.
+`ConnectOptions::endpoint` turns the token, or the login the other fields ask
+for (`retp_client::login::Choice`, the command line's own, given no environment
+to read), into `retp_proto::credentials::Credentials` (whose `Debug` shows the
+scheme and hides the rest) and keeps nothing else. `ConnectOptions` has no
+`Debug`; `Session` holds no copy; a refusal of a token or a login names the rule
+and never echoes the value.
 
 ## Dependencies are an allow-list
 
@@ -98,6 +100,9 @@ link error (`LNK1201`). Maturin renames the artefact after `module-name`
 ## Tests
 
 One binary (`tests/main.rs`, `autotests = false`), as in the rest of the
-workspace. None needs a server or an interpreter. `tests/live.rs` talks to a real
-server, is compiled only with the `live-server` feature and each test is
-`#[ignore]`.
+workspace. None needs a server or an interpreter. The operations added after the
+first scope are free functions over any blocking client, so `tests/operations.rs`
+runs them on a client whose other end is a server connection in the same process
+(`retp_client::memory`, the in-memory transport the client's own tests use).
+`tests/live.rs` talks to a real server, is compiled only with the `live-server`
+feature and each test is `#[ignore]`.

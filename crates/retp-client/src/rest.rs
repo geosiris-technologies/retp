@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use energyml_core::identifiers::EtpUri;
@@ -53,7 +54,8 @@ use retp_types::protocol::transaction::{
 use serde_json::Value as Json;
 
 use crate::caller::Caller;
-use crate::{ClientError, TransportError};
+use crate::source::{self, CredentialSource, Fresh, Refused};
+use crate::{ClientError, ExtraHeaders, TransportError};
 
 /// An HTTP method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,8 +70,10 @@ pub enum Method {
     Delete,
 }
 
-/// A request to send.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request to send. Its `Debug` shows the names of its headers and the
+/// length of its body, never a value: the credentials, or a header the
+/// server wants in addition, may be secrets.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// Its method.
     pub method: Method,
@@ -79,6 +83,18 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// Its body, if any.
     pub body: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &names)
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// What came back.
@@ -141,7 +157,12 @@ pub struct RestClient<H: Http> {
     /// `https://…/api/reservoir-ddms/v2`, without its last slash.
     base: String,
     credentials: Option<Credentials>,
-    partition: Option<String>,
+    /// Where each request's credentials come from, when they are not fixed
+    /// ([`RestClient::with_source`]).
+    source: Option<Arc<dyn CredentialSource>>,
+    /// The headers the server wants in addition, sent with every request
+    /// ([`RestClient::with_headers`]).
+    extra: ExtraHeaders,
     page: usize,
     at_once: usize,
     /// Whether this server reads several objects in one request.
@@ -182,15 +203,17 @@ struct RestTransaction {
 
 impl<H: Http> RestClient<H> {
     /// A client of the API at `base` (`https://…/api/reservoir-ddms/v2`),
-    /// sending `credentials` and the OSDU `partition` with every request.
-    pub fn new(http: H, base: &str, credentials: Option<Credentials>, partition: Option<String>) -> Self {
+    /// sending `credentials` with every request. What the server wants besides,
+    /// the OSDU data partition for one, is a header: [`RestClient::with_headers`].
+    pub fn new(http: H, base: &str, credentials: Option<Credentials>) -> Self {
         let base = base.trim_end_matches('/').to_string();
         Self {
             http,
             negotiated: described(&base),
             base,
             credentials,
-            partition,
+            source: None,
+            extra: ExtraHeaders::new(),
             page: PAGE,
             at_once: AT_ONCE,
             plural: None,
@@ -200,6 +223,45 @@ impl<H: Http> RestClient<H> {
             said_no_kind: false,
             transaction: None,
         }
+    }
+
+    /// Take the credentials of every request from `source` in place of the fixed
+    /// ones given to [`RestClient::new`] (which are dropped).
+    ///
+    /// **Each request asks the source** for credentials, and keeps their
+    /// witness. A `401` gives *that* witness back through
+    /// [`CredentialSource::refused`] - **once** -, and the request is sent
+    /// again with what the source gives; a second `401`, or a source that
+    /// gives up, is [`ClientError::AuthorizationNeeded`] with the server's
+    /// challenge. (A `401` means the server refused before it did anything:
+    /// sending the request again does not do it twice.) Credentials that are
+    /// fixed behave as before: one `401` is the error.
+    ///
+    /// The source is called on the thread that polls the REST future, one
+    /// call per request: it may block, so it answers from what it holds when
+    /// it can.
+    pub fn with_source(mut self, source: Arc<dyn CredentialSource>) -> Self {
+        self.credentials = None;
+        self.source = Some(source);
+        self
+    }
+
+    /// Send `credentials` with every request from now on, in place of what
+    /// the client had - fixed credentials or a source, which is dropped. A
+    /// REST API has no session to renew: the next request is the one the
+    /// server judges them by.
+    pub fn reauthorize(&mut self, credentials: Credentials) {
+        self.source = None;
+        self.credentials = Some(credentials);
+    }
+
+    /// Send `headers` with every request, in addition to the client's own -
+    /// what the server wants besides the credentials: a routing key, a
+    /// data partition, a tenant, an API key. They replace the ones given
+    /// before.
+    pub fn with_headers(mut self, headers: ExtraHeaders) -> Self {
+        self.extra = headers;
+        self
     }
 
     /// Ask for `resources` resources per page of a listing - a test asks for
@@ -1151,7 +1213,7 @@ impl<H: Http> RestClient<H> {
             let mut custom = serde_json::Map::new();
             let mut refused = None;
             for (name, value) in &space.custom_data {
-                match json_of_value(value) {
+                match crate::operations::custom_data_json(value) {
                     Some(json) => {
                         custom.insert(name.clone(), json);
                     }
@@ -1647,11 +1709,69 @@ impl<H: Http> RestClient<H> {
         calls: Vec<(Method, String, Option<Vec<u8>>)>,
     ) -> Result<Vec<HttpResponse>, ClientError> {
         let at_once = self.at_once;
+        // One credential per request, from the source when there is one: the
+        // witness of each is kept to be given back if the server refuses it.
+        let mut fresh: Vec<Option<Fresh>> = Vec::with_capacity(calls.len());
+        for _ in &calls {
+            fresh.push(match &self.source {
+                Some(source) => Some(source::begin(&**source, false)?),
+                None => None,
+            });
+        }
         let requests: Vec<HttpRequest> = calls
             .iter()
-            .map(|(method, path, body)| self.request_of(*method, path, body.clone()))
+            .zip(&fresh)
+            .map(|((method, path, body), fresh)| {
+                self.request_of(
+                    *method,
+                    path,
+                    body.clone(),
+                    fresh
+                        .as_ref()
+                        .map(|f| &f.credentials)
+                        .or(self.credentials.as_ref()),
+                )
+            })
             .collect();
-        let answers = self.http.send_all(requests, at_once).await;
+        let mut answers = self.http.send_all(requests, at_once).await;
+
+        // The rule of the 401, applied once: the source is told, with the
+        // witness of the credentials that request carried, and the request
+        // goes again with what it gives. No other refusal is tried again, and
+        // the second answer is not looked at for a 401: it is the error.
+        if let Some(source) = self.source.clone() {
+            let mut again: Vec<usize> = Vec::new();
+            let mut next: Vec<Fresh> = Vec::new();
+            for (index, answer) in answers.iter().enumerate() {
+                if let Ok(response) = answer
+                    && response.status == 401
+                    && let Some(used) = fresh[index].take()
+                {
+                    let why = Refused::Rest {
+                        challenges: response.challenge.clone().into_iter().collect(),
+                    };
+                    // A source that gives up leaves the 401 as it is.
+                    if let Ok(credentials) = source::again(&*source, used, why) {
+                        again.push(index);
+                        next.push(credentials);
+                    }
+                }
+            }
+            if !again.is_empty() {
+                let retry: Vec<HttpRequest> = again
+                    .iter()
+                    .zip(&next)
+                    .map(|(index, fresh)| {
+                        let (method, path, body) = &calls[*index];
+                        self.request_of(*method, path, body.clone(), Some(&fresh.credentials))
+                    })
+                    .collect();
+                let retried = self.http.send_all(retry, at_once).await;
+                for (index, answer) in again.into_iter().zip(retried) {
+                    answers[index] = answer;
+                }
+            }
+        }
         calls
             .into_iter()
             .zip(answers)
@@ -1659,14 +1779,21 @@ impl<H: Http> RestClient<H> {
             .collect()
     }
 
-    /// What a call is on the wire: the URL, the credentials, the partition.
-    fn request_of(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> HttpRequest {
+    /// What a call is on the wire: the URL, the credentials, the headers the
+    /// server wants in addition.
+    fn request_of(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        credentials: Option<&Credentials>,
+    ) -> HttpRequest {
         let mut headers = vec![("accept".to_string(), "application/json".to_string())];
-        if let Some(credentials) = &self.credentials {
+        if let Some(credentials) = credentials {
             headers.push(("authorization".into(), credentials.header().to_string()));
         }
-        if let Some(partition) = &self.partition {
-            headers.push(("data-partition-id".into(), partition.clone()));
+        for (name, value) in self.extra.iter() {
+            headers.push((name.to_string(), value.to_string()));
         }
         if body.is_some() {
             headers.push(("content-type".into(), "application/json".into()));
@@ -2461,30 +2588,22 @@ fn custom(json: &Json) -> BTreeMap<String, DataValue> {
                     None => DataValueItem::Double(n.as_f64().unwrap_or(f64::NAN)),
                 },
                 Json::Null => DataValueItem::Null,
+                // A list of strings is one: OSDU's `owners`, `viewers` and
+                // `legaltags` are lists, and read back as their JSON text
+                // they would no longer be.
+                Json::Array(items) if items.iter().all(Json::is_string) => {
+                    DataValueItem::ArrayOfString(retp_types::datatypes::ArrayOfString {
+                        values: items
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect(),
+                    })
+                }
                 other => DataValueItem::String(other.to_string()),
             };
             (k.clone(), DataValue { item })
         })
         .collect()
-}
-
-/// A `DataValue` as this API's JSON - the inverse of [`custom`], for what a
-/// dataspace's `customData` carries: a flag, a number, a string, a list of
-/// strings. Anything else is `None`, and the caller refuses by name.
-fn json_of_value(value: &DataValue) -> Option<Json> {
-    Some(match &value.item {
-        DataValueItem::Boolean(b) => Json::Bool(*b),
-        DataValueItem::Int(i) => Json::from(*i),
-        DataValueItem::Long(l) => Json::from(*l),
-        DataValueItem::Float(f) => Json::from(*f),
-        DataValueItem::Double(d) => Json::from(*d),
-        DataValueItem::String(s) => Json::String(s.clone()),
-        DataValueItem::ArrayOfString(a) => {
-            Json::Array(a.values.iter().map(|s| Json::String(s.clone())).collect())
-        }
-        DataValueItem::Null => Json::Null,
-        _ => return None,
-    })
 }
 
 /// An array's values as the API's `Data`: a JSON list of numbers, flags or

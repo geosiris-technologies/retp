@@ -964,5 +964,19 @@
     "name": "WMLS_UpdateInStoreResponse",
     "fullName": "Energistics.Etp.v12.PrivateProtocols.WitsmlSoap.WMLS_UpdateInStoreResponse",
     "bytes": 15
+  },
+  {
+    "protocol": 2400,
+    "messageType": 1,
+    "name": "ResumeSession",
+    "fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSession",
+    "bytes": 61
+  },
+  {
+    "protocol": 2400,
+    "messageType": 2,
+    "name": "ResumeSessionResponse",
+    "fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSessionResponse",
+    "bytes": 66
   }
 ]

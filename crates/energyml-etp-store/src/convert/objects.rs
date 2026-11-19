@@ -140,8 +140,10 @@ pub fn edge_to_etp(edge: &Edge) -> EtpEdge {
 }
 
 /// [`edge_to_etp`], refusing an edge whose kind is not stated: ETP edges are
-/// `Primary` or `Secondary` (23.34.13), and no kind is guessed for a store
-/// that derives its edges from the objects.
+/// `Primary` or `Secondary` (23.34.13), and none is guessed here. The rules of
+/// `energyml-storage` give every edge they judge a kind (primary by default
+/// where none applies, labelled so); an edge nobody judged, or one a caller's
+/// rules leave unknown, is refused by name.
 pub fn edge_to_etp_checked(edge: &Edge) -> Result<EtpEdge> {
     if edge.kind.is_none() {
         return Err(Error::Unsupported {

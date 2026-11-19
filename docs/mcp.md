@@ -28,7 +28,7 @@ cargo install retp-cli --features mcp
 ## Running it
 
 It takes the options of any `retp` command that opens a session (the server's
-URL, `--partition`, `--insecure`, `--user`, `--token-url`, ...; see
+URL, `--header`, `--insecure`, `--user`, `--token-url`, ...; see
 [Command line](cli.md)), or a server of the [catalogue](cli.md#server-catalogue)
 by its name (`retp mcp --server azure`), plus:
 
@@ -66,6 +66,19 @@ before connecting, and reads secrets from the environment only:
 
 `--user`, `--client-id`, `--token-url`, `--azure-tenant`, `--cognito-region` and
 `--oauth-scope` carry no secret and are accepted.
+
+A `--header` whose name says it carries a secret (`cookie`, anything with
+`authorization`, `key`, `token`, `secret` or `password`) is refused the same
+way. Keep it in a [catalogue](cli.md#server-catalogue) entry, by reference, and
+serve that entry:
+
+```sh
+retp server add gateway wss://etp.example.org/ --header-from x-api-key=env:GATEWAY_API_KEY
+retp mcp --server gateway --dataspace demo
+```
+
+A header that carries nothing secret (`--header x-tenant=acme`,
+`--header data-partition-id=opendes`) is accepted.
 
 `energyml-mcp` redacts credentials from the server's own words that a tool
 reports; the token is still never an argument of any tool.

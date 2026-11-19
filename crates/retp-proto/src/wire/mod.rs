@@ -49,6 +49,12 @@ pub use split::{HEADER_MAX, Oversized, split_to_fit};
 /// (§3.6.1, p.60).
 pub const FIRST_PRIVATE_PROTOCOL: i32 = 2000;
 
+/// OSDU's extension of Core (`CoreOSDU`): `ResumeSession`, which asks the
+/// server to take back a session the client lost, before any session opens.
+/// Numbered among the private protocols, but its schemas are published
+/// (OSDU's `open-etp-server`), so its messages are decoded.
+pub const CORE_OSDU: i32 = 2400;
+
 /// What the wire must know of the session: the protocols it speaks, and in
 /// which role. Filled by the negotiation of tier 2; built by hand in tests.
 #[derive(Debug, Clone, Default)]
@@ -58,6 +64,7 @@ pub struct Config {
     header_extensions: bool,
     max_payload: Option<usize>,
     tolerance: Tolerance,
+    resumption: bool,
 }
 
 /// Why a [`Config`] refused a setting.
@@ -168,6 +175,19 @@ impl Config {
     pub fn max_payload(mut self, bytes: usize) -> Self {
         self.max_payload = Some(bytes);
         self
+    }
+
+    /// Speak [`CORE_OSDU`] as Core is spoken - in the connection roles, decoded,
+    /// with nothing negotiated: what a session about to be resumed needs, and
+    /// nothing after it opens (the negotiated configuration replaces this one).
+    pub fn resumption(mut self, on: bool) -> Self {
+        self.resumption = on;
+        self
+    }
+
+    /// Whether [`CORE_OSDU`] is spoken ([`Config::resumption`]).
+    pub fn resumes(&self) -> bool {
+        self.resumption
     }
 
     /// Our session role in `protocol`, if negotiated.
@@ -421,7 +441,7 @@ impl Wire {
     /// The role this end plays in `protocol`: its connection role in Core,
     /// its session role elsewhere.
     fn our_role(&self, protocol: i32) -> Option<Role> {
-        if protocol == 0 {
+        if protocol == 0 || (protocol == CORE_OSDU && self.config.resumption) {
             Some(self.side.role())
         } else {
             self.config.role_in(protocol)

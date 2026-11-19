@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use crate::TransportError;
-use crate::native::{CertificateCheck, header, tls_config};
+use crate::native::{CertificateCheck, handshake_answer, header, tls_config};
 
 /// How long a TCP connection may take to open (as for the blocking client).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,6 +68,7 @@ impl AsyncWrite for Stream {
 /// An open WebSocket to an ETP server.
 pub(super) struct Ws {
     inner: WebSocketStream<Stream>,
+    max_message: usize,
 }
 
 impl Ws {
@@ -109,7 +110,12 @@ impl Ws {
         } else {
             Stream::Plain(tcp)
         };
-        let (inner, response) = tokio_tungstenite::client_async(request, stream)
+        // A frame is part of a message: neither may pass the limit.
+        let limit = crate::native::announced_message_limit(handshake);
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
+        let (inner, response) = tokio_tungstenite::client_async_with_config(request, stream, Some(config))
             .await
             .map_err(|why| refused_handshake(&handshake.url, why))?;
         let agreed = response
@@ -123,7 +129,10 @@ impl Ws {
                 probe::SUBPROTOCOL
             )));
         }
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            max_message: limit,
+        })
     }
 
     /// Send one binary message, flushed.
@@ -153,6 +162,9 @@ impl Ws {
                     }));
                 }
                 Some(Ok(_)) => continue,
+                Some(Err(tungstenite::Error::Capacity(
+                    tungstenite::error::CapacityError::MessageTooLong { size, .. },
+                ))) => return Err(crate::native::message_too_long(size, self.max_message)),
                 Some(Err(why)) => return Err(TransportError::new(format!("receiving: {why}"))),
                 None => return Err(TransportError::new("the WebSocket is closed")),
             }
@@ -190,23 +202,7 @@ async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, TransportError>
 /// credentials, and says so with the server's challenge (§4.1.3).
 fn refused_handshake(url: &str, error: tungstenite::Error) -> TransportError {
     if let tungstenite::Error::Http(response) = &error {
-        let status = response.status();
-        let challenge = response
-            .headers()
-            .get_all("www-authenticate")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let said = match status.as_u16() {
-            401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
-            401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
-            403 => " - the credentials were understood, and do not give access here".to_string(),
-            _ => String::new(),
-        };
-        return TransportError::new(format!(
-            "the WebSocket handshake with {url} was answered HTTP {status}{said}"
-        ));
+        return handshake_answer(url, response.status().as_u16(), response.headers());
     }
     TransportError::new(format!("the WebSocket handshake with {url} failed: {error}"))
 }

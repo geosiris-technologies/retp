@@ -304,3 +304,106 @@ fn trailing_bytes_are_refused() {
     bytes.push(0x00);
     assert_eq!(One::from_avro(&bytes), Err(Error::TrailingBytes(1)));
 }
+
+// ---- counts read from the wire never size an allocation -------------------
+
+/// A block that announces `count` items, then carries `data`.
+fn block_announcing(count: i64, data: &[u8]) -> Vec<u8> {
+    let mut out = Writer::new();
+    out.long(count);
+    let mut bytes = out.finish();
+    bytes.extend_from_slice(data);
+    bytes
+}
+
+/// 2^40 items of one byte would be a terabyte reserved up front from a
+/// few bytes of message; the count is refused by name instead.
+#[test]
+fn an_array_count_beyond_the_input_is_refused_by_name() {
+    let bytes = block_announcing(1 << 40, &[0x02, 0x04]);
+    match Reader::new(&bytes).array(|r| r.fixed::<1>().map(|b| b[0])) {
+        Err(Error::TooManyItems {
+            reading,
+            count,
+            available,
+        }) => {
+            assert_eq!(reading, "array");
+            assert_eq!(count, 1 << 40);
+            assert_eq!(available, 1);
+        }
+        other => panic!("expected TooManyItems, got {other:?}"),
+    }
+}
+
+/// A count so large that `count * 8` overflows panicked in `reserve` before.
+#[test]
+fn an_array_count_of_the_largest_size_is_refused_by_name() {
+    let bytes = block_announcing(i64::MAX / 2, &[0x02]);
+    assert!(matches!(
+        Reader::new(&bytes).array(|r| r.long()),
+        Err(Error::TooManyItems { .. })
+    ));
+    // The negative form, which also carries a byte size.
+    let bytes = block_announcing(-(i64::MAX / 2), &[0x02, 0x02]);
+    assert!(matches!(
+        Reader::new(&bytes).array(|r| r.long()),
+        Err(Error::TooManyItems { .. })
+    ));
+}
+
+#[test]
+fn a_float_array_count_beyond_the_input_is_refused_by_name() {
+    let bytes = block_announcing(1 << 40, &[0; 16]);
+    assert!(matches!(
+        Reader::new(&bytes).array_f64(),
+        Err(Error::TooManyItems {
+            reading: "array block",
+            ..
+        })
+    ));
+    assert!(matches!(
+        Reader::new(&bytes).array_f32(),
+        Err(Error::TooManyItems {
+            reading: "array block",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_map_count_beyond_the_input_is_refused_by_name() {
+    let bytes = block_announcing(1 << 40, &[0x00, 0x00]);
+    assert!(matches!(
+        Reader::new(&bytes).map(|r| r.long()),
+        Err(Error::TooManyItems { reading: "map", .. })
+    ));
+}
+
+/// Items with no content take no input, so the input cannot bound them: a
+/// run of them is bounded on its own, instead of looping for 2^40 turns.
+#[test]
+fn an_endless_run_of_empty_items_is_refused_by_name() {
+    let bytes = block_announcing(1 << 40, &[]);
+    assert!(matches!(
+        Reader::new(&bytes).array(|_| Ok(())),
+        Err(Error::TooManyItems { reading: "array", .. })
+    ));
+}
+
+/// What the bounds must not touch: a run of real empty items under the
+/// bound, and large arrays.
+#[test]
+fn valid_arrays_decode_as_before() {
+    let mut out = Writer::new();
+    out.long(1000);
+    out.long(0);
+    let bytes = out.finish();
+    assert_eq!(Reader::new(&bytes).array(|_| Ok(())).unwrap().len(), 1000);
+
+    let values: Vec<f64> = (0..10_000).map(f64::from).collect();
+    let mut out = Writer::new();
+    out.array(&values, |w, v| w.double(*v));
+    let bytes = out.finish();
+    assert_eq!(Reader::new(&bytes).array_f64().unwrap(), values);
+    assert_eq!(Reader::new(&bytes).array(|r| r.double()).unwrap(), values);
+}

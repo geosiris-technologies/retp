@@ -1,6 +1,6 @@
 // Generated from the Energistics ETP v1.2 Avro schemas (Apache-2.0).
 // Generator: energyml-codegen 0.1.0
-// Input fingerprint (SHA-256, see schemas.lock): 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
+// Input fingerprint (SHA-256, see schemas.lock): 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
 //! Every ETP message, and the table that turns a header into one.
 //!
 //! Do not edit: run `cargo run -p energyml-codegen -- generate --etp` instead.
@@ -290,6 +290,10 @@ pub enum Message {
     WMLS_UpdateInStore(crate::private_protocols::witsml_soap::WMLS_UpdateInStore),
     /// Protocol 2100, message 14.
     WMLS_UpdateInStoreResponse(crate::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse),
+    /// Protocol 2400, message 1.
+    ResumeSession(crate::protocol::core_osdu::ResumeSession),
+    /// Protocol 2400, message 2.
+    ResumeSessionResponse(crate::protocol::core_osdu::ResumeSessionResponse),
 }
 
 impl Message {
@@ -434,6 +438,8 @@ impl Message {
             Message::WMLS_GetVersionResponse(_) => (2100, 12),
             Message::WMLS_UpdateInStore(_) => (2100, 13),
             Message::WMLS_UpdateInStoreResponse(_) => (2100, 14),
+            Message::ResumeSession(_) => (2400, 1),
+            Message::ResumeSessionResponse(_) => (2400, 2),
         }
     }
 
@@ -578,6 +584,8 @@ impl Message {
             Message::WMLS_GetVersionResponse(message) => message.to_avro(),
             Message::WMLS_UpdateInStore(message) => message.to_avro(),
             Message::WMLS_UpdateInStoreResponse(message) => message.to_avro(),
+            Message::ResumeSession(message) => message.to_avro(),
+            Message::ResumeSessionResponse(message) => message.to_avro(),
         }
     }
 
@@ -723,12 +731,14 @@ impl Message {
             Message::WMLS_GetVersionResponse(message) => message.to_json(),
             Message::WMLS_UpdateInStore(message) => message.to_json(),
             Message::WMLS_UpdateInStoreResponse(message) => message.to_json(),
+            Message::ResumeSession(message) => message.to_json(),
+            Message::ResumeSessionResponse(message) => message.to_json(),
         }
     }
 }
 
 /// How many `(protocol, messageType)` pairs the table knows.
-pub const MESSAGE_COUNT: usize = 138;
+pub const MESSAGE_COUNT: usize = 140;
 
 /// What the schema says of a `(protocol, messageType)`, before any body is read.
 ///
@@ -874,6 +884,8 @@ pub fn info(protocol: i32, message_type: i32) -> Option<MessageInfo> {
         (2100, 12) => MessageInfo::of::<crate::private_protocols::witsml_soap::WMLS_GetVersionResponse>(),
         (2100, 13) => MessageInfo::of::<crate::private_protocols::witsml_soap::WMLS_UpdateInStore>(),
         (2100, 14) => MessageInfo::of::<crate::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse>(),
+        (2400, 1) => MessageInfo::of::<crate::protocol::core_osdu::ResumeSession>(),
+        (2400, 2) => MessageInfo::of::<crate::protocol::core_osdu::ResumeSessionResponse>(),
         _ => return None,
     })
 }
@@ -1023,6 +1035,8 @@ pub fn decode(protocol: i32, message_type: i32, body: &[u8]) -> Result<Message> 
         (2100, 12) => Message::WMLS_GetVersionResponse(<crate::private_protocols::witsml_soap::WMLS_GetVersionResponse as Avro>::read(&mut input)?),
         (2100, 13) => Message::WMLS_UpdateInStore(<crate::private_protocols::witsml_soap::WMLS_UpdateInStore as Avro>::read(&mut input)?),
         (2100, 14) => Message::WMLS_UpdateInStoreResponse(<crate::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse as Avro>::read(&mut input)?),
+        (2400, 1) => Message::ResumeSession(<crate::protocol::core_osdu::ResumeSession as Avro>::read(&mut input)?),
+        (2400, 2) => Message::ResumeSessionResponse(<crate::protocol::core_osdu::ResumeSessionResponse as Avro>::read(&mut input)?),
         _ => return Err(Error::NoSuchMessage { protocol, message_type }),
     };
     input.expect_done()?;

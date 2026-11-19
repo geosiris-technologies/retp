@@ -93,6 +93,7 @@ impl<T: Transport, C: Clock> EtpStore<T, C> {
     /// Forget what the dataspace was last listed as holding.
     fn forget_listing(&self) {
         *self.listing.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.containment.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Refuse a write inside a transaction that only reads.
@@ -417,6 +418,10 @@ impl<T: Transport + Send, C: Clock + Send> EnergymlWriter for EtpStore<T, C> {
             Opened::Refused(why) => Err(Error::Transaction {
                 store: KIND,
                 reason: format!("the server would not open the transaction: {why}"),
+            }),
+            Opened::Failed { code, message } => Err(Error::Transaction {
+                store: KIND,
+                reason: format!("the server would not open the transaction: {message} (ETP error {code})"),
             }),
             // "Never here", apart from "not now": ETP 1.2 §18.
             Opened::Unsupported(_) => Err(Error::Unsupported {

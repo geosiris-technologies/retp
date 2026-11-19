@@ -81,8 +81,8 @@ docker run --rm -e ETP_PASSWORD $IMG dataspaces "$ETP_URL" --user USER
 
 The variables are `ETP_TOKEN`, `ETP_USER`, `ETP_PASSWORD` and
 `ETP_CLIENT_SECRET`. The options that carry no secret (`--user`, `--client-id`,
-`--token-url`, `--azure-tenant`, `--cognito-region`, `--oauth-scope`,
-`--partition`) are ordinary arguments.
+`--token-url`, `--azure-tenant`, `--cognito-region`, `--oauth-scope`, a
+`--header` that carries no secret) are ordinary arguments.
 
 A [server catalogue](cli.md#server-catalogue) works in a container too: mount
 its folder read-only and name it with `RETP_CATALOG`. Its `server.toml` files hold

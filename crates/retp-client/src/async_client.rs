@@ -14,15 +14,18 @@
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
+use std::time::SystemTime;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::{Event, Handler};
+use retp_proto::connection::{Event, Handler, Resumable};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer};
 use retp_proto::wire::{Delivery, Tolerance};
 
 use crate::caller::Caller;
 use crate::engine::Engine;
+use crate::resume::Came;
+use crate::source::{self, CredentialSource, Refused};
 use crate::{Acknowledged, ClientError, Clock, TransportError};
 
 /// `Send` on a native target, where the client is driven by a task of its
@@ -110,6 +113,30 @@ impl<C: Clock> AsyncClient<C> {
         credentials: Option<Credentials>,
     ) -> Result<Self, ClientError> {
         let engine = Engine::start(offer, handlers, credentials, clock.now())?;
+        Ok(Self::begin(engine, sink, clock))
+    }
+
+    /// Start a session by asking back the session `lost` (OSDU's
+    /// `ResumeSession`, ADR-0003): the `ResumeSession` goes to `sink` at once.
+    /// A server that gives it back opens the same session; one that does not
+    /// is asked a new session at once, on the same socket
+    /// ([`AsyncClient::came`] says which, once [`AsyncClient::opened`] says
+    /// it is open). `offer` and `handlers` are those `lost` was opened with,
+    /// and `credentials` this connection's own: nothing of the lost session's
+    /// authorization is carried over.
+    pub fn resume(
+        sink: Box<dyn Sink>,
+        clock: C,
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        lost: Resumable,
+    ) -> Result<Self, ClientError> {
+        let engine = Engine::resume(offer, handlers, credentials, lost, clock.now())?;
+        Ok(Self::begin(engine, sink, clock))
+    }
+
+    fn begin(engine: Engine, sink: Box<dyn Sink>, clock: C) -> Self {
         let client = Self {
             shared: Arc::new(Mutex::new(Shared {
                 engine,
@@ -119,7 +146,7 @@ impl<C: Clock> AsyncClient<C> {
             clock,
         };
         client.lock().flush();
-        Ok(client)
+        client
     }
 
     /// Over when the session is open - or could not be, and why.
@@ -220,6 +247,50 @@ impl<C: Clock> AsyncClient<C> {
             id
         };
         self.answer(id).await.map(|_| ())
+    }
+
+    /// Renew the authorization of this open session with `credentials`: an
+    /// `Authorize` onto the sink (ETP 1.2 §3.13.5 point 1.b, p.90), over when
+    /// the server's answer arrives (§5.3.7, p.123). The session is the same
+    /// one afterwards. Do it before the authorization the server holds runs
+    /// out; when is the application's.
+    ///
+    /// A refusal is [`ClientError::AuthorizationNeeded`] with the server's
+    /// challenges, and the session is **still open**. The answer is also said
+    /// in [`AsyncClient::unsolicited`] as [`Event::Reauthorized`] or
+    /// [`Event::AuthorizationRefused`].
+    pub async fn reauthorize(&self, credentials: &Credentials) -> Result<(), ClientError> {
+        let id = {
+            let mut shared = self.lock();
+            let id = shared.engine.reauthorize(credentials, self.clock.now())?;
+            shared.flush();
+            id
+        };
+        self.answer(id).await.map(|_| ())
+    }
+
+    /// [`Self::reauthorize`] with the credentials a [`CredentialSource`]
+    /// gives: a refusal goes back to the source - with the witness of
+    /// **these** credentials - once, and the credentials it gives next are
+    /// sent; a second refusal, or a source that gives up, is
+    /// [`ClientError::AuthorizationNeeded`]. The source is called on the
+    /// thread that polls this future, never on the one that feeds the client
+    /// ([`AsyncClient::received`]): it may block. Gives when the accepted
+    /// credentials end, if the source said.
+    pub async fn reauthorize_with(
+        &self,
+        source: &dyn CredentialSource,
+    ) -> Result<Option<SystemTime>, ClientError> {
+        let first = source::begin(source, false)?;
+        match self.reauthorize(&first.credentials).await {
+            Ok(()) => Ok(first.valid_until),
+            Err(ClientError::AuthorizationNeeded { challenges }) => {
+                let second = source::again(source, first, Refused::Authorize { challenges })?;
+                self.reauthorize(&second.credentials).await?;
+                Ok(second.valid_until)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     fn answer(&self, id: i64) -> impl Future<Output = Result<Vec<Delivery>, ClientError>> + '_ {
@@ -372,6 +443,19 @@ impl<C: Clock> AsyncClient<C> {
     pub fn watermark(&self) -> Option<i64> {
         self.lock().engine.watermark()
     }
+
+    /// What to ask this session back with, if its connection is lost
+    /// ([`AsyncClient::resume`]): `None` until the session is open.
+    pub fn resumable(&self) -> Option<Resumable> {
+        self.lock().engine.resumable()
+    }
+
+    /// How the session came: given back by `ResumeSession`, or opened anew -
+    /// with the server's refusal, when [`AsyncClient::resume`] asked and was
+    /// refused.
+    pub fn came(&self) -> Came {
+        self.lock().engine.came()
+    }
 }
 
 impl<C: Clock> Caller for AsyncClient<C> {
@@ -417,6 +501,14 @@ impl<C: Clock> Caller for AsyncClient<C> {
 
     fn watermark(&self) -> Option<i64> {
         AsyncClient::watermark(self)
+    }
+
+    fn resumable(&self) -> Option<Resumable> {
+        AsyncClient::resumable(self)
+    }
+
+    fn came(&self) -> Came {
+        AsyncClient::came(self)
     }
 
     fn negotiated(&self) -> Negotiated {

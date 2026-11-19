@@ -1,6 +1,6 @@
 // Generated from the Energistics ETP v1.2 Avro schemas (Apache-2.0).
 // Generator: energyml-codegen 0.1.0
-// Input fingerprint (SHA-256, see schemas.lock): 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
+// Input fingerprint (SHA-256, see schemas.lock): 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
 //! One encoding round trip per ETP message - generated, because 138 of
 //! these is not a thing anyone writes by hand.
 //!
@@ -1256,5 +1256,23 @@ fn private_protocols_witsml_soap_wmls_update_in_store_response() {
     let back = <retp_types::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse>::from_avro(&bytes)
         .unwrap_or_else(|why| panic!("{}: {why}", <retp_types::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse>::FULL_NAME));
     assert_eq!(back, original, "{}", <retp_types::private_protocols::witsml_soap::WMLS_UpdateInStoreResponse>::FULL_NAME);
+}
+
+#[test]
+fn protocol_core_osdu_resume_session() {
+    let original = <retp_types::protocol::core_osdu::ResumeSession>::default();
+    let bytes = original.to_avro();
+    let back = <retp_types::protocol::core_osdu::ResumeSession>::from_avro(&bytes)
+        .unwrap_or_else(|why| panic!("{}: {why}", <retp_types::protocol::core_osdu::ResumeSession>::FULL_NAME));
+    assert_eq!(back, original, "{}", <retp_types::protocol::core_osdu::ResumeSession>::FULL_NAME);
+}
+
+#[test]
+fn protocol_core_osdu_resume_session_response() {
+    let original = <retp_types::protocol::core_osdu::ResumeSessionResponse>::default();
+    let bytes = original.to_avro();
+    let back = <retp_types::protocol::core_osdu::ResumeSessionResponse>::from_avro(&bytes)
+        .unwrap_or_else(|why| panic!("{}: {why}", <retp_types::protocol::core_osdu::ResumeSessionResponse>::FULL_NAME));
+    assert_eq!(back, original, "{}", <retp_types::protocol::core_osdu::ResumeSessionResponse>::FULL_NAME);
 }
 

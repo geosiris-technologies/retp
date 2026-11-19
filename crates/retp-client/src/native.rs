@@ -29,7 +29,9 @@ use tungstenite::http::HeaderValue;
 use tungstenite::{Message, WebSocket};
 
 use crate::rest::{Http, HttpRequest, HttpResponse, Method, RestClient};
-use crate::{Client, ClientError, ServerProfile, Settings, SystemClock, Transport, TransportError};
+use crate::{
+    Client, ClientError, ExtraHeaders, HeaderRefusal, Settings, SystemClock, Transport, TransportError,
+};
 
 /// Whether the server's certificate is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -162,11 +164,23 @@ pub(crate) fn tls_config(check: CertificateCheck) -> Arc<ClientConfig> {
 /// The HTTP client of the probe and of the logins: HTTP errors come back as
 /// responses, so their bodies - which say *why* - can be read.
 pub(crate) fn http_agent(check: CertificateCheck) -> ureq::Agent {
+    http_agent_following(check, REDIRECTS)
+}
+
+/// How many redirections a request follows when it carries no secret but
+/// its credentials, which are not sent on to another address.
+const REDIRECTS: u32 = 10;
+
+/// [`http_agent`], following at most `redirects` redirections. A request
+/// that carries a secret header follows none: only the credentials are
+/// taken off a redirected request, and the header would go to another host.
+fn http_agent_following(check: CertificateCheck, redirects: u32) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .disable_verification(check == CertificateCheck::Skip)
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
+        .max_redirects(redirects)
         .http_status_as_error(false)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(Duration::from_secs(60)))
@@ -179,8 +193,11 @@ pub(crate) fn http_agent(check: CertificateCheck) -> ureq::Agent {
 pub struct Endpoint {
     /// The server's WebSocket URL.
     pub url: String,
-    /// Its habits.
-    pub profile: ServerProfile,
+    /// The headers it wants in addition - a data partition, a routing key, a
+    /// tenant, an API key -, sent with every request: the handshake, the probe, each REST
+    /// call. A front end has no header: under [`Profile::Browser`] they go in
+    /// the query string, and one that carries a secret is refused.
+    pub headers: ExtraHeaders,
     /// The credentials, if the server wants some.
     pub credentials: Option<Credentials>,
     /// Whether its certificate is checked.
@@ -198,23 +215,103 @@ impl Endpoint {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            profile: ServerProfile::Standard,
+            headers: ExtraHeaders::new(),
             credentials: None,
             certificates: CertificateCheck::Verify,
             handshake: Profile::Native,
         }
     }
+
+    /// `handshake` with the headers this server wants in addition - what
+    /// [`connect`] sends. The data partition of OSDU's Reservoir DDMS is one
+    /// of them, `data-partition-id`: a header like any other.
+    pub fn adapt(&self, handshake: Handshake) -> Result<Handshake, HeaderRefusal> {
+        self.headers.onto(handshake)
+    }
+
+    /// What a WebSocket connection to this server would refuse about its
+    /// headers, with nothing sent: one that carries a secret when the
+    /// handshake is a front end's. To be asked before a login, which costs a
+    /// request. The REST API always sends headers, and refuses none here.
+    pub fn sendable(&self) -> Result<(), HeaderRefusal> {
+        self.headers.fit(self.handshake)
+    }
+}
+
+/// A header the endpoint cannot send, as the error of a connection.
+pub(crate) fn refused_header(why: HeaderRefusal) -> ClientError {
+    ClientError::Transport(TransportError::new(why.to_string()))
+}
+
+/// The largest WebSocket message, in bytes, a connection accepts when the
+/// handshake announced no `MaxWebSocketMessagePayloadSize`: 64 MiB, which is
+/// what the WebSocket library already assumed, now said and tested. Array
+/// reads are cut into messages of 16 MiB at most by default
+/// ([`crate::arrays`]), so this leaves four times that for the other
+/// messages. A larger one is refused by name; the way to raise it is
+/// [`WebSocketTransport::connect_limited`].
+pub const DEFAULT_MAX_WEBSOCKET_MESSAGE: usize = 64 * 1024 * 1024;
+
+/// The most a WebSocket message may weigh on a connection opened with
+/// `handshake`: the `MaxWebSocketMessagePayloadSize` it announces to the
+/// server - the size this end says it can receive - or
+/// [`DEFAULT_MAX_WEBSOCKET_MESSAGE`] when it announces none.
+/// TODO(verify): the ETP 1.2 text of that capability, read against the
+/// specification; here it is taken as the size the announcing end receives.
+pub(crate) fn announced_message_limit(handshake: &Handshake) -> usize {
+    const NAME: &str = "maxwebsocketmessagepayloadsize";
+    let from_header = handshake
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(NAME))
+        .map(|(_, value)| value.as_str());
+    let from_query = handshake.url.split_once('?').and_then(|(_, query)| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| key.eq_ignore_ascii_case(NAME))
+            .map(|(_, value)| value)
+    });
+    from_header
+        .or(from_query)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|size| *size > 0)
+        .and_then(|size| usize::try_from(size).ok())
+        .unwrap_or(DEFAULT_MAX_WEBSOCKET_MESSAGE)
+}
+
+/// A message above the limit, said as what it is.
+pub(crate) fn message_too_long(size: usize, max_size: usize) -> TransportError {
+    TransportError::new(format!(
+        "the server sent a WebSocket message of {size} bytes, above the {max_size} this connection accepts; \
+         it was refused before being buffered. Raise the limit by announcing a larger \
+         MaxWebSocketMessagePayloadSize (`Connect::max_message`) or with `connect_limited`"
+    ))
 }
 
 /// A WebSocket to an ETP server.
 pub struct WebSocketTransport {
     socket: WebSocket<Stream>,
     closed: bool,
+    max_message: usize,
 }
 
 impl WebSocketTransport {
-    /// Open the WebSocket a [`Handshake`] describes.
+    /// Open the WebSocket a [`Handshake`] describes. A message larger than
+    /// the size the handshake announces (`MaxWebSocketMessagePayloadSize`) -
+    /// [`DEFAULT_MAX_WEBSOCKET_MESSAGE`] when it announces none - is refused
+    /// by name, before it is buffered.
     pub fn connect(handshake: &Handshake, certificates: CertificateCheck) -> Result<Self, TransportError> {
+        Self::connect_limited(handshake, certificates, announced_message_limit(handshake))
+    }
+
+    /// [`WebSocketTransport::connect`], accepting messages of `max_message`
+    /// bytes at most, whatever the handshake announced.
+    pub fn connect_limited(
+        handshake: &Handshake,
+        certificates: CertificateCheck,
+        max_message: usize,
+    ) -> Result<Self, TransportError> {
         let mut request = handshake
             .url
             .as_str()
@@ -249,8 +346,12 @@ impl WebSocketTransport {
         } else {
             Stream::Plain(tcp)
         };
-        let (socket, response) =
-            tungstenite::client(request, stream).map_err(|why| refused_handshake(&handshake.url, why))?;
+        // A frame is part of a message: neither may pass the limit.
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(max_message))
+            .max_frame_size(Some(max_message));
+        let (socket, response) = tungstenite::client::client_with_config(request, stream, Some(config))
+            .map_err(|why| refused_handshake(&handshake.url, why))?;
         let agreed = response
             .headers()
             .get("sec-websocket-protocol")
@@ -265,8 +366,37 @@ impl WebSocketTransport {
         Ok(Self {
             socket,
             closed: false,
+            max_message,
         })
     }
+}
+
+/// An HTTP answer to the WebSocket upgrade that is not `101`, as a
+/// [`TransportError`] that carries its status and its `WWW-Authenticate`
+/// challenges (one entry per header value, nothing else of the headers).
+pub(crate) fn handshake_answer(
+    url: &str,
+    status: u16,
+    headers: &tungstenite::http::HeaderMap,
+) -> TransportError {
+    let challenges: Vec<String> = headers
+        .get_all("www-authenticate")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let challenge = challenges.join(" | ");
+    let said = match status {
+        401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
+        401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
+        403 => " - the credentials were understood, and do not give access here".to_string(),
+        _ => String::new(),
+    };
+    TransportError::handshake_refused(
+        format!("the WebSocket handshake with {url} was answered HTTP {status}{said}"),
+        status,
+        challenges,
+    )
 }
 
 /// A failed handshake, said as what it means: an HTTP 401 or 403 is about
@@ -279,23 +409,7 @@ fn refused_handshake(
         return TransportError::new(format!("the WebSocket handshake with {url} was interrupted"));
     };
     if let tungstenite::Error::Http(response) = &error {
-        let status = response.status();
-        let challenge = response
-            .headers()
-            .get_all("www-authenticate")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        let said = match status.as_u16() {
-            401 if challenge.is_empty() => " - credentials missing or refused".to_string(),
-            401 => format!(" - credentials missing or refused; the server asks for: {challenge}"),
-            403 => " - the credentials were understood, and do not give access here".to_string(),
-            _ => String::new(),
-        };
-        return TransportError::new(format!(
-            "the WebSocket handshake with {url} was answered HTTP {status}{said}"
-        ));
+        return handshake_answer(url, response.status().as_u16(), response.headers());
     }
     TransportError::new(format!("the WebSocket handshake with {url} failed: {error}"))
 }
@@ -366,6 +480,13 @@ impl Transport for WebSocketTransport {
                 {
                     return Ok(None);
                 }
+                Err(tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+                    size,
+                    ..
+                })) => {
+                    self.closed = true;
+                    return Err(message_too_long(size, self.max_message));
+                }
                 Err(why) => {
                     self.closed = true;
                     return Err(TransportError::new(format!("receiving: {why}")));
@@ -407,14 +528,18 @@ impl std::fmt::Display for ProbeError {
 impl std::error::Error for ProbeError {}
 
 /// `GET …/.well-known/etp-server-capabilities` for `endpoint` (§4.3.1): what
-/// it speaks, its limits, how to get a token.
+/// it speaks, its limits, how to get a token. The endpoint's partition and
+/// extra headers go with it, always as headers: this is HTTP, whatever the
+/// handshake of the WebSocket.
 pub fn fetch_server_capabilities(endpoint: &Endpoint) -> Result<(String, ServerCapabilities), ProbeError> {
     let url = probe::server_capabilities_url(&endpoint.url).map_err(ProbeError::Url)?;
-    let mut request = http_agent(endpoint.certificates)
+    let additions = &endpoint.headers;
+    let redirects = if additions.has_secret() { 0 } else { REDIRECTS };
+    let mut request = http_agent_following(endpoint.certificates, redirects)
         .get(&url)
         .header("accept", "avro/binary, application/json;q=0.5");
-    if let ServerProfile::Rddms { data_partition } = &endpoint.profile {
-        request = request.header("data-partition-id", data_partition);
+    for (name, value) in additions.iter() {
+        request = request.header(name, value);
     }
     if let Some(credentials) = &endpoint.credentials {
         request = request.header("authorization", credentials.header());
@@ -499,22 +624,52 @@ pub fn fit_to_server(endpoint: &Endpoint, offer: Offer) -> (Offer, Fitted) {
 /// the probe's: an array's block is a large answer.
 pub struct UreqHttp {
     agent: ureq::Agent,
+    max_body: u64,
 }
 
+/// The largest HTTP answer body, in bytes, [`UreqHttp`] reads by default:
+/// 256 MiB. Array blocks are cut to 16 MiB by default and the other answers
+/// (lists, objects) are far smaller, so this is generous; a larger body is
+/// refused by name, and [`UreqHttp::with_max_body`] raises the limit.
+pub const DEFAULT_MAX_HTTP_BODY: u64 = 256 * 1024 * 1024;
+
 impl UreqHttp {
+    /// Read answer bodies of `bytes` at most (the default is
+    /// [`DEFAULT_MAX_HTTP_BODY`]); a larger one is a [`TransportError`] that
+    /// says the limit, and is not buffered beyond it.
+    pub fn with_max_body(mut self, bytes: u64) -> Self {
+        self.max_body = bytes;
+        self
+    }
+
     /// An HTTP client checking certificates as `check` says.
     pub fn new(check: CertificateCheck) -> Self {
+        Self::following(check, REDIRECTS)
+    }
+
+    /// [`UreqHttp::new`], for requests that carry a secret header: no
+    /// redirection is followed (the answer comes back as it is), so that the
+    /// header never goes to another host than the one it was given for.
+    pub fn without_redirects(check: CertificateCheck) -> Self {
+        Self::following(check, 0)
+    }
+
+    fn following(check: CertificateCheck, redirects: u32) -> Self {
         let tls = ureq::tls::TlsConfig::builder()
             .disable_verification(check == CertificateCheck::Skip)
             .build();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
+            .max_redirects(redirects)
             .http_status_as_error(false)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(Duration::from_secs(300)))
             .build()
             .new_agent();
-        Self { agent }
+        Self {
+            agent,
+            max_body: DEFAULT_MAX_HTTP_BODY,
+        }
     }
 
     fn send_now(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
@@ -556,9 +711,16 @@ impl UreqHttp {
         let body = response
             .body_mut()
             .with_config()
-            .limit(u64::MAX)
+            .limit(self.max_body)
             .read_to_vec()
-            .map_err(|why| TransportError::new(format!("{}: reading the body: {why}", request.url)))?;
+            .map_err(|why| match why {
+                ureq::Error::BodyExceedsLimit(limit) => TransportError::new(format!(
+                    "{}: the answer body is larger than the {limit} bytes this client reads; \
+                     raise the limit with `UreqHttp::with_max_body`",
+                    request.url
+                )),
+                why => TransportError::new(format!("{}: reading the body: {why}", request.url)),
+            })?;
         Ok(HttpResponse {
             status,
             challenge,
@@ -606,19 +768,18 @@ impl Http for UreqHttp {
 impl crate::rest::BlockingHttp for UreqHttp {}
 
 /// A client of the Reservoir DDMS REST API: `endpoint.url` is the API's base
-/// (`https://…/api/reservoir-ddms/v2`), and its credentials, OSDU partition
+/// (`https://…/api/reservoir-ddms/v2`), and its credentials, extra headers
 /// and certificate check go with every request.
+///
+/// When one of its headers is a secret, no redirection is followed
+/// ([`UreqHttp::without_redirects`]).
 pub fn rest_client(endpoint: &Endpoint) -> RestClient<UreqHttp> {
-    let partition = match &endpoint.profile {
-        ServerProfile::Rddms { data_partition } => Some(data_partition.clone()),
-        ServerProfile::Standard => None,
+    let http = if endpoint.headers.has_secret() {
+        UreqHttp::without_redirects(endpoint.certificates)
+    } else {
+        UreqHttp::new(endpoint.certificates)
     };
-    RestClient::new(
-        UreqHttp::new(endpoint.certificates),
-        &endpoint.url,
-        endpoint.credentials.clone(),
-        partition,
-    )
+    RestClient::new(http, &endpoint.url, endpoint.credentials.clone()).with_headers(endpoint.headers.clone())
 }
 
 /// A server, by either transport - what the command line holds: the same
@@ -660,6 +821,27 @@ impl Remote {
                 let started = std::time::Instant::now();
                 crate::caller::run(rest.alive())?;
                 Ok(started.elapsed())
+            }
+        }
+    }
+
+    /// Renew the authorization with `credentials`, whatever the transport -
+    /// the one door a caller that holds a [`Remote`] goes through.
+    ///
+    /// Over ETP, an `Authorize` on the open session and the wait for its
+    /// answer ([`Client::reauthorize`], ETP v1.2 section 3.13.5): a refusal is
+    /// [`ClientError::AuthorizationNeeded`], and the session is still open.
+    /// Over REST there is no session to renew: every request from now on
+    /// carries these credentials ([`RestClient::reauthorize`]), and the server
+    /// judges them at the next one.
+    pub fn reauthorize(&mut self, credentials: &Credentials) -> Result<(), ClientError> {
+        match self {
+            Remote::Etp(client) => client.reauthorize(credentials),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.reauthorize(credentials),
+            Remote::Rest(rest) => {
+                rest.reauthorize(credentials.clone());
+                Ok(())
             }
         }
     }
@@ -879,6 +1061,24 @@ impl crate::Caller for Remote {
         }
     }
 
+    fn resumable(&self) -> Option<retp_proto::connection::Resumable> {
+        match self {
+            Remote::Etp(client) => Some(client.resumable()),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().resumable(),
+            Remote::Rest(_) => None,
+        }
+    }
+
+    fn came(&self) -> crate::resume::Came {
+        match self {
+            Remote::Etp(client) => client.came(),
+            #[cfg(feature = "live")]
+            Remote::Live(live) => live.client().came(),
+            Remote::Rest(_) => crate::resume::Came::Fresh { refused: None },
+        }
+    }
+
     fn negotiated(&self) -> retp_proto::negotiate::Negotiated {
         match self {
             Remote::Etp(client) => crate::Caller::negotiated(client.as_ref()),
@@ -919,15 +1119,7 @@ pub struct Connect {
 
 /// Open a WebSocket and a session over it.
 pub fn connect(connect: Connect) -> Result<Client<WebSocketTransport, SystemClock>, ClientError> {
-    let settings = HandshakeSettings {
-        max_message: connect.max_message,
-        max_frame: None,
-        authorization: connect.endpoint.credentials.clone(),
-    };
-    let handshake = probe::handshake(&connect.endpoint.url, connect.endpoint.handshake, &settings)
-        .map_err(|why| ClientError::Transport(TransportError::new(why.to_string())))?;
-    let handshake = connect.endpoint.profile.adapt(handshake);
-    let transport = WebSocketTransport::connect(&handshake, connect.endpoint.certificates)?;
+    let (transport, connect) = open_socket(connect)?;
     Client::open(
         transport,
         SystemClock,
@@ -936,6 +1128,39 @@ pub fn connect(connect: Connect) -> Result<Client<WebSocketTransport, SystemCloc
         connect.endpoint.credentials,
         Settings::default(),
     )
+}
+
+/// Open a WebSocket and ask back over it the session `lost`, which another
+/// WebSocket held ([`Client::resumable`]) - OSDU's `ResumeSession`; a server
+/// that will not give it back opens a new session instead
+/// ([`Client::resumed`]). `connect` is what `lost` was opened with.
+pub fn connect_resuming(
+    connect: Connect,
+    lost: retp_proto::connection::Resumable,
+) -> Result<Client<WebSocketTransport, SystemClock>, ClientError> {
+    let (transport, connect) = open_socket(connect)?;
+    Client::resume(
+        transport,
+        SystemClock,
+        connect.offer,
+        connect.handlers,
+        connect.endpoint.credentials,
+        Settings::default(),
+        lost,
+    )
+}
+
+fn open_socket(connect: Connect) -> Result<(WebSocketTransport, Connect), ClientError> {
+    let settings = HandshakeSettings {
+        max_message: connect.max_message,
+        max_frame: None,
+        authorization: connect.endpoint.credentials.clone(),
+    };
+    let handshake = probe::handshake(&connect.endpoint.url, connect.endpoint.handshake, &settings)
+        .map_err(|why| ClientError::Transport(TransportError::new(why.to_string())))?;
+    let handshake = connect.endpoint.adapt(handshake).map_err(refused_header)?;
+    let transport = WebSocketTransport::connect(&handshake, connect.endpoint.certificates)?;
+    Ok((transport, connect))
 }
 
 /// A [`Connector`](crate::resume::Connector) for the native transport:
@@ -953,6 +1178,77 @@ where
 
     fn connect(&mut self) -> Result<S, Box<dyn std::error::Error + Send + Sync>> {
         (self.0)().map_err(Into::into)
+    }
+
+    fn pause(&mut self, how_long: Duration) {
+        std::thread::sleep(how_long);
+    }
+}
+
+/// A [`Connector`](crate::resume::Connector) for the native transport that,
+/// when `ask` is on, first asks the server to give the lost session back -
+/// OSDU's `ResumeSession` (protocol 2400, CoreOSDU), an **extension** of
+/// ETP v1.2, which a server may not support (ADR-0003) - and opens a new
+/// session the whole way when it will not.
+///
+/// - `open` opens a session from the start - login, handshake, negotiation
+///   -, as [`Reopen`]'s does;
+/// - `resume` opens a new connection the whole way too - the probe, the
+///   login, **this connection's own credentials** - and asks the lost session
+///   back over it ([`connect_resuming`], `LiveSession::connect_resuming`),
+///   with the same offer `lost` was opened with. A server that refuses
+///   (`ENOT_FOUND`, *Session not found or expired*) or does not speak 2400
+///   is asked a new session at once on that connection; the session returned
+///   says which ([`Caller::came`](crate::Caller::came)). An attempt that
+///   fails outright - the connection would not open - is said, then `open`
+///   is called.
+///
+/// With `ask` off - the default of every caller of this crate - `resume` is
+/// never called, and this is [`Reopen`] exactly: no `ResumeSession` crosses
+/// the wire. On, a resumed session is still a session that knows nothing of
+/// what was in flight: the operation re-asks what a new one would.
+///
+/// **Caution** (OSDU's issue #232): nothing on the client side tells which
+/// rights the server applies to a resumed session. This client always sends
+/// its own credentials on the new connection, and relies on nothing of the
+/// lost one's authorization.
+pub struct Resuming<F, G> {
+    /// Opens a new session, from the start.
+    pub open: F,
+    /// Opens a new connection and asks the lost session back over it.
+    pub resume: G,
+    /// Whether to ask the server for the lost session at all.
+    pub ask: bool,
+}
+
+impl<F, G, S, E> crate::resume::Connector for Resuming<F, G>
+where
+    F: FnMut() -> Result<S, E>,
+    G: FnMut(retp_proto::connection::Resumable) -> Result<S, E>,
+    S: crate::caller::Blocking,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Session = S;
+
+    fn connect(&mut self) -> Result<S, Box<dyn std::error::Error + Send + Sync>> {
+        (self.open)().map_err(Into::into)
+    }
+
+    fn resume(
+        &mut self,
+        lost: &retp_proto::connection::Resumable,
+    ) -> Option<Result<(S, crate::resume::Came), Box<dyn std::error::Error + Send + Sync>>> {
+        if !self.ask {
+            return None;
+        }
+        Some(
+            (self.resume)(lost.clone())
+                .map(|session| {
+                    let came = crate::Caller::came(&session);
+                    (session, came)
+                })
+                .map_err(Into::into),
+        )
     }
 
     fn pause(&mut self, how_long: Duration) {

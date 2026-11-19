@@ -209,11 +209,6 @@ fn inserted(
     if rest && !has(after, &["--rest"]) {
         add("--rest", None);
     }
-    if let Some(partition) = &server.partition
-        && !has(after, &["--partition"])
-    {
-        add("--partition", Some(partition.clone()));
-    }
     if server.tls == crate::entry::Tls::Skip
         && !has(after, &["--insecure", "--unsecure"])
         && !grammar

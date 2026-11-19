@@ -5,8 +5,8 @@
 # fingerprint <sha256 of the `file` lines below>
 # crate <name> <sha256 of the `file` lines that crate was generated from>
 # file <sha256>  <size in bytes>  <path relative to the schema root>
-fingerprint 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
-crate retp-types 340bb1bd2c3610d260d81c9371284871112e00b0ef22a7e36d04310dc770a1f0
+fingerprint 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
+crate retp-types 84bd808714c5d32f2b7e91d897b5677012f16bafd221694662c8058e98c13fdc
 file 62fc487bfaf37f363409eba830caab5f9f8d4fd62f31682a1b07c74d24371a5c  461  Energistics/Etp/v12/Datatypes/AnyArray.avsc
 file 9dc6e84d3eebb2248264f79fd5f92eddc5836d1b88162ccc3c6fd42621435c96  229  Energistics/Etp/v12/Datatypes/AnyArrayType.avsc
 file 965db6c95731029f7904786d1396b86455a2b8a58e2dc0155d236abff223d6a2  545  Energistics/Etp/v12/Datatypes/AnyLogicalArrayType.avsc
@@ -219,3 +219,5 @@ file 2e7a7e5659cdcffa0ca7316d4fae496543f15b7d742910c6960a14c30a1745e5  338  Ener
 file 00e3c8b31bb134e6e28fffb918ff89ae1b2c99c2f8b2f9be4dffa25cd8e45140  471  Energistics/Etp/v12/Protocol/Transaction/RollbackTransactionResponse.avsc
 file d8aa25cc9c2a381a06e9a69d26bf9629b3fd0a7c5abf612e7aa4fa971530a459  463  Energistics/Etp/v12/Protocol/Transaction/StartTransaction.avsc
 file c02c360c6f3764efd8e9af8d070b531fc6e9be8173c72612aa5c98033aa206fd  468  Energistics/Etp/v12/Protocol/Transaction/StartTransactionResponse.avsc
+file 27a0f21071644f68d3d9297b556c5cb7330a9e640b6c46b614cedffb7057c9df  1789  OSDU/CoreOSDU/ResumeSession.avsc
+file d879f12411107df372974f2a48a743b772d00aff5a4bf4ad3a06c0f2f0d5707a  843  OSDU/CoreOSDU/ResumeSessionResponse.avsc

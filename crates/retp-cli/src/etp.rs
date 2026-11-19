@@ -21,13 +21,14 @@ use tracing_subscriber::prelude::*;
 use retp_client::arrays::{ArrayProgress, ArrayValues, array_metadata, budget as array_budget, read_arrays};
 use retp_client::download::{Download, Progress, download_resumable};
 use retp_client::login::{Choice, Login};
-use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen};
-use retp_client::resume::{Retry, RunEvent, Setback};
+use retp_client::native::{self, CertificateCheck, Connect, Endpoint, Reopen, Resuming};
+use retp_client::resume::{Came, Retry, RunEvent, Setback};
 use retp_client::{
-    ClientError, ResourceQuery, ServerProfile, dataspace_uri, delete_dataspaces, described_client,
+    ClientError, ExtraHeaders, ResourceQuery, dataspace_uri, delete_dataspaces, described_client,
     get_data_objects, list_dataspaces, list_resources, list_supported_types, object_file_name,
     plain_text_warning, put_dataspaces, reading_client, writing_client,
 };
+use retp_proto::connection::Resumable;
 use retp_proto::describe::OfferDescription;
 use retp_proto::negotiate::protocol_name;
 use retp_proto::probe::Profile;
@@ -153,10 +154,19 @@ struct Server {
     rest: bool,
     #[command(flatten)]
     login: LoginArgs,
-    /// An OSDU data partition: talks to the server as OSDU's Reservoir DDMS,
-    /// which wants a `data-partition-id` header.
-    #[arg(long)]
+    /// Gone: the data partition is a header (`--header data-partition-id=VALUE`).
+    /// Kept to say so.
+    #[arg(long, hide = true)]
     partition: Option<String>,
+    /// A header the server wants in addition, as `NAME=VALUE`; repeat the
+    /// option for several. It goes with every request to the server: the
+    /// WebSocket handshake, the probe of `/.well-known`, each REST call. With
+    /// a catalogue server it is added to the entry's own headers. A header
+    /// that carries a secret is better kept in a catalogue entry, by
+    /// reference (`retp server add --header-from`), than on a command line,
+    /// which lands in the shell's history.
+    #[arg(long = "header", short = 'H', value_name = "NAME=VALUE")]
+    headers: Vec<String>,
     /// Do not check the server's certificate - for a server whose certificate
     /// is known to be expired, self-signed or misnamed. The session stays
     /// encrypted, to a server nobody vouched for.
@@ -166,10 +176,11 @@ struct Server {
     /// print each acknowledgement as it comes.
     #[arg(long)]
     ack: bool,
-    /// Connect as a front end can: no header at all - ETP's attributes and the
-    /// OSDU partition in the query string, the credentials in an `Authorize`
-    /// once connected (§4.1.4.1, §4.3.2). Says whether a server will take the
-    /// front end.
+    /// Connect as a front end can: no header at all - ETP's attributes, the
+    /// headers of `--header` in the query string, the
+    /// credentials in an `Authorize` once connected (§4.1.4.1, §4.3.2). A
+    /// header that carries a secret is refused: it would be written in the
+    /// URL. Says whether a server will take the front end.
     #[arg(long)]
     as_browser: bool,
     /// Send a Ping when the session has been quiet this many seconds, so that
@@ -191,7 +202,7 @@ struct Server {
     /// 4 by default; `1` sends them one after the other.
     #[arg(long, alias = "parallel", value_name = "N")]
     at_once: Option<usize>,
-    /// A server of the catalogue (`retp server list`) instead of a URL: its URL, partition,
+    /// A server of the catalogue (`retp server list`) instead of a URL: its URL, headers,
     /// login and options come from its entry. `retp NAME COMMAND` and `retp @NAME COMMAND`
     /// mean the same. Read before the arguments are parsed, so this field is never set.
     #[arg(long, short = 's', alias = "serveur", value_name = "NAME")]
@@ -278,13 +289,15 @@ impl LoginArgs {
 }
 
 impl Server {
-    fn profile(&self) -> ServerProfile {
-        match &self.partition {
-            Some(data_partition) => ServerProfile::Rddms {
-                data_partition: data_partition.clone(),
-            },
-            None => ServerProfile::Standard,
+    /// The `--header` options as the library's list, which checks each one.
+    fn headers(&self) -> Result<ExtraHeaders> {
+        if self.partition.is_some() {
+            anyhow::bail!(catalog_cli::PARTITION_IS_A_HEADER);
         }
+        Ok(ExtraHeaders::from_pairs(catalog_cli::pairs(
+            &self.headers,
+            "--header",
+        )?)?)
     }
 
     /// The server, with the credentials obtained and the warnings said.
@@ -299,6 +312,22 @@ impl Server {
         } else {
             CertificateCheck::Verify
         };
+        let mut endpoint = Endpoint {
+            url: self.url.clone(),
+            headers: self.headers()?,
+            credentials: None,
+            certificates,
+            handshake: if self.as_browser {
+                Profile::Browser
+            } else {
+                Profile::Native
+            },
+        };
+        // What the headers refuse is said before anything is asked of the
+        // network: the login costs a request. REST always sends headers.
+        if !self.rest {
+            endpoint.sendable()?;
+        }
         for warning in [plain_text_warning(&self.url), certificates.warning(&self.url)]
             .into_iter()
             .flatten()
@@ -320,17 +349,8 @@ impl Server {
             }
             None => None,
         };
-        Ok(Endpoint {
-            url: self.url.clone(),
-            profile: self.profile(),
-            credentials,
-            certificates,
-            handshake: if self.as_browser {
-                Profile::Browser
-            } else {
-                Profile::Native
-            },
-        })
+        endpoint.credentials = credentials;
+        Ok(endpoint)
     }
 
     fn open(&self) -> Result<Session> {
@@ -342,18 +362,28 @@ impl Server {
     /// by the commands that write, so that a read-only errand announces
     /// nothing it will not do.
     fn open_for(&self, writing: bool) -> Result<Session> {
-        self.open_with(writing, false)
+        self.open_with(writing, false, None)
+    }
+
+    /// [`Server::open_for`], asking back over the new connection the session
+    /// `lost` - OSDU's `ResumeSession` (`native::connect_resuming`): the same
+    /// offer, the login done again, this line's credentials sent.
+    fn open_resuming(&self, writing: bool, lost: Resumable) -> Result<Session> {
+        self.open_with(writing, false, Some(lost))
     }
 
     /// A session driven by a task of its own ([`retp_client::live`]): what
     /// arrives unasked is pushed as it arrives, and nothing has to be read
     /// between two commands - the shell's. Over REST, the REST client.
     fn open_live(&self, writing: bool) -> Result<Session> {
-        self.open_with(writing, true)
+        self.open_with(writing, true, None)
     }
 
-    fn open_with(&self, writing: bool, live: bool) -> Result<Session> {
+    fn open_with(&self, writing: bool, live: bool, lost: Option<Resumable>) -> Result<Session> {
         if self.rest {
+            if lost.is_some() {
+                anyhow::bail!("--resume-session means nothing over REST: there is no session to ask back");
+            }
             return self.open_rest();
         }
         // The offer first: a file that is wrong costs no login.
@@ -391,8 +421,11 @@ impl Server {
             if let Some(at_once) = self.at_once {
                 settings.at_once = at_once;
             }
-            let session = retp_client::live::LiveSession::connect(connect, settings)
-                .with_context(|| format!("opening a session with {}", self.url))?;
+            let session = match lost {
+                None => retp_client::live::LiveSession::connect(connect, settings),
+                Some(lost) => retp_client::live::LiveSession::connect_resuming(connect, lost, settings),
+            }
+            .with_context(|| format!("opening a session with {}", self.url))?;
             session.client().ask_acknowledge(self.ack);
             if let Some(seconds) = self.keepalive {
                 session
@@ -401,8 +434,11 @@ impl Server {
             }
             return Ok(native::Remote::Live(Box::new(session)));
         }
-        let mut client =
-            native::connect(connect).with_context(|| format!("opening a session with {}", self.url))?;
+        let mut client = match lost {
+            None => native::connect(connect),
+            Some(lost) => native::connect_resuming(connect, lost),
+        }
+        .with_context(|| format!("opening a session with {}", self.url))?;
         client.ask_acknowledge(self.ack);
         if let Some(seconds) = self.keepalive {
             client.set_keepalive((seconds > 0).then(|| std::time::Duration::from_secs(seconds)));
@@ -747,7 +783,8 @@ struct DataspaceArgs {
     /// The dataspace: its path (`demo`, `carl/teapot`) or its URI.
     dataspace: String,
     /// A `customData` entry, `key=value`, repeatable - an OSDU store wants
-    /// `owners`, `viewers` and `legaltags`; a value with commas is a list.
+    /// `owners`, `viewers` and `legaltags` (some deployments also
+    /// `otherRelevantDataCountries`); a value with commas is a list.
     #[arg(long = "custom", value_name = "KEY=VALUE")]
     custom: Vec<String>,
 }
@@ -783,6 +820,64 @@ struct PushArgs {
     /// PutDataArrays of several arrays, or to see what one alone provokes.
     #[arg(long)]
     one_by_one: bool,
+    /// Leave out the objects the dataspace holds already: listed there under
+    /// the same URI, each of their arrays there with the same dimensions.
+    /// Their content is not compared. A listing the store cuts short stops
+    /// the push before anything is written.
+    #[arg(long)]
+    skip_present: bool,
+    /// Record each island in this file (JSON Lines) as it commits; run again
+    /// with the same file, the push leaves out what it records. A journal
+    /// written for another package, another selection of it or another
+    /// dataspace is refused.
+    #[arg(long, value_name = "FILE")]
+    journal: Option<PathBuf>,
+    /// When the store refuses an island as a whole, send it again split: in
+    /// two halves, again and again down to one object (`halve`), or one
+    /// object per transaction (`single`). A cycle of objects is never split.
+    /// Without it, the push stops at the refused island.
+    #[arg(long, value_enum, value_name = "HOW")]
+    split: Option<SplitArg>,
+    /// How many times the pieces of one island may be split again.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    split_limit: u32,
+    /// When the connection falls, open a new session (the whole way, login
+    /// included) and go on from the first island not committed, sent again
+    /// whole - at most N times in a row; an island the connection falls on
+    /// twice in a row is halved. 0 stops at the fall. Not in the shell.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    reconnect: u32,
+    /// Seconds before the first new session; the pause doubles after each
+    /// fall in a row, up to 30 seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
+    reconnect_pause: f64,
+    /// With --reconnect: first ask the server to give the lost session back
+    /// (OSDU's ResumeSession, protocol 2400 - an OSDU extension, not ETP
+    /// v1.2), then open a new session if it will not. Off by default. A
+    /// server may not support it: a new session is then opened at once, and
+    /// the report says why. Either way the island cut goes again whole. The
+    /// new connection always sends this line's credentials; nothing on the
+    /// client side tells which rights the server applies to a resumed
+    /// session (OSDU issue #232).
+    #[arg(long)]
+    resume_session: bool,
+    /// Print the plan - the islands in order, their cycles, each object's
+    /// URI in the dataspace, what is left out, what leaves the package -
+    /// and send nothing: no session is opened, the server is not reached,
+    /// a journal is read and not written. The flags that decide the plan
+    /// (--objects, --bytes, --only, --well-known, --json, --journal) count;
+    /// --skip-present needs the server and is refused.
+    #[arg(long)]
+    plan: bool,
+}
+
+/// How `push --split` cuts a refused island.
+#[derive(Clone, Copy, ValueEnum)]
+enum SplitArg {
+    /// In two halves, each halved again if refused.
+    Halve,
+    /// One object (or one cycle) per transaction.
+    Single,
 }
 
 /// What `watch` takes.
@@ -945,6 +1040,12 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
     let yes = args.yes;
     // Before anything runs: a write to a protected server asks first, and what `--save-as`
     // would refuse is refused now, not after a long command.
+    if let EtpCommand::Push { server, args } = &args.command
+        && args.plan
+        && server.save_as.is_some()
+    {
+        anyhow::bail!("--save-as saves a server a command reached, and `push --plan` reaches none");
+    }
     let plan = match server_of(&args.command) {
         Some(server) => {
             if let Some(command) = writing_name(&args.command) {
@@ -1000,7 +1101,18 @@ pub fn run(args: EtpArgs) -> Result<ExitCode> {
                 json: args.json || server.rest,
                 ..args
             };
-            one_shot_writing(&server, |session| push_epc(session, &args))
+            check_resume_session(&args, server.rest)?;
+            if args.plan {
+                Ok(if plan_push(&args)? {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                })
+            } else if args.reconnect > 0 {
+                push_epc_reconnecting(&server, &args)
+            } else {
+                one_shot_writing(&server, |session| push_epc(session, &args))
+            }
         }
         EtpCommand::Shell(server) => shell(server, yes),
         EtpCommand::Catalog { command } => catalog_cli::run_catalog(command),
@@ -1039,6 +1151,8 @@ fn writing_name(command: &EtpCommand) -> Option<&'static str> {
     match command {
         EtpCommand::CreateDataspace { .. } => Some("create-dataspace"),
         EtpCommand::DeleteDataspace { .. } => Some("delete-dataspace"),
+        // `--plan` sends nothing: no confirmation to ask.
+        EtpCommand::Push { args, .. } if args.plan => None,
         EtpCommand::Push { .. } => Some("push"),
         _ => None,
     }
@@ -1116,35 +1230,51 @@ fn delete_dataspace(session: &mut Session, dataspace: &str) -> Result<bool> {
     Ok(complete)
 }
 
-/// An EPC into a dataspace: `energyml_etp_store::push`, with the package
-/// as the source. The exit code says whether everything went.
-fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
-    use energyml_etp_store::push::{
-        Budget, Options, Progress as PushProgress, Stop, WellKnown, WriteFormat, push,
-    };
-    use energyml_storage::storage::EnergymlStorage;
+/// What `push` reads before any session: the package, and the URIs `--only`
+/// names in it.
+struct PushSource {
+    registry: std::sync::Arc<energyml_core::registry::Registry>,
+    store: energyml_storage::EpcStore,
+    only: Option<Vec<String>>,
+}
+
+impl PushSource {
+    fn open(args: &PushArgs) -> Result<Self> {
+        let registry = std::sync::Arc::new(energyml_schemas::all());
+        let store = energyml_storage::EpcStore::open(&args.epc, registry.clone())
+            .with_context(|| format!("opening {}", args.epc.display()))?;
+        // `--only`: URIs or uuids, matched against the package's own URIs by the
+        // library (`push::chosen`).
+        let only: Option<Vec<String>> = if args.only.is_empty() {
+            None
+        } else {
+            Some(
+                retp_client::blocking(energyml_etp_store::push::chosen(&store, &args.only))
+                    .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?,
+            )
+        };
+        Ok(PushSource {
+            registry,
+            store,
+            only,
+        })
+    }
+
+    /// The library's options, from the flags of the same names.
+    fn options<'a>(&'a self, args: &'a PushArgs) -> energyml_etp_store::push::Options<'a> {
+        push_options(args, &self.registry, self.only.as_deref())
+    }
+}
+
+/// The library's options, from the flags of the same names - a conversion,
+/// no decision.
+fn push_options<'a>(
+    args: &'a PushArgs,
+    registry: &'a energyml_core::registry::Registry,
+    only: Option<&'a [String]>,
+) -> energyml_etp_store::push::Options<'a> {
+    use energyml_etp_store::push::{Budget, Options, Split, WellKnown, WriteFormat};
     use retp_client::arrays::Grouping;
-    let registry = std::sync::Arc::new(energyml_schemas::all());
-    let store = energyml_storage::EpcStore::open(&args.epc, registry.clone())
-        .with_context(|| format!("opening {}", args.epc.display()))?;
-    // `--only` by uuid: matched against the package's own URIs.
-    let only: Option<Vec<String>> = if args.only.is_empty() {
-        None
-    } else {
-        let listed = retp_client::blocking(EnergymlStorage::resources(&store))?;
-        let mut chosen = Vec::new();
-        for wanted in &args.only {
-            let lower = wanted.to_ascii_lowercase();
-            match listed
-                .iter()
-                .find(|one| one.uri == *wanted || one.uuid.eq_ignore_ascii_case(&lower))
-            {
-                Some(found) => chosen.push(found.uri.clone()),
-                None => anyhow::bail!("{wanted}: not in {}", args.epc.display()),
-            }
-        }
-        Some(chosen)
-    };
     let mut budget = Budget::default();
     if let Some(objects) = args.objects {
         budget.objects = objects;
@@ -1152,7 +1282,7 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     if let Some(bytes) = args.bytes {
         budget.bytes = bytes;
     }
-    let options = Options {
+    Options {
         budget,
         format: if args.json {
             WriteFormat::Json
@@ -1160,11 +1290,11 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
             WriteFormat::Xml
         },
         well_known: if args.well_known {
-            WellKnown::Push(&registry)
+            WellKnown::Push(registry)
         } else {
             WellKnown::Leave
         },
-        only: only.as_deref(),
+        only,
         grouping: if args.one_by_one {
             Grouping::OneByOne
         } else {
@@ -1175,19 +1305,198 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
         // from the server, is the one that checks.
         expected: None,
         overwrite: false,
-    };
-    let report = retp_client::blocking(push(
+        skip_present: args.skip_present,
+        journal: args.journal.as_deref(),
+        split: match args.split {
+            None => Split::Off,
+            Some(SplitArg::Halve) => Split::Halve,
+            Some(SplitArg::Single) => Split::Single,
+        },
+        split_limit: args.split_limit,
+    }
+}
+
+/// An EPC into a dataspace over one session: `energyml_etp_store::push`,
+/// with the package as the source. The exit code says whether everything
+/// went. `--reconnect` opens sessions of its own, which a shell keeps for
+/// itself: refused here, by name.
+fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
+    check_resume_session(args, session.is_rest())?;
+    if args.plan {
+        return plan_push(args);
+    }
+    if args.reconnect > 0 {
+        anyhow::bail!(
+            "--reconnect opens new sessions, and the shell keeps its own: run `retp push` on its own line, or push again with --journal"
+        );
+    }
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let report = retp_client::blocking(energyml_etp_store::push::push(
         session,
-        &store,
+        &source.store,
         &args.dataspace,
         &options,
-        |event| match event {
-            PushProgress::Planned { islands, objects } => {
-                eprintln!("plan	{islands} island(s), {objects} object(s)")
-            }
-            PushProgress::Sent { island, of } => eprintln!("sent	island {}/{of}", island + 1),
-        },
+        said_push_progress,
     ))?;
+    Ok(said_push_report(&report))
+}
+
+/// `push --plan`: what the push would send, without a session -
+/// `energyml_etp_store::push::dry_run`, printed. Whether nothing is left out,
+/// as a push says it.
+fn plan_push(args: &PushArgs) -> Result<bool> {
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let plan = retp_client::blocking(energyml_etp_store::push::dry_run(
+        &source.store,
+        &args.dataspace,
+        &options,
+    ))
+    .map_err(|why| anyhow::anyhow!("{why} ({})", args.epc.display()))?;
+    Ok(said_plan(&plan))
+}
+
+/// The plan, printed as a push's report prints its islands; whether nothing
+/// is left out.
+fn said_plan(plan: &energyml_etp_store::push::Plan) -> bool {
+    for (rank, island) in plan.islands.iter().enumerate() {
+        let cycles = island.cycles();
+        println!(
+            "island {}	planned	{} object(s), {} array(s), {} bytes, {} cycle(s)",
+            rank + 1,
+            island.uris.len(),
+            island.arrays,
+            island.bytes,
+            cycles.len()
+        );
+        for (uri, there) in island.uris.iter().zip(plan.destinations_of(island)) {
+            println!("\t{uri}\t{there}");
+        }
+        for cycle in cycles {
+            println!("\tcycle\t{}", cycle.join(" "));
+        }
+    }
+    for skipped in &plan.skipped {
+        eprintln!("skipped: {}: the journal says it committed", skipped.uri);
+    }
+    for said in &plan.left_out {
+        eprintln!("left out: {said}");
+    }
+    for (from, to) in &plan.dangling {
+        eprintln!("leaves the package: {from} -> {to}");
+    }
+    let objects: usize = plan.islands.iter().map(|island| island.uris.len()).sum();
+    println!(
+        "plan: {} island(s), {objects} object(s) into {}; nothing was sent",
+        plan.islands.len(),
+        plan.dataspace
+    );
+    plan.left_out.is_empty()
+}
+
+/// `--resume-session` qualifies `--reconnect`: alone, or over REST, it would
+/// mean nothing, and is refused by name.
+fn check_resume_session(args: &PushArgs, rest: bool) -> Result<()> {
+    if !args.resume_session {
+        return Ok(());
+    }
+    if args.reconnect == 0 {
+        anyhow::bail!(
+            "--resume-session asks the server for the lost session when the push reconnects: give --reconnect N too"
+        );
+    }
+    if rest {
+        anyhow::bail!("--resume-session means nothing over REST: there is no session to ask back");
+    }
+    Ok(())
+}
+
+/// What opens the sessions of a push that reconnects: the library's
+/// `native::Resuming`, which asks the server for the lost session first when
+/// `--resume-session` says so - a conversion, no decision.
+fn push_connector<'a>(
+    server: &'a Server,
+    args: &PushArgs,
+) -> Resuming<impl FnMut() -> Result<Session> + 'a, impl FnMut(Resumable) -> Result<Session> + 'a> {
+    Resuming {
+        open: || server.open_for(true),
+        resume: |lost| server.open_resuming(true, lost),
+        ask: args.resume_session,
+    }
+}
+
+/// `push` on its own line with `--reconnect`: `push_resumable` opens a new
+/// session when the connection falls, the whole way, with the login of the
+/// command line - a token obtained again when the line names how - or, with
+/// `--resume-session`, first asks the server for the lost session.
+fn push_epc_reconnecting(server: &Server, args: &PushArgs) -> Result<ExitCode> {
+    use energyml_etp_store::push::{push_resumable, reconnecting};
+    let pause = std::time::Duration::try_from_secs_f64(args.reconnect_pause)
+        .map_err(|why| anyhow::anyhow!("--reconnect-pause {} is not a pause: {why}", args.reconnect_pause))?;
+    let source = PushSource::open(args)?;
+    let options = source.options(args);
+    let mut connector = push_connector(server, args);
+    let mut session = None;
+    let report = push_resumable(
+        &mut connector,
+        &mut session,
+        &source.store,
+        &args.dataspace,
+        &options,
+        &reconnecting(args.reconnect, pause),
+        |event| match event {
+            RunEvent::Progress(progress) => said_push_progress(progress),
+            RunEvent::Setback(Setback::Reconnecting {
+                step,
+                attempt,
+                max,
+                pause,
+                why,
+            }) => eprintln!(
+                "{step}: {why} - a new session in {} s (failure {attempt} of {max})",
+                pause.as_secs_f64()
+            ),
+            RunEvent::Setback(Setback::Halved { step }) => {
+                eprintln!("the connection keeps falling on one island: halved, now {step}")
+            }
+            RunEvent::Setback(Setback::Reopened { resumed, refused, .. }) => {
+                if let Some(why) = refused {
+                    eprintln!("the server would not take the session back ({why})");
+                }
+                if resumed {
+                    eprintln!("the server took the lost session back; the island goes again, whole")
+                } else {
+                    eprintln!("a new session, from the probe; the island goes again, whole")
+                }
+            }
+        },
+    );
+    if let Some(mut open) = session {
+        said_acknowledgements(&mut open);
+        let _ = open.close("done");
+    }
+    Ok(if said_push_report(&report?) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn said_push_progress(event: energyml_etp_store::push::Progress) {
+    use energyml_etp_store::push::Progress as PushProgress;
+    match event {
+        PushProgress::Planned { islands, objects } => {
+            eprintln!("plan	{islands} island(s), {objects} object(s)")
+        }
+        PushProgress::Sent { island, of } => eprintln!("sent	island {}/{of}", island + 1),
+        PushProgress::Split { island, into } => eprintln!("split	island {} into {into}", island + 1),
+    }
+}
+
+/// The report of a push, printed; whether everything went.
+fn said_push_report(report: &energyml_etp_store::push::Report) -> bool {
+    use energyml_etp_store::push::{SkipReason, Stop};
     for (rank, island) in report.islands.iter().enumerate() {
         let state = if rank < report.sent {
             "committed"
@@ -1212,6 +1521,41 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
             println!("	{uri}");
         }
     }
+    for skipped in &report.skipped {
+        let why = match skipped.why {
+            SkipReason::Present => "the dataspace holds it already",
+            SkipReason::Journal => "the journal says it committed",
+        };
+        eprintln!("skipped: {}: {why}", skipped.uri);
+    }
+    for split in &report.splits {
+        eprintln!(
+            "split: island {} ({} object(s)) into {}: {}",
+            split.island + 1,
+            split.uris.len(),
+            split.into,
+            split.why
+        );
+    }
+    if report.reconnections > 0 {
+        eprintln!(
+            "{} new session(s) after the connection fell",
+            report.reconnections
+        );
+    }
+    for (rank, came) in report.reopened.iter().enumerate() {
+        match came {
+            Came::Resumed => eprintln!(
+                "reconnection {}: resumed, the server gave the lost session back",
+                rank + 1
+            ),
+            Came::Fresh { refused: Some(why) } => eprintln!(
+                "reconnection {}: a new session, the lost one was not given back: {why}",
+                rank + 1
+            ),
+            Came::Fresh { refused: None } => eprintln!("reconnection {}: a new session", rank + 1),
+        }
+    }
     if report.without_transactions {
         eprintln!(
             "warning: the session agreed no Transaction (18): each island went as plain puts, and a refused island may be partly there"
@@ -1225,15 +1569,87 @@ fn push_epc(session: &mut Session, args: &PushArgs) -> Result<bool> {
     }
     if let Some(stopped) = &report.stopped {
         match &stopped.why {
-            Stop::Refused(why) => eprintln!("stopped at island {}: refused: {why}", stopped.island + 1),
+            Stop::Refused(why) => match stopped.said.as_ref().and_then(|said| said.code) {
+                Some(code) => eprintln!(
+                    "stopped at island {}: refused (ETP error {code}): {why}",
+                    stopped.island + 1
+                ),
+                None => eprintln!("stopped at island {}: refused: {why}", stopped.island + 1),
+            },
             Stop::Failed(why) => eprintln!(
                 "stopped at island {}: {why} (the island's outcome is unknown)",
                 stopped.island + 1
             ),
+            Stop::GaveUp { attempts, last } => eprintln!(
+                "stopped at island {}: the connection fell {attempts} time(s) in a row, and the push gave up: {last} (the island's outcome is unknown)",
+                stopped.island + 1
+            ),
+            Stop::Journal(why) => eprintln!("stopped at island {}: the journal: {why}", stopped.island + 1),
         }
     }
-    println!("{} of {} island(s) committed", report.sent, report.islands.len());
-    Ok(report.stopped.is_none() && report.left_out.is_empty())
+    // What the store's words name, when a known server is documented to use
+    // them (`push::Cause`), and the references that may be missing.
+    if let Some(diagnosis) = report.diagnosis()
+        && let Some(cause) = &diagnosis.cause
+        && *cause != energyml_etp_store::push::Cause::Unknown
+    {
+        eprintln!("cause: {}", said_cause(cause));
+        if let energyml_etp_store::push::Cause::MissingReference { named, more, .. } = cause {
+            for one in named {
+                eprintln!(
+                    "missing (named by the server): {}({}) -> {}({}) using {}",
+                    one.from_type, one.from_uuid, one.to_type, one.to_uuid, one.xpath
+                );
+            }
+            if *more > 0 {
+                eprintln!("missing (named by the server): ... and {more} more it did not name");
+            }
+        }
+        for (from, to) in &diagnosis.candidates {
+            eprintln!("may be missing (deduced here, the server names none): {from} -> {to}");
+        }
+    }
+    for refused in &report.refusals {
+        let what = match &refused.array {
+            Some(path) => format!("{} {path}", refused.uri),
+            None => refused.uri.clone(),
+        };
+        match refused.code {
+            Some(code) => eprintln!("refused: {what}: {} ({code})", refused.message),
+            None => eprintln!("refused: {what}: {}", refused.message),
+        }
+    }
+    if report.skipped.is_empty() {
+        println!("{} of {} island(s) committed", report.sent, report.islands.len());
+    } else {
+        println!(
+            "{} of {} island(s) committed, {} object(s) there already",
+            report.sent,
+            report.islands.len(),
+            report.skipped.len()
+        );
+    }
+    report.stopped.is_none() && report.left_out.is_empty()
+}
+
+/// A cause in words, its name first.
+fn said_cause(cause: &energyml_etp_store::push::Cause) -> String {
+    use energyml_etp_store::push::Cause;
+    match cause {
+        Cause::MissingReference {
+            count, space: None, ..
+        } => format!("{} ({count})", cause.name()),
+        Cause::MissingReference {
+            count,
+            space: Some(space),
+            ..
+        } => format!("{} ({count}, in space {space})", cause.name()),
+        Cause::OrphanReference { count } | Cause::MissingArray { count } | Cause::OrphanArray { count } => {
+            format!("{} ({count})", cause.name())
+        }
+        Cause::MissingArrayContainer { containers } => format!("{} ({containers})", cause.name()),
+        Cause::Unknown => cause.name().to_string(),
+    }
 }
 
 /// Open a session, do one thing, close it: the exit code says whether the
@@ -2441,7 +2857,7 @@ fn uuid(bytes: &[u8; 16]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EtpCommand, Line, split_line};
+    use super::{EtpCommand, Line, Server, split_line};
     use clap::{CommandFactory, Parser};
 
     /// Every command builds: no two arguments of one command share a name
@@ -2456,6 +2872,114 @@ mod tests {
         }
         Etp::command().debug_assert();
         Line::command().debug_assert();
+    }
+
+    /// `push --plan` writes nothing, so a protected server asks no
+    /// confirmation for it; a push without it does. Off unless given.
+    #[test]
+    fn a_push_plan_writes_nothing() {
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let command_of = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            Etp::try_parse_from(words).unwrap().command
+        };
+        let plain = command_of(&[]);
+        assert!(matches!(&plain, EtpCommand::Push { args, .. } if !args.plan));
+        assert_eq!(super::writing_name(&plain), Some("push"));
+        let planned = command_of(&["--plan"]);
+        assert!(matches!(&planned, EtpCommand::Push { args, .. } if args.plan));
+        assert_eq!(super::writing_name(&planned), None);
+    }
+
+    /// `push`'s flags reach the library's options under the same meaning,
+    /// and none given is the library's default: a push as it always went.
+    #[test]
+    fn the_push_flags_are_the_librarys_options() {
+        use energyml_etp_store::push::{Options, Split};
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let args_of = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            match Etp::try_parse_from(words).unwrap().command {
+                EtpCommand::Push { args, .. } => args,
+                _ => unreachable!("a push was parsed"),
+            }
+        };
+        let registry = energyml_schemas::all();
+
+        let plain = args_of(&[]);
+        let options = super::push_options(&plain, &registry, None);
+        let default = Options::default();
+        assert!(!options.skip_present && options.journal.is_none());
+        assert_eq!(options.split, default.split);
+        assert_eq!(options.split_limit, default.split_limit);
+        assert_eq!(plain.reconnect, 0, "no reconnection unless asked");
+
+        for (word, split) in [("halve", Split::Halve), ("single", Split::Single)] {
+            let asked = args_of(&[
+                "--skip-present",
+                "--journal",
+                "push.jsonl",
+                "--split",
+                word,
+                "--split-limit",
+                "3",
+                "--reconnect",
+                "2",
+                "--reconnect-pause",
+                "0.5",
+            ]);
+            let options = super::push_options(&asked, &registry, None);
+            assert!(options.skip_present);
+            assert_eq!(options.journal, Some(std::path::Path::new("push.jsonl")));
+            assert_eq!(options.split, split, "--split {word}");
+            assert_eq!(options.split_limit, 3);
+            assert_eq!((asked.reconnect, asked.reconnect_pause), (2, 0.5));
+        }
+    }
+
+    /// `--resume-session` is the library's `Resuming::ask`, off unless
+    /// given; alone, without `--reconnect`, or over REST, it is refused by
+    /// name rather than ignored.
+    #[test]
+    fn resume_session_is_the_connectors_ask_and_needs_reconnect() {
+        #[derive(Parser)]
+        struct Etp {
+            #[command(subcommand)]
+            command: EtpCommand,
+        }
+        let parsed = |line: &[&str]| {
+            let mut words = vec!["retp", "push", "wss://etp.example.com/etp", "model.epc", "demo"];
+            words.extend_from_slice(line);
+            match Etp::try_parse_from(words).unwrap().command {
+                EtpCommand::Push { server, args } => (server, args),
+                _ => unreachable!("a push was parsed"),
+            }
+        };
+
+        let (server, plain) = parsed(&["--reconnect", "2"]);
+        assert!(!plain.resume_session, "off unless asked");
+        assert!(!super::push_connector(&server, &plain).ask);
+        assert!(super::check_resume_session(&plain, false).is_ok());
+
+        let (server, asked) = parsed(&["--reconnect", "2", "--resume-session"]);
+        assert!(super::push_connector(&server, &asked).ask);
+        assert!(super::check_resume_session(&asked, false).is_ok());
+        let over_rest = super::check_resume_session(&asked, true).unwrap_err();
+        assert!(over_rest.to_string().contains("REST"), "{over_rest}");
+
+        let (_, alone) = parsed(&["--resume-session"]);
+        let refused = super::check_resume_session(&alone, false).unwrap_err();
+        assert!(refused.to_string().contains("--reconnect"), "{refused}");
     }
 
     /// ETP's URIs carry single quotes: they stay, unquoted; double quotes
@@ -2478,5 +3002,74 @@ mod tests {
         assert_eq!(split_line("  ").unwrap(), Vec::<String>::new());
         assert_eq!(split_line(r#"get """#).unwrap(), ["get", ""]);
         assert!(split_line(r#"get "eml:///"#).is_err());
+    }
+
+    /// What the headers refuse is said before the login, which costs a
+    /// request: the token URL here is one nobody answers, and an attempt on
+    /// it would be the error.
+    #[test]
+    fn a_header_the_server_cannot_be_sent_is_refused_before_the_login() {
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            server: Server,
+        }
+        const SECRET: &str = "s3cret-of-the-client";
+        const KEY: &str = "k3y-of-the-header";
+        let key = format!("x-api-key={KEY}");
+        let cases: [(&[&str], &str); 5] = [
+            // The partition is a header: given twice.
+            (
+                &[
+                    "--header",
+                    "data-partition-id=opendes",
+                    "--header",
+                    "data-partition-id=other",
+                ],
+                "data-partition-id",
+            ),
+            (
+                &[
+                    "--rest",
+                    "-H",
+                    "data-partition-id=opendes",
+                    "-H",
+                    "data-partition-id=other",
+                ],
+                "data-partition-id",
+            ),
+            // The option of before is gone, and says what to write.
+            (&["--partition", "opendes"], "--header data-partition-id=VALUE"),
+            (
+                &["--rest", "--partition", "opendes"],
+                "--header data-partition-id=VALUE",
+            ),
+            // A front end has no header: a secret would be written in the URL.
+            (&["--as-browser", "--header", &key], "x-api-key"),
+        ];
+        for (extra, named) in cases {
+            let mut words = vec![
+                "retp",
+                "wss://etp.example.org/",
+                "--token-url",
+                "http://127.0.0.1:9/token",
+                "--client-id",
+                "app",
+                "--client-secret",
+                SECRET,
+            ];
+            words.extend_from_slice(extra);
+            let server = Cli::try_parse_from(words).expect("the options parse").server;
+            let why = match server.endpoint() {
+                Ok(_) => panic!("{extra:?} must be refused"),
+                Err(why) => format!("{why:#}"),
+            };
+            assert!(why.contains(named), "{extra:?}: {why}");
+            assert!(!why.contains("logging in"), "the login was tried first: {why}");
+            assert!(
+                !why.contains(SECRET) && !why.contains(KEY),
+                "a value is shown: {why}"
+            );
+        }
     }
 }

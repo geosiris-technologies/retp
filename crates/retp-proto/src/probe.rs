@@ -97,7 +97,11 @@ pub struct HandshakeSettings {
 }
 
 /// The WebSocket request to make.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` shows the names of the headers, and the value of ETP's own
+/// attributes only: `authorization`, or a header a server wants in addition,
+/// may carry a secret.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Handshake {
     /// The URL to open, query string included.
     pub url: String,
@@ -110,6 +114,28 @@ pub struct Handshake {
     pub authorize_after_connecting: Option<Credentials>,
     /// Who makes it - which decides where an attribute can go.
     pub profile: Profile,
+}
+
+impl fmt::Debug for Handshake {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<String> = self
+            .headers
+            .iter()
+            .map(|(name, value)| match name.as_str() {
+                "etp-encoding" | "maxwebsocketmessagepayloadsize" | "maxwebsocketframepayloadsize" => {
+                    format!("{name}: {value}")
+                }
+                _ => format!("{name}: [not shown]"),
+            })
+            .collect();
+        f.debug_struct("Handshake")
+            .field("url", &self.url)
+            .field("subprotocols", &self.subprotocols)
+            .field("headers", &headers)
+            .field("authorize_after_connecting", &self.authorize_after_connecting)
+            .field("profile", &self.profile)
+            .finish()
+    }
 }
 
 impl Handshake {

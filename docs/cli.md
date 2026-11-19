@@ -24,7 +24,7 @@ is not compiled for wasm.
 | `download <url> <dataspace>` | a whole dataspace into a directory; reconnects by itself | progress, then written, already there, failed |
 | `download-epc <url> <dataspace>` | a dataspace as an EPC, arrays in HDF5 files beside it; `--out`, `--only`, `--with-references`, `--no-arrays` | the package, and what was `left out:` |
 | `create-dataspace`, `delete-dataspace` | create a dataspace; delete one **and everything in it** | the dataspace |
-| `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions | every island; the exit code says whether all went |
+| `push <url> <file.epc> <dataspace>` | send an EPC, objects and arrays, in islands of short transactions; `--plan` prints the islands and sends nothing | every island; the exit code says whether all went |
 | `shell <url>` | **one** session, then commands one per line | what each command prints |
 | `mcp <url>` | an MCP server over stdio, on one dataspace (feature `mcp`); see [MCP server](mcp.md) | nothing on stdout but the MCP protocol; logs on stderr |
 | `server add\|list\|show\|remove\|test\|default` | the [server catalogue](#server-catalogue): servers by name, secrets by reference | one line per server; a verdict per step |
@@ -51,7 +51,7 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 
 | Option | Effect |
 |---|---|
-| `--partition <P>` | an OSDU data partition: the server is spoken to as OSDU's Reservoir DDMS, which wants a `data-partition-id` header |
+| `--header <NAME=VALUE>`, `-H` | a header this server wants in addition, repeatable; see [Headers a server wants](#headers-a-server-wants) |
 | `--insecure` | do not check the server's certificate. A warning says so every time |
 | `--rest` | the URL is OSDU's Reservoir DDMS REST API, not an ETP WebSocket; the same commands run over it |
 | `--as-browser` | connect as a web page can: no header, attributes in the query string, credentials in an `Authorize` message |
@@ -63,6 +63,43 @@ Every command takes the server's WebSocket URL, `wss://host[:port]/path`.
 | `--server <NAME>`, `-s` | a server of the [catalogue](#server-catalogue) instead of the URL (`--serveur` is a hidden alias) |
 | `--save-as <NAME>` | after the command has succeeded, save this connection in the catalogue; add `--force` to replace one |
 | `--yes` | confirm, without asking, a write to a protected catalogue server |
+
+## Headers a server wants
+
+Which headers a server expects is a property of the server, like its URL: a tenant, a
+routing key, a data partition, an API key. `--header NAME=VALUE` gives one, and is
+repeated for several:
+
+```sh
+retp dataspaces wss://host/etp --header x-tenant=acme -H x-region=eu
+```
+
+The value is everything after the first `=`, sent as given. Each header goes with **every
+request** to the server: the WebSocket handshake, the probe of
+`/.well-known/etp-server-capabilities`, each call of the REST API (`--rest`).
+
+What is refused, by name, before anything is asked of the network (no login is spent
+on a line that cannot be sent):
+
+- a name that is not letters, digits, `-` and `_` (the text is not repeated: written as
+  `Name: value`, it would hold the value), and a value with a control character (a line
+  break in it would start another header) or a character that is not ASCII;
+- a header the client writes itself: `authorization` (give credentials, see
+  [Logging in](#logging-in)), `etp-encoding`, `maxwebsocketframepayloadsize`,
+  `maxwebsocketmessagepayloadsize`, `host`, `connection`, `upgrade`, `accept`,
+  `content-type`, `content-length`, `transfer-encoding` and every `sec-websocket-*`;
+- the same header twice, whatever the case of its letters;
+- with `--as-browser`, a header that carries a secret: the handshake of a front end has
+  no header, so its attributes are written in the query string (ETP 1.2 section 4.3.2),
+  and a secret is never written in a URL. A header carries a secret when a catalogue
+  entry gives it by reference, or when its name says so (`cookie`, anything with
+  `authorization`, `key`, `token`, `secret` or `password`). The probe of `/.well-known`
+  is an ordinary HTTP request and keeps its headers.
+
+A header that carries a secret is better kept in a [catalogue](#server-catalogue) entry,
+by reference, than on a command line, which ends up in the shell's history. `retp mcp`,
+whose command line is written in a configuration file, refuses one
+([MCP server](mcp.md#secrets-never-go-on-the-command-line)).
 
 ## Logging in
 
@@ -106,7 +143,7 @@ retp server add                           # a guided form, on a terminal
 retp server add azure-test wss://adme.example.com/api/reservoir-ddms-etp/v2/ \
     --auth azure --tenant 00000000-0000-0000-0000-000000000000 --client-id APP_ID \
     --scope 'api://APP_ID/.default' --client-secret-from env:RETP_AZURE_TEST_SECRET \
-    --partition opendes --alias az
+    --header data-partition-id=opendes --alias az
 
 retp server test azure-test               # definition, references, /.well-known, login, session
 retp azure                                # a shell on it
@@ -139,7 +176,6 @@ alias = ["az"]
 etp_url = "wss://adme.example.com/api/reservoir-ddms-etp/v2/"
 rest_url = "https://adme.example.com/api/reservoir-ddms/v2"
 transport = "etp"          # which one a command uses unless told otherwise
-partition = "opendes"
 tls = "verify"             # or "skip" (--insecure), said again at every connection
 handshake = "native"       # or "browser" (--as-browser)
 protected = false          # true: a command that writes asks for confirmation
@@ -152,6 +188,7 @@ scope = "api://11111111-1111-1111-1111-111111111111/.default"
 client_secret = { env = "RETP_AZURE_TEST_SECRET" }
 
 [headers]                  # extra request headers (see below)
+data-partition-id = "opendes"   # the data partition of OSDU's Reservoir DDMS
 x-trace = "on"
 x-api-key = { env = "RETP_AZURE_TEST_KEY" }
 
@@ -159,6 +196,7 @@ x-api-key = { env = "RETP_AZURE_TEST_KEY" }
 legal_tags = ["opendes-public-usa-dataset-1"]
 owners = ["data.default.owners@opendes.example.com"]
 viewers = ["data.default.viewers@opendes.example.com"]
+other_relevant_data_countries = ["US"]   # some OSDU deployments require it
 ```
 
 The methods are the ones of [Logging in](#logging-in); the catalogue fills the same
@@ -167,13 +205,18 @@ ignored**, so that the `ETP_TOKEN` set for one server never goes to another; an 
 wants one says so (`token = { env = "ETP_TOKEN" }`). The login options (`--password`...)
 are refused with a catalogue server, and so is a URL.
 
-**Extra headers** are written as a literal for a header that carries nothing secret, or as a
-reference; a literal is refused for a name that looks secret (`authorization`, `cookie`,
-anything with `key`, `token`, `secret` or `password`). `retp-client` has no way to send
-extra headers yet, so a connection to an entry that defines some is refused by name
-instead of being made without them. **Write defaults** (`legal_tags`, `owners`,
-`viewers`) become `--custom legaltags=...`, `owners=...`, `viewers=...` on
-`create-dataspace`, unless the line gives its own.
+**Extra headers** are the [headers the server wants](#headers-a-server-wants), sent with
+every request to it. One is written as a literal when it carries nothing secret, or as a
+reference; a literal is refused for a name that looks secret (`cookie`, anything with
+`authorization`, `key`, `token`, `secret` or `password`). They are checked when the file
+is read, by the rules of `--header`: a header the client could not send is refused there,
+by name, and so is `data-partition-id` beside `partition` (keep one of the two). A
+`--header` on the line is added to the entry's; one the entry already has is refused, not
+replaced. The file keeps no order between its headers. **Write defaults** (`legal_tags`, `owners`,
+`viewers`, `other_relevant_data_countries`) become `--custom legaltags=...`, `owners=...`,
+`viewers=...`, `otherRelevantDataCountries=...` on `create-dataspace`, unless the line
+gives its own. `retp server add` takes them as `--legal-tag`, `--owner`, `--viewer` and
+`--other-relevant-data-country`, each repeatable.
 
 **Naming.** A name is lowercase letters, digits, `.`, `_` and `-` (it becomes a folder
 name). Aliases share the namespace. A built-in command always wins: a server cannot be
@@ -192,13 +235,17 @@ for its name typed at a terminal, or `--yes`; otherwise it is refused. In a shel
 saves the connection after the command succeeded. A secret that came from an `ETP_*`
 variable is saved as a reference to that variable (shared with every other server: the
 output says so); one that came from the command line is **not saved**, and the entry
-points at a variable named after it, with the advice to define it. A name already taken is
-refused before the command runs, unless `--force`.
+points at a variable named after it, with the advice to define it. A `--header` follows
+the same rule: its value is saved when its name does not say it is a secret, and one whose
+name does is saved as a reference to a variable of its own
+(`RETP_<SERVER>_HEADER_<NAME>`). A name already taken is refused before the command runs,
+unless `--force`.
 
 **The guided form.** `retp server add` with no argument, on a terminal, asks for the
 method, the URLs, the method's fields (a secret as a reference, never a value), extra
-headers, the partition, the write defaults, `protected`, then probes `/.well-known`
-before saving. With arguments the same fields come from the options, and a script is
+headers, the OSDU data partition (kept as the header `data-partition-id`), the write
+defaults, `protected`, then probes `/.well-known` before saving (the URL alone:
+`retp server test` then asks again with the headers of the entry). With arguments the same fields come from the options, and a script is
 never asked: when the input is not a terminal and a field is missing, the command refuses
 and names it.
 
@@ -220,15 +267,113 @@ retp delete-dataspace wss://etp.example.com/etp demo
 
 An OSDU store asks for `owners`, `viewers` and `legaltags` in the dataspace's
 custom data: `--custom owners=OWNERS --custom viewers=VIEWERS --custom
-legaltags=LEGALTAG`.
+legaltags=LEGALTAG`. Some OSDU deployments also require
+`otherRelevantDataCountries` (a list of country codes): `--custom
+otherRelevantDataCountries=US,UK`.
 
 `push` sends targets before what references them, an object with its arrays in
-one transaction, and stops at a refused island. Arrays travel as many whole
-arrays per `PutDataArrays` as the negotiated message size takes; big ones are
-declared in one message and filled block by block. `--one-by-one` sends each
+one transaction, and stops at a refused island. The islands are numbered from
+1 in what `push` prints (the Python report counts its indexes from 0). Arrays
+travel as many whole arrays per `PutDataArrays` as the negotiated message size
+takes; big ones are declared in one message and filled block by block.
+`--one-by-one` sends each
 array in its own message, for a store that mishandles several in one.
 `--well-known` also sends the official dictionary's property kinds the package
 references without holding.
+
+`--plan` prints what the push would send and sends nothing: no session is
+opened and the server is not reached. Each island in order, with its objects,
+arrays, bytes and cycles (objects that reference each other, always sent
+together), each object's URI in the package and in the dataspace, then what the
+journal leaves out, what is left out and what leaves the package. The flags
+that decide the plan count (`--objects`, `--bytes`, `--only`, `--well-known`,
+`--json` or `--rest`, `--journal`, read and never written); `--skip-present`
+needs the server and is refused. The exit code fails when something would be
+left out, as a push's does.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --plan --objects 50
+```
+
+When a push stops on a refusal whose words open-etp-server (the OSDU Reservoir
+DDMS server) is documented to use (`{N} Missing reference(s)`, `{N} Orphan
+reference(s)`, `{N} Missing array(s)`, `{N} Orphan array(s)`, `Missing array
+container(s): ...`), a `cause:` line names it. A server that names the missing
+references (open-etp-server from M27: `{N} Missing reference(s): from
+<type>(<uuid>) to <type>(<uuid>) using <xpath>; ...`, 25 at most, then `(+k
+more)`) gets one `missing (named by the server):` line each. For the count-only
+form, `may be missing:` lines list the references leaving the island that
+stopped: the client's deduction from what leaves the package, which the server
+does not state, and which is wrong when a RESQML 2.0.1 reference names an object
+of the package under `obj_` and the server stores it without. Other words get no
+cause line.
+
+The stop line carries the ETP error code when the store gave one: a transaction
+the store would not open because it answered with an exception reads `stopped
+at island 2: refused (ETP error 8): the transaction would not open: ...`. When
+its commit is refused, the push rolls its own transaction back before it stops
+or splits the island, since some servers (open-etp-server) keep it open and
+would refuse the next one; the library itself never rolls back on a failed
+commit.
+
+A push that stopped can start again, each with its own flag, all off by default:
+
+- `--journal FILE` records each island in `FILE` (JSON Lines) as it commits;
+  the same command run again leaves out what the file records. A journal
+  written for another package, another `--only` selection or another dataspace
+  is refused by name;
+- `--skip-present` leaves out what the dataspace holds already: an object
+  listed there under its URI, each of its arrays there with the same
+  dimensions. The content is not compared;
+- `--split halve` sends an island the store refuses as a whole again in two
+  halves, down to one object if need be; `--split single` sends it one object
+  per transaction. A cycle of objects is never split; `--split-limit` bounds how
+  far (8 by default). The last refusal is printed as before;
+- `--reconnect N` opens a new session when the connection falls, with the
+  same login, and goes on from the first island not committed, sent again
+  whole; after `N` new sessions in a row that fall too, the push stops. The
+  pause before the first is `--reconnect-pause` seconds (1 by default), and it
+  doubles up to thirty seconds. An island the connection falls on twice in a
+  row is halved. Not in the shell, which keeps its own session: there, push
+  again with `--journal`;
+- `--resume-session`, with `--reconnect`, first asks the server to give the
+  lost session back, then opens a new session if it will not. See below.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --journal model.push.jsonl --split halve --reconnect 3
+```
+
+### Asking the server for the lost session (`--resume-session`)
+
+`--resume-session` is an **OSDU extension**, not ETP v1.2: OSDU's
+`ResumeSession` (protocol 2400, CoreOSDU), by which a client asks a server to
+give back the session whose connection fell, by its `sessionId`. It is **off by
+default**, means something only with `--reconnect`, and is refused by name
+without it and over `--rest`.
+
+On each reconnection the new connection is opened the whole way (probe, login,
+handshake) and its first message is `ResumeSession`. A server that gives the
+session back goes on with it; one that refuses (OSDU answers `ENOT_FOUND`,
+*Session not found or expired*) or does not speak protocol 2400 is asked a new
+session at once, on the same connection. Servers may well not support it: then
+the push goes on exactly as with `--reconnect` alone. Either way the
+interrupted island is sent again whole, since a resumed session restores what
+the session negotiated, not the requests that were in flight. The report says
+how each reconnection came back:
+
+```text
+reconnection 1: resumed, the server gave the lost session back
+reconnection 2: a new session, the lost one was not given back: ENOT_FOUND: Session not found or expired (11)
+```
+
+A caution: with OSDU's resume, nothing on the client side tells which rights
+the server applies to a resumed session (OSDU issue #232). `retp` always sends
+its own credentials on the new connection and relies on nothing of the lost
+session's authorization.
+
+```sh
+retp push wss://etp.example.com/etp model.epc demo --journal model.push.jsonl --reconnect 3 --resume-session
+```
 
 ## The client is tolerant of a server's mistakes
 
@@ -290,7 +435,7 @@ shell command is a read, and a read can be asked twice).
 `--rest` takes the REST API instead of the WebSocket, with the same commands:
 
 ```sh
-retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --partition PARTITION
+retp dataspaces https://etp.example.com/api/reservoir-ddms/v2 --rest --header data-partition-id=PARTITION
 ```
 
 The URL is the API's, never guessed from the WebSocket's. What REST has no

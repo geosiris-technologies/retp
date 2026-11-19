@@ -13,11 +13,12 @@
 use std::future::Future;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::Event;
+use retp_proto::connection::{Event, Resumable};
 use retp_proto::negotiate::Negotiated;
 use retp_proto::wire::{Delivery, Tolerance};
 
 use super::LiveSession;
+use crate::resume::Came;
 use crate::{Blocking, Caller, ClientError};
 
 impl Caller for LiveSession {
@@ -67,6 +68,14 @@ impl Caller for LiveSession {
 
     fn watermark(&self) -> Option<i64> {
         self.client().watermark()
+    }
+
+    fn resumable(&self) -> Option<Resumable> {
+        self.client().resumable()
+    }
+
+    fn came(&self) -> Came {
+        self.client().came()
     }
 
     fn negotiated(&self) -> Negotiated {

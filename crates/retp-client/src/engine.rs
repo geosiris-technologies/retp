@@ -20,13 +20,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use retp_avro::EtpMessage;
-use retp_proto::connection::{Connection, Event, Handler, State, Step};
+use retp_proto::connection::{Connection, Event, Handler, Resumable, State, Step};
 use retp_proto::credentials::Credentials;
 use retp_proto::negotiate::{Negotiated, Offer};
-use retp_proto::wire::{Delivery, Options, Place, Tolerance};
+use retp_proto::wire::{Delivery, Incident, Options, Place, Tolerance};
 
 use crate::TransportError;
 use crate::client::{Acknowledged, ClientError};
+use crate::resume::Came;
 
 /// A message to put on the transport, and the request it is, if one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +64,9 @@ pub struct Engine {
     ask_acknowledge: bool,
     awaiting_ack: BTreeMap<i64, (&'static str, i64)>,
     acknowledged: Vec<Acknowledged>,
+    /// The server's refusal of the `ResumeSession` this session was opened
+    /// after ([`Engine::came`]).
+    resume_refused: Option<Incident>,
 }
 
 impl Engine {
@@ -76,6 +80,26 @@ impl Engine {
         now: i64,
     ) -> Result<Self, ClientError> {
         let connection = Connection::client(offer, handlers, credentials, now).map_err(ClientError::Offer)?;
+        Ok(Self::begin(connection, now))
+    }
+
+    /// A client's session that first asks back the session `lost` (OSDU's
+    /// `ResumeSession`, ADR-0003), and opens a new one if the server will not
+    /// give it back - which [`Engine::resumed`] then says. `offer` and
+    /// `handlers` are those the lost session was opened with.
+    pub fn resume(
+        offer: Offer,
+        handlers: Vec<Box<dyn Handler>>,
+        credentials: Option<Credentials>,
+        lost: Resumable,
+        now: i64,
+    ) -> Result<Self, ClientError> {
+        let connection = Connection::client_resuming(offer, handlers, credentials, lost, now)
+            .map_err(ClientError::Offer)?;
+        Ok(Self::begin(connection, now))
+    }
+
+    fn begin(connection: Connection, now: i64) -> Self {
         let mut engine = Self {
             connection,
             outbox: Vec::new(),
@@ -88,10 +112,35 @@ impl Engine {
             ask_acknowledge: false,
             awaiting_ack: BTreeMap::new(),
             acknowledged: Vec::new(),
+            resume_refused: None,
         };
         let start = engine.connection.start(now);
         engine.take_step(start, now);
-        Ok(engine)
+        engine
+    }
+
+    /// What to ask this session back with once its connection is lost
+    /// ([`Engine::resume`]): `None` until the session is open.
+    pub fn resumable(&self) -> Option<Resumable> {
+        self.connection.resumable()
+    }
+
+    /// Whether the session was given back by `ResumeSession`, not opened anew.
+    pub fn resumed(&self) -> bool {
+        self.connection.resumed()
+    }
+
+    /// How the session came: given back by `ResumeSession`, or opened anew -
+    /// with the server's words, when it was opened anew because it refused
+    /// to give the lost one back ([`Engine::resume`]).
+    pub fn came(&self) -> Came {
+        if self.resumed() {
+            Came::Resumed
+        } else {
+            Came::Fresh {
+                refused: self.resume_refused.as_ref().map(ToString::to_string),
+            }
+        }
     }
 
     /// How the opening went: `None` while it goes on. Asked again, the same
@@ -248,6 +297,43 @@ impl Engine {
                 request: Some(id),
             });
         }
+        Ok(id)
+    }
+
+    /// Renew the authorization of the open session with `credentials`: an
+    /// `Authorize` (§3.13.5 point 1.b, p.90; §5.3.4, p.121) goes to the outbox,
+    /// and its answer is gathered under the id returned - `Ok` when the server
+    /// accepted (`AuthorizeResponse`, §5.3.7, p.123), [`ClientError::AuthorizationNeeded`]
+    /// with its challenges when it refused. The session stays open either
+    /// way, until the authorization it holds runs out.
+    ///
+    /// Refused ([`ClientError::Invalid`]) when the session is not open.
+    pub fn reauthorize(&mut self, credentials: &Credentials, now: i64) -> Result<i64, ClientError> {
+        if let Some(why) = &self.lost {
+            return Err(ClientError::Transport(why.clone()));
+        }
+        if self.connection.state() == State::Closed {
+            return Err(ClientError::Closed {
+                reason: "the session is closed".into(),
+            });
+        }
+        let out = self
+            .connection
+            .reauthorize(credentials, now)
+            .map_err(ClientError::Invalid)?;
+        let id = out.header.message_id;
+        self.calls.insert(
+            id,
+            Call {
+                deliveries: Vec::new(),
+                single: true,
+                outcome: None,
+            },
+        );
+        self.outbox.push(Outbound {
+            bytes: out.bytes,
+            request: Some(id),
+        });
         Ok(id)
     }
 
@@ -431,6 +517,15 @@ impl Engine {
         happened
     }
 
+    /// End the call `request` with `outcome`, if it is still waiting.
+    fn finish(&mut self, request: i64, outcome: Result<Vec<Delivery>, ClientError>) {
+        if let Some(call) = self.calls.get_mut(&request)
+            && call.outcome.is_none()
+        {
+            call.outcome = Some(outcome);
+        }
+    }
+
     fn dispatch(&mut self, event: Event) {
         if self.opening.is_none() {
             match event {
@@ -441,6 +536,12 @@ impl Engine {
                     self.opening = Some(Err(ClientError::AuthorizationNeeded { challenges }));
                 }
                 Event::Closed { reason } => self.opening = Some(Err(ClientError::Closed { reason })),
+                // A new session is asked at once, on the same connection: the
+                // opening goes on, and the refusal is said.
+                Event::ResumeRefused(incident) => {
+                    tracing::warn!(target: "retp_client", "the lost session was not given back ({incident}): a new session is opened");
+                    self.resume_refused = Some(incident);
+                }
                 other => self.unsolicited.push_back(other),
             }
             return;
@@ -468,6 +569,22 @@ impl Engine {
                 }
                 _ => self.unsolicited.push_back(Event::TimedOut { request, incident }),
             },
+            // The answer to a renewal: the call that waits for it is over, and
+            // the event is also said to whoever listens to the session.
+            Event::Reauthorized { request } => {
+                self.finish(request, Ok(Vec::new()));
+                self.unsolicited.push_back(Event::Reauthorized { request });
+            }
+            Event::AuthorizationRefused { request, challenges } => {
+                self.finish(
+                    request,
+                    Err(ClientError::AuthorizationNeeded {
+                        challenges: challenges.clone(),
+                    }),
+                );
+                self.unsolicited
+                    .push_back(Event::AuthorizationRefused { request, challenges });
+            }
             Event::AnswerRefused { request, incident } => match self.calls.get_mut(&request) {
                 Some(call) if call.outcome.is_none() => {
                     call.outcome = Some(Err(ClientError::AnswerRefused { request, incident }));

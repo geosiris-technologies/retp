@@ -11,6 +11,12 @@ ignore = [
     # hdf5-metno-derive (HDF5 bindings, behind the optional `hdf5` feature), which has no maintained
     # alternative today. Review when hdf5-metno moves off it.
     { id = "RUSTSEC-2026-0173", reason = "transitive, build-time only, via hdf5-metno-derive; no vulnerability" },
+    # chrono is unmaintained (no vulnerability, no patched version; jiff and time are the advised
+    # alternatives). It comes only through rmcp, the MCP SDK under energyml-mcp, behind the CLI's
+    # optional `mcp` feature: the libraries and the Python wheel do not hold it. rmcp has no release
+    # without it yet (modelcontextprotocol/rust-sdk#1469, #1474). Review when rmcp makes it optional,
+    # or when the MCP server moves to something else.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability; only via rmcp behind the CLI's optional mcp feature" },
 ]
 
 [licenses]

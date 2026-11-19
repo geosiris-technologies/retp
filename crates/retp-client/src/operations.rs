@@ -68,6 +68,20 @@ pub enum Opened {
     /// untouched*, and this one was sent and answered. Losing that
     /// difference would make a store's decision look like a bug of ours.
     Refused(String),
+    /// It answered with a `ProtocolException` other than the two that say
+    /// *no transactions here* ([`Opened::Unsupported`]): `EINVALID_STATE`
+    /// when a transaction is already open in the session, `ENOT_FOUND` for a
+    /// dataspace it does not have, and so on. The code and the words are the
+    /// store's, kept so that a caller can show them - a server that keeps a
+    /// transaction open after a refused commit answers the next
+    /// `StartTransaction` this way, and a caller told only *the store answered
+    /// nothing* cannot tell why.
+    Failed {
+        /// The ETP error code (`ErrorInfo.code`, ETP v1.2 section 24.1).
+        code: i32,
+        /// The store's words, or a sentence saying it gave none.
+        message: String,
+    },
     /// The store has no transactions at all - it answered
     /// `ENOTSUPPORTED` or `EUNSUPPORTED_PROTOCOL`, or, over REST, named the
     /// transaction `null`. Apart from [`Opened::Refused`] because a caller
@@ -746,6 +760,7 @@ pub mod asynchronous {
         };
         let mut answer = None;
         let mut unsupported = None;
+        let mut excepted = None;
         for delivery in client.call(&request).await? {
             if let Body::Message(Message::StartTransactionResponse(r)) = &delivery.body {
                 answer = Some(r.clone());
@@ -755,16 +770,25 @@ pub mod asynchronous {
                     retp_proto::wire::Exception::Single(info) => Some(info),
                     retp_proto::wire::Exception::Map(map) => map.into_values().next(),
                 };
-                if let Some(info) = info
-                    && (info.code == EtpError::ENOTSUPPORTED.code()
-                        || info.code == EtpError::EUNSUPPORTED_PROTOCOL.code())
-                {
-                    unsupported = Some(info.message);
+                if let Some(info) = info {
+                    if info.code == EtpError::ENOTSUPPORTED.code()
+                        || info.code == EtpError::EUNSUPPORTED_PROTOCOL.code()
+                    {
+                        unsupported = Some(info.message);
+                    } else if excepted.is_none() {
+                        excepted = Some((info.code, info.message));
+                    }
                 }
             }
         }
         if let Some(why) = unsupported {
             return Ok(Opened::Unsupported(said_why(&why)));
+        }
+        if let Some((code, message)) = excepted {
+            return Ok(Opened::Failed {
+                code,
+                message: said_why(&message),
+            });
         }
         let Some(answer) = answer else {
             return Ok(Opened::Refused(
@@ -965,8 +989,8 @@ pub fn put_dataspaces<K: Blocking>(
 }
 
 /// One `customData` value of a dataspace, from the text a person types:
-/// `a,b` is a list of strings (OSDU's `owners`, `viewers`, `legaltags`), any
-/// other text one string. The command line and the conformance suite read
+/// `a,b` is a list of strings (OSDU's `owners`, `viewers`, `legaltags`, and on
+/// some deployments `otherRelevantDataCountries`), any other text one string. The command line and the conformance suite read
 /// `KEY=VALUE` through this, so both send the same value for the same text.
 pub fn custom_data_value(value: &str) -> retp_types::datatypes::DataValue {
     use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem};
@@ -978,6 +1002,42 @@ pub fn custom_data_value(value: &str) -> retp_types::datatypes::DataValue {
         DataValueItem::String(value.to_string())
     };
     DataValue { item }
+}
+
+/// One `customData` value that is a list of strings, as given - OSDU's
+/// `owners`, `viewers`, `legaltags` (and `otherRelevantDataCountries` where a
+/// deployment requires it) from a caller that holds them as a list,
+/// with no comma rule: a value that holds a comma stays one value.
+pub fn custom_data_strings(values: &[String]) -> retp_types::datatypes::DataValue {
+    use retp_types::datatypes::{ArrayOfString, DataValue, DataValueItem};
+    DataValue {
+        item: DataValueItem::ArrayOfString(ArrayOfString {
+            values: values.to_vec(),
+        }),
+    }
+}
+
+/// One `customData` value as plain JSON - what a dataspace's custom data
+/// carries: a flag, a number, a string, a list of strings, nothing. The
+/// inverse of [`custom_data_value`] and [`custom_data_strings`], and the one
+/// conversion the REST client and the bridges use. `None` for any other kind
+/// of value, which the caller names rather than drops.
+pub fn custom_data_json(value: &retp_types::datatypes::DataValue) -> Option<serde_json::Value> {
+    use retp_types::datatypes::DataValueItem;
+    use serde_json::Value as Json;
+    Some(match &value.item {
+        DataValueItem::Boolean(b) => Json::Bool(*b),
+        DataValueItem::Int(i) => Json::from(*i),
+        DataValueItem::Long(l) => Json::from(*l),
+        DataValueItem::Float(f) => Json::from(*f),
+        DataValueItem::Double(d) => Json::from(*d),
+        DataValueItem::String(s) => Json::String(s.clone()),
+        DataValueItem::ArrayOfString(a) => {
+            Json::Array(a.values.iter().map(|s| Json::String(s.clone())).collect())
+        }
+        DataValueItem::Null => Json::Null,
+        _ => return None,
+    })
 }
 
 /// [`asynchronous::delete_dataspaces`], on the blocking client.
@@ -1024,14 +1084,16 @@ pub fn get_data_objects<K: Blocking>(
 
 /// The canonical URI of a dataspace given by its path - `demo`,
 /// `carl/teapot` - or `path_or_uri` itself when it is a URI already. An empty
-/// path is the default dataspace, `eml:///`.
+/// path is the default dataspace, `eml:///`. A quote in the path is written
+/// twice (ETP v1.2 section 25.3.10): `EtpUri::dataspace_uri`, the one place
+/// a dataspace URI is spelt.
 pub fn dataspace_uri(path_or_uri: &str) -> String {
     if path_or_uri.starts_with("eml:") {
         path_or_uri.to_string()
     } else if path_or_uri.is_empty() {
         "eml:///".to_string()
     } else {
-        format!("eml:///dataspace('{path_or_uri}')")
+        energyml_core::identifiers::EtpUri::dataspace_uri(Some(path_or_uri))
     }
 }
 

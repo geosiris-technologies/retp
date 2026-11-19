@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 # The MCP tools and their stdio server (feature `mcp`).
-energyml-mcp = { version = "0.3.0", features = ["server"], optional = true }
+energyml-mcp = { version = "0.4.0", features = ["server"], optional = true }
 clap = { version = "4.6", features = ["derive"] }
 # Where the ETP crates' events go: stderr, through a subscriber of a few lines.
 # `tracing-log` also installs the `log` to `tracing` bridge (`try_init`), for
@@ -34,12 +34,15 @@ retp-client = { workspace = true, features = ["live"] }
 retp-catalog = { workspace = true }
 # The shell's line editor (feature `editor`): history, editing, what arrives
 # printed above the prompt.
-rustyline = { version = "18", optional = true }
+rustyline = { version = "19", optional = true }
 retp-types = { workspace = true }
 # The bridge, for `download-epc`: a dataspace packed as an EPC.
 energyml-etp-store = { workspace = true }
-energyml-storage = { version = "0.3.0" }
-energyml-schemas = { version = "0.3.0", features = ["all"] }
+energyml-storage = { version = "0.4.0" }
+energyml-schemas = { version = "0.4.0", features = ["all"] }
+# The registry's type, which `push` holds while it plans (already in the tree
+# through the crates above).
+energyml-core = { workspace = true }
 
 [features]
 default = []

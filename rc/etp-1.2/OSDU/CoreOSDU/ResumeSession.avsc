@@ -1,0 +1,41 @@
+{
+	"type": "record",
+	"namespace": "Energistics.Etp.v12.Protocol.CoreOSDU",
+	"name": "ResumeSession",
+	"protocol": "2400",
+	"messageType": "1",
+	"senderRole": "client",
+	"protocolRoles": "client, server",
+	"multipartFlag": false,
+	"fields": [
+		{
+			"name": "applicationName",
+			"type": "string",
+			"description": "The string by which the client identifies itself, normally a software product or system name. The format is entirely application dependent. Vendors are encouraged to identify their company name as part of this string."
+		},
+		{
+			"name": "applicationVersion",
+			"type": "string",
+			"description": "The version of the application identified in applicationName."
+		},
+		{
+			"name": "clientInstanceId",
+			"type": "Energistics.Etp.v12.Datatypes.Uuid",
+			"description": "A UUID that a client assigns itself to uniquely identify this instance of the client in an ETP session. It must be of the type Uuid. See also, serverInstanceId and sessionId (in theOpenSession message)"
+		},
+		{
+			"name": "currentDateTime",
+			"type": "long",
+			"description": "The current date and time of the endpoint's system clock. When establishing an ETP session, each endpoint indicates its current date and time. The purpose of this field is part of the behavior for eventual consistency between 2 stores. It must be a UTC dateTime value, serialized as a long, using the Avro logical type timestamp-micros (microseconds from the Unix Epoch, 1 January 1970 00:00:00.000000 UTC)."
+		},
+		{
+			"name": "sessionId",
+			"type": "Energistics.Etp.v12.Datatypes.Uuid",
+			"description": "The ID (UUID) of the session to reconnect to. It must be of the type Uuid."
+		}
+	],
+	"fullName": "Energistics.Etp.v12.Protocol.CoreOSDU.ResumeSession",
+	"depends": [
+		"Energistics.Etp.v12.Datatypes.Uuid"
+	]
+}

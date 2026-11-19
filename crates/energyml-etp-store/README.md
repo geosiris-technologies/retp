@@ -3,6 +3,7 @@
 The bridge: an ETP v1.2 dataspace behind energyml-rust's `EnergymlStorage`, so that code which reads a file reads a server.
 
 - Keeps the `energyml` prefix because it implements a trait of energyml-rust.
+- Also writes: `push` sends an EPC package to a dataspace in islands of short transactions, and `push::dry_run` plans it without a session.
 - The only crate of this workspace that knows both ETP and `EnergymlStorage`.
 
 ## Documentation

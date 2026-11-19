@@ -298,7 +298,7 @@ pub struct WebSocketTransport {
 
 impl WebSocketTransport {
     /// Open the WebSocket a [`Handshake`] describes. A message larger than
-    /// the size the handshake announces (see [`announced_message_limit`]) -
+    /// the size the handshake announces (`MaxWebSocketMessagePayloadSize`) -
     /// [`DEFAULT_MAX_WEBSOCKET_MESSAGE`] when it announces none - is refused
     /// by name, before it is buffered.
     pub fn connect(handshake: &Handshake, certificates: CertificateCheck) -> Result<Self, TransportError> {

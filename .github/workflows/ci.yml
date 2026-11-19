@@ -23,7 +23,40 @@ env:
 # weekly canary builds against the main branch of energyml-rust instead.
 
 jobs:
+  # Whether anything but documentation changed. A change of documentation only
+  # (`*.md`, `docs/`, the licence files) skips the Rust jobs: a job skipped by its
+  # `if` reports success, so the checks `main` requires are still met, and the
+  # documentation jobs (`doc`, `links`) and `gitleaks` always run. No Rust test
+  # reads a Markdown file. When the difference cannot be told (a new branch, a
+  # base that is not there), everything runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          RANGE: ${{ github.event_name == 'pull_request' && '...' || '..' }}
+        run: |
+          code=true
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+            && files=$(git diff --name-only "$BASE$RANGE$HEAD"); then
+            echo "$files"
+            if [ -n "$files" ] && ! echo "$files" | grep -qvE '(\.md$|^docs/|^LICENSE$|^NOTICE$|^CITATION\.cff$)'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Rust jobs run: $code"
+
   fmt:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -35,6 +68,8 @@ jobs:
         run: bash scripts/fmt.sh --check
 
   clippy:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -44,13 +79,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # One job per system rather than a matrix: a matrix job skipped by its `if` is
+  # not expanded, and would report one check named `test (${{ matrix.os }})`
+  # instead of the three `test (...)` checks `main` requires.
+  test-ubuntu:
+    name: test (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace -j 4 -- --test-threads=4
+
+  test-macos:
+    name: test (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace -j 4 -- --test-threads=4
+
+  test-windows:
+    name: test (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -64,6 +122,8 @@ jobs:
   # is tested and linted here too: the release archives ship it. So is the live
   # session of the client (feature `live` of retp-client).
   hdf5:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -83,6 +143,8 @@ jobs:
   # shows on a pull request, not when a release is cut. Linux only; the release
   # workflows build every target.
   hdf5-static:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +154,8 @@ jobs:
 
   # The ETP crates that the page uses must keep compiling for wasm.
   wasm:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -108,6 +172,8 @@ jobs:
   # them with the Rust codec. The expected bytes come from a second, independent
   # implementation.
   fastavro:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -130,6 +196,8 @@ jobs:
       - run: cargo test --workspace --test crossaudit --test unions --test json
 
   msrv:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -143,6 +211,8 @@ jobs:
       - run: cargo hack check --workspace --exclude retp-python --rust-version
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

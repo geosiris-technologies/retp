@@ -14,6 +14,8 @@ on:
   pull_request:
     paths:
       - "crates/**"
+      # A README or a design note under crates/ builds no wheel.
+      - "!crates/**/*.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/wheel-smoke.py"
@@ -23,6 +25,8 @@ on:
     # Path filters are not applied to tags: a python-v* tag always runs.
     paths:
       - "crates/**"
+      # A README or a design note under crates/ builds no wheel.
+      - "!crates/**/*.md"
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/wheel-smoke.py"

@@ -264,12 +264,16 @@ retp delete-dataspace wss://etp.example.com/etp demo
 
 An OSDU store asks for `owners`, `viewers` and `legaltags` in the dataspace's
 custom data: `--custom owners=OWNERS --custom viewers=VIEWERS --custom
-legaltags=LEGALTAG`.
+legaltags=LEGALTAG`. Some OSDU deployments also require
+`otherRelevantDataCountries` (a list of country codes): `--custom
+otherRelevantDataCountries=US`.
 
 `push` sends targets before what references them, an object with its arrays in
-one transaction, and stops at a refused island. Arrays travel as many whole
-arrays per `PutDataArrays` as the negotiated message size takes; big ones are
-declared in one message and filled block by block. `--one-by-one` sends each
+one transaction, and stops at a refused island. The islands are numbered from
+1 in what `push` prints (the Python report counts its indexes from 0). Arrays
+travel as many whole arrays per `PutDataArrays` as the negotiated message size
+takes; big ones are declared in one message and filled block by block.
+`--one-by-one` sends each
 array in its own message, for a store that mishandles several in one.
 `--well-known` also sends the official dictionary's property kinds the package
 references without holding.
@@ -291,10 +295,23 @@ retp push wss://etp.example.com/etp model.epc demo --plan --objects 50
 When a push stops on a refusal whose words open-etp-server (the OSDU Reservoir
 DDMS server) is documented to use (`{N} Missing reference(s)`, `{N} Orphan
 reference(s)`, `{N} Missing array(s)`, `{N} Orphan array(s)`, `Missing array
-container(s): ...`), a `cause:` line names it; for a missing reference, `may
-be missing:` lines list the references leaving the island that stopped. Those
-are the client's deduction from what leaves the package: the server names no
-target. Other words get no cause line.
+container(s): ...`), a `cause:` line names it. A server that names the missing
+references (open-etp-server from M27: `{N} Missing reference(s): from
+<type>(<uuid>) to <type>(<uuid>) using <xpath>; ...`, 25 at most, then `(+k
+more)`) gets one `missing (named by the server):` line each. For the count-only
+form, `may be missing:` lines list the references leaving the island that
+stopped: the client's deduction from what leaves the package, which the server
+does not state, and which is wrong when a RESQML 2.0.1 reference names an object
+of the package under `obj_` and the server stores it without. Other words get no
+cause line.
+
+The stop line carries the ETP error code when the store gave one: a transaction
+the store would not open because it answered with an exception reads `stopped
+at island 2: refused (ETP error 8): the transaction would not open: ...`. When
+its commit is refused, the push rolls its own transaction back before it stops
+or splits the island, since some servers (open-etp-server) keep it open and
+would refuse the next one; the library itself never rolls back on a failed
+commit.
 
 A push that stopped can start again, each with its own flag, all off by default:
 
